@@ -117,6 +117,19 @@ class TestPlotter:
         assert ax.get_title() == ""
         plt.close(fig)
 
+    def test_plot_t1_labels_tell_pert_scales_apart(self, tmp_path):
+        """The pert-scale comes from the file's pert_scale key, else a pert_<x> folder."""
+        (tmp_path / "pert_0.025").mkdir()
+        from_path = self._make_t1_npz(tmp_path / "pert_0.025", "t1.npz", cell_size="512", init_state="ms_0")
+        from_key = self._make_t1_npz(tmp_path, "t1_key.npz", cell_size="512", init_state="ms_0")
+        data = dict(np.load(from_key))
+        data["pert_scale"] = np.array(0.1)
+        np.savez(from_key, **data)
+
+        fig, ax = plot_t1([from_path, from_key])
+        assert [line.get_label() for line in ax.get_lines()] == ["NV 512 (pert 0.025)", "NV 512 (pert 0.1)"]
+        plt.close(fig)
+
     def test_plot_t1_legacy_keys_fallback(self, tmp_path):
         """Legacy npz keys (T1_times / T1_range) are used when t1_fit is absent."""
         p1 = self._make_t1_npz(tmp_path, "legacy_times.npz", t1_fit=None, legacy_fit=np.array([5e-4, 6e-4, 7e-4]))

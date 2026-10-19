@@ -669,6 +669,7 @@ def _execute_pipeline(
             calc_method=calc_method,
             order=analyzed,
             init_state=state,
+            pert_scale=pert_eff if pert_eff is not None else np.nan,
             temperatures=valid_temps_arr,
             t1_fit=t1_fit_arr,
             t1_eigenval=t1_eig_arr,
