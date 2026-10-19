@@ -284,6 +284,7 @@ def run_full_pipeline(
     run_name: str | None = None,
     save_plots: bool = True,
     show_plots: bool = False,
+    keep_inconsistent_pairs: bool = False,
 ) -> dict[str, Any]:
     """
     Executes the entire end-to-end pipeline:
@@ -325,6 +326,7 @@ def run_full_pipeline(
             run_name=run_name,
             save_plots=save_plots,
             show_plots=show_plots,
+            keep_inconsistent_pairs=keep_inconsistent_pairs,
         )
     finally:
         if owns_db_logging:
@@ -355,6 +357,7 @@ def _execute_pipeline(
     run_name: str | None = None,
     save_plots: bool = True,
     show_plots: bool = False,
+    keep_inconsistent_pairs: bool = False,
 ) -> dict[str, Any]:
     """Pipeline body of :func:`run_full_pipeline` (DB logging already owned)."""
 
@@ -527,11 +530,14 @@ def _execute_pipeline(
 
     # ── 5. Calculate Spin-Phonon Couplings ───────────────────────────────────
     coupling_path = run_dir / "spin_phonon_coupling.npz"
+    inconsistent_pairs: list[tuple[int, int, float, float]] = []
     if coupling_data is not None:
         coupling_data.save(coupling_path)
         LOGGER.info(f"[2/5] Using provided coupling data -> {coupling_path.name}")
     else:
-        manager = ZFSManager(raw_data=raw_data, spectrum=spectrum)
+        manager = ZFSManager(
+            raw_data=raw_data, spectrum=spectrum, exclude_inconsistent_pairs=not keep_inconsistent_pairs
+        )
         if calc_method:
             manager.calc_method = calc_method
         out_base = str(run_dir / "spin_phonon_coupling")
@@ -551,6 +557,7 @@ def _execute_pipeline(
         else:
             manager.process_first_order_perturbations(output_filename=out_base)
         coupling_data = SpinPhononCouplingData.load(coupling_path)
+        inconsistent_pairs = manager.inconsistent_pairs
         LOGGER.info(f"[2/5] Computed and saved spin-phonon coupling -> {coupling_path.name}")
 
     # ── 6. Transition Rates Calculation ──────────────────────────────────────
@@ -699,6 +706,14 @@ def _execute_pipeline(
             "points": len(valid_temps_arr),
         },
         "init_state": init_states,
+        # Second-order entries failing the linear-response check (run folders, 1-based).
+        "inconsistent_second_order": {
+            "excluded": bool(inconsistent_pairs) and not keep_inconsistent_pairs,
+            "pairs": [
+                {"pair": f"{i + 1}_{j + 1}", "alpha": round(a, 3), "remainder_mhz": round(r, 3)}
+                for i, j, a, r in inconsistent_pairs
+            ],
+        },
     }
 
     info_path = run_dir / "run_info.json"

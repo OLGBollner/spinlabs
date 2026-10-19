@@ -92,6 +92,12 @@ def build_run_parser(parser: argparse.ArgumentParser) -> None:
         "With --query it is rejected when the query matches more than one dataset",
     )
     opt.add_argument("--plot", action="store_true", help="Generate plots inside <run_dir>/figures/")
+    opt.add_argument(
+        "--keep-inconsistent-pairs",
+        action="store_true",
+        help="Keep second-order entries whose ZFS change is mostly a larger copy of the first-order response "
+        "(over-displaced or stale runs); they are excluded and listed by default",
+    )
     add_verbosity_args(opt)
 
     parser.set_defaults(func=_run)
@@ -208,6 +214,7 @@ def _run(args: argparse.Namespace) -> None:
         run_name=args.run_name,
         save_plots=args.plot,
         show_plots=False,
+        keep_inconsistent_pairs=args.keep_inconsistent_pairs,
     )
 
 
@@ -305,4 +312,5 @@ def _run_one_query_dataset(
         run_name=run_name,
         save_plots=args.plot,
         show_plots=False,
+        keep_inconsistent_pairs=args.keep_inconsistent_pairs,
     )

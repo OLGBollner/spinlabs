@@ -53,6 +53,11 @@ def build_coupling_parser(parser: argparse.ArgumentParser) -> None:
         metavar="N",
         help="Also list these modes (1-based, as in the -vv derivative details and POSCAR generator)",
     )
+    opt.add_argument(
+        "--keep-inconsistent-pairs",
+        action="store_true",
+        help="Keep second-order entries failing the linear-response check (excluded and listed by default)",
+    )
     add_verbosity_args(opt)
 
     parser.set_defaults(func=_run_coupling)
@@ -111,7 +116,9 @@ def _run_coupling(args: argparse.Namespace) -> None:
         defect=args.defect,
         cell_size=args.cell_size,
     )
-    manager = ZFSManager(raw_data=raw_data, spectrum=spectrum)
+    manager = ZFSManager(
+        raw_data=raw_data, spectrum=spectrum, exclude_inconsistent_pairs=not args.keep_inconsistent_pairs
+    )
     manager.calc_method = calc_method
 
     if not manager.zfs_tensors:
@@ -160,6 +167,12 @@ def _summary(manager, ph_path, first, second, top: int, modes: list[int]) -> str
         _, *v2 = second
         v2 = [np.asarray(v) / mhz for v in v2]
         lines.append("\nSecond order (MHz/q^2):")
+        bad = manager.inconsistent_pairs
+        action = "kept" if not manager.exclude_inconsistent_pairs else "excluded"
+        lines.append(
+            f"  inconsistent entries {action}: {len(bad)} of {len(manager.zfs_tensors_2d)}"
+            + (" -- " + ", ".join(f"{i + 1}_{j + 1} (alpha={a:.2f})" for i, j, a, _ in bad) if bad else "")
+        )
         for k, v in zip(_V_KEYS, v2):
             total = np.sum(v**2)
             off = total - np.sum(np.diag(v) ** 2)

@@ -15,6 +15,11 @@ from spinlabs.logging_utils import get_logger
 
 LOGGER = get_logger(__name__)
 
+# Healthy second-order entries have alpha ~ 0 (|alpha| < 0.05 for NV_64): the
+# curvature is far below the linear response at the perturbation amplitude.
+# Over-displaced runs give alpha ~ 1 or more.
+INCONSISTENT_ALPHA = 0.5
+
 
 class ZFSManager:
     """
@@ -27,6 +32,7 @@ class ZFSManager:
         self,
         spectrum: Optional[PhononSpectrum] = None,
         raw_data: Optional[RawZFSData] = None,
+        exclude_inconsistent_pairs: bool = True,
     ):
         # spectrum is the primary dataclass
         if spectrum is not None:
@@ -100,6 +106,10 @@ class ZFSManager:
             raw_data.calc_method or raw_data.metadata.get("calc_method") if raw_data else None
         )
         self.mass_weighted: bool = raw_data.mass_weighted if raw_data else True
+        self.exclude_inconsistent_pairs = exclude_inconsistent_pairs
+        # Second-order entries failing the linear-response check, as
+        # (i, j, alpha, |remainder| in MHz) with 0-based modes; see calculate_second_order_derivatives.
+        self.inconsistent_pairs: list[tuple[int, int, float, float]] = []
         if not self.mass_weighted:
             if spectrum is None:
                 raise ValueError(
@@ -445,6 +455,24 @@ class ZFSManager:
             D_qi_qj = item["tensor"]
             d2D_dqidqj = (D_qi_qj - self.zfs_relaxed) / (q_i * q_j) - dD_qi / q_j - dD_qj / q_i
 
+            # The pair displaces Q_i + Q_j, so its ZFS change is the first-order
+            # response dD_i q_i + dD_j q_j plus a small remainder (the curvature).
+            # A remainder that is mostly a larger copy of that linear response
+            # (alpha > INCONSISTENT_ALPHA) means the run was displaced too far or
+            # its result is stale; its "curvature" is not physical.
+            if i in self.treated_modes and j in self.treated_modes:
+                linear = dD_qi * q_i + dD_qj * q_j
+                remainder = (D_qi_qj - self.zfs_relaxed) - linear
+                norm = np.sum(linear * linear)
+                if norm > (0.05 * CONSTANTS["MHz2J"]) ** 2:
+                    alpha = float(np.sum(remainder * linear) / norm)
+                    if alpha > INCONSISTENT_ALPHA:
+                        self.inconsistent_pairs.append(
+                            (i, j, alpha, float(np.linalg.norm(remainder) / CONSTANTS["MHz2J"]))
+                        )
+                        if self.exclude_inconsistent_pairs:
+                            continue
+
             self._check_symmetry(d2D_dqidqj, (sym_i, sym_j), (i, j))
 
             zfs_2nd_derivs[i, j] = d2D_dqidqj
@@ -497,6 +525,15 @@ class ZFSManager:
                     V_0_pm_2nd[i, j] / CONSTANTS["MHz2J"],
                     V_p_m_2nd[i, j] / CONSTANTS["MHz2J"],
                 )
+
+        if self.inconsistent_pairs:
+            action = "Excluded" if self.exclude_inconsistent_pairs else "Kept (--keep-inconsistent-pairs)"
+            LOGGER.warning(
+                f"{action} {len(self.inconsistent_pairs)} of {len(self.zfs_tensors_2d)} second-order entries "
+                f"whose ZFS change is mostly a larger copy of the first-order response (alpha > "
+                f"{INCONSISTENT_ALPHA}: over-displaced or stale runs). Run folders (1-based): "
+                + ", ".join(f"{i + 1}_{j + 1} (alpha={a:.2f})" for i, j, a, _ in self.inconsistent_pairs)
+            )
 
         LOGGER.info("Symmetry adjusted coefficients (2nd order):")
         LOGGER.info(f"V_00:  {np.sum(V_0_0_2nd > 0)}")
