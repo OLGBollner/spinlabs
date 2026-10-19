@@ -5,6 +5,7 @@ from itertools import product
 from pathlib import Path
 
 from spinlabs.cli import add_verbosity_args
+from spinlabs.cli.coupling import build_coupling_parser
 from spinlabs.models import normalize_calc_method
 from spinlabs.pipeline import run_full_pipeline
 from spinlabs.registry import ensure_db, parse_orders
@@ -93,6 +94,15 @@ def build_run_parser(parser: argparse.ArgumentParser) -> None:
     add_verbosity_args(opt)
 
     parser.set_defaults(func=_run)
+
+    # Optional stage subcommands; plain `spinlabs run ...` is the full pipeline.
+    stages = parser.add_subparsers(dest="stage", metavar="STAGE", title="stages (optional)")
+    build_coupling_parser(
+        stages.add_parser(
+            "coupling",
+            help="Only compute the spin-phonon couplings (ZFSManager) and print a summary; nothing is saved",
+        )
+    )
 
 
 _METHOD_MAP = {"all": ("all_bands", "ZFS_hyp"), "approx": ("defect_band_approx", "ZFS_occup")}

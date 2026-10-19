@@ -164,6 +164,102 @@ def _check_requested_orders(user_orders: Sequence[int], *, has_1d: bool | None, 
             )
 
 
+def load_raw_inputs(
+    *,
+    sim_folder: str | Path | Sequence[str | Path] | None = None,
+    raw_zfs_file: str | Path | Sequence[str | Path] | None = None,
+    raw_zfs_file_1d: str | Path | None = None,
+    raw_zfs_file_2d: str | Path | None = None,
+    phonon_file: str | Path | None = None,
+    calc_method: str = "all_bands",
+    zfs_folder: str | None = None,
+    order: int | None = None,
+    pert_scale: float | None = None,
+    defect: str | None = None,
+    cell_size: int | None = None,
+) -> tuple[RawZFSData, PhononSpectrum | None, Path | None]:
+    """Raw ZFS data and phonon spectrum for an analysis, loaded as ``spinlabs run`` does.
+
+    Exactly one ZFS source is used: simulation folder(s), one raw .npz, or a
+    1d + 2d pair. The phonon file is ``phonon_file``, else one found next to
+    the inputs, else the registry's match for the defect and cell. Returns
+    ``(raw_data, spectrum, phonon_path)``; the spectrum is None without phonons.
+    """
+    combine_orders = raw_zfs_file_1d is not None and raw_zfs_file_2d is not None
+    spectrum: PhononSpectrum | None = None
+    # Load phonons
+    sim_p = sim_folder[0] if isinstance(sim_folder, (list, tuple)) else sim_folder
+    ph_from_sim = find_default_phonon_file(Path(sim_p)) if sim_p else None
+    ph_from_raw = find_default_phonon_file_for_raw(raw_zfs_file) if raw_zfs_file is not None else None
+    ph_path = Path(phonon_file) if phonon_file else (ph_from_sim or ph_from_raw)
+    if ph_path is not None and ph_path.exists():
+        spectrum = parse_phonon_data(ph_path)
+    elif phonon_file is not None:
+        raise FileNotFoundError(f"Phonon file not found: {phonon_file}")
+    elif ph_path is not None and not ph_path.exists():
+        LOGGER.warning(f"Phonon file {ph_path} not found, running without phonon data.")
+
+    # Load raw ZFS
+    if sim_folder is not None:
+        if isinstance(sim_folder, (list, tuple)) and len(sim_folder) > 1:
+            datasets = []
+            for sf in sim_folder:
+                ds = parse_zfs_simulation_dataset(
+                    sim_folder=sf,
+                    calc_method=calc_method,
+                    zfs_folder=zfs_folder,
+                    pert_scale=pert_scale,
+                    defect=defect,
+                    cell_size=cell_size,
+                )
+                datasets.append(ds)
+
+            raw_data = datasets[0]
+            for other_ds in datasets[1:]:
+                raw_data = raw_data.combine(other_ds)
+        else:
+            sf = sim_folder[0] if isinstance(sim_folder, (list, tuple)) else sim_folder
+            raw_data = parse_zfs_simulation_dataset(
+                sim_folder=sf,
+                calc_method=calc_method,
+                zfs_folder=zfs_folder,
+                order=order,
+                pert_scale=pert_scale,
+                defect=defect,
+                cell_size=cell_size,
+            )
+    elif combine_orders:
+        # Combine 1d + 2d raw datasets into one RawZFSData with both
+        # first_order and second_order perturbation sets.
+        raw_data = RawZFSData.load([str(raw_zfs_file_1d), str(raw_zfs_file_2d)])
+    elif raw_zfs_file is not None:
+        raw_data = parse_zfs_dataset_npz(raw_zfs_file)
+    else:
+        raise ValueError("Must provide either sim_folder, raw_zfs_file, raw_zfs_file_1d+2d, or coupling_file.")
+
+    defect = raw_data.defect or defect or "defect"
+    cell_size = raw_data.cell_size or cell_size or 0
+
+    # Registry fallback: resolve phonon by defect/cell when no file found next to the inputs
+    if spectrum is None:
+        reg = ensure_db()
+        reg_hits = find_phonon(reg, str(defect), cell_size)
+        if len(reg_hits) == 1:
+            ph_path = reg_hits[0]
+            spectrum = parse_phonon_data(ph_path)
+            LOGGER.info(f"  Registry: using phonon file {ph_path} for {defect}_{cell_size}")
+        elif len(reg_hits) > 1:
+            LOGGER.debug(
+                f"  Registry: {len(reg_hits)} phonon files match {defect}_{cell_size}; "
+                "pass --phonon-file to pick one. First match used: "
+                f"{reg_hits[0]}"
+            )
+            ph_path = reg_hits[0]
+            spectrum = parse_phonon_data(ph_path)
+
+    return raw_data, spectrum, ph_path
+
+
 def run_full_pipeline(
     *,
     sim_folder: str | Path | Sequence[str | Path] | None = None,
@@ -316,76 +412,23 @@ def _execute_pipeline(
         else:
             analyzed = list(dims)
     else:
-        # Load phonons
-        sim_p = sim_folder[0] if isinstance(sim_folder, (list, tuple)) else sim_folder
-        ph_from_sim = find_default_phonon_file(Path(sim_p)) if sim_p else None
-        ph_from_raw = find_default_phonon_file_for_raw(raw_zfs_file) if raw_zfs_file is not None else None
-        ph_path = Path(phonon_file) if phonon_file else (ph_from_sim or ph_from_raw)
-        if ph_path is not None and ph_path.exists():
-            spectrum = parse_phonon_data(ph_path)
-        elif phonon_file is not None:
-            raise FileNotFoundError(f"Phonon file not found: {phonon_file}")
-        elif ph_path is not None and not ph_path.exists():
-            LOGGER.warning(f"Phonon file {ph_path} not found, running without phonon data.")
-
-        # Load raw ZFS
-        if sim_folder is not None:
-            if isinstance(sim_folder, (list, tuple)) and len(sim_folder) > 1:
-                datasets = []
-                for sf in sim_folder:
-                    ds = parse_zfs_simulation_dataset(
-                        sim_folder=sf,
-                        calc_method=calc_method,
-                        zfs_folder=zfs_folder,
-                        pert_scale=pert_scale,
-                        defect=defect,
-                        cell_size=cell_size,
-                    )
-                    datasets.append(ds)
-
-                raw_data = datasets[0]
-                for other_ds in datasets[1:]:
-                    raw_data = raw_data.combine(other_ds)
-            else:
-                sf = sim_folder[0] if isinstance(sim_folder, (list, tuple)) else sim_folder
-                raw_data = parse_zfs_simulation_dataset(
-                    sim_folder=sf,
-                    calc_method=calc_method,
-                    zfs_folder=zfs_folder,
-                    order=order,
-                    pert_scale=pert_scale,
-                    defect=defect,
-                    cell_size=cell_size,
-                )
-        elif combine_orders:
-            # Combine 1d + 2d raw datasets into one RawZFSData with both
-            # first_order and second_order perturbation sets.
-            raw_data = RawZFSData.load([str(raw_zfs_file_1d), str(raw_zfs_file_2d)])
+        raw_data, spectrum, ph_path = load_raw_inputs(
+            sim_folder=sim_folder,
+            raw_zfs_file=raw_zfs_file,
+            raw_zfs_file_1d=raw_zfs_file_1d,
+            raw_zfs_file_2d=raw_zfs_file_2d,
+            phonon_file=phonon_file,
+            calc_method=calc_method,
+            zfs_folder=zfs_folder,
+            order=order,
+            pert_scale=pert_scale,
+            defect=defect,
+            cell_size=cell_size,
+        )
+        if combine_orders:
             order = 2  # both orders present; run combined analysis
-        elif raw_zfs_file is not None:
-            raw_data = parse_zfs_dataset_npz(raw_zfs_file)
-        else:
-            raise ValueError("Must provide either sim_folder, raw_zfs_file, raw_zfs_file_1d+2d, or coupling_file.")
-
         defect = raw_data.defect or defect or "defect"
         cell_size = raw_data.cell_size or cell_size or 0
-
-        # Registry fallback: resolve phonon by defect/cell when no file found next to the inputs
-        if spectrum is None:
-            reg = ensure_db()
-            reg_hits = find_phonon(reg, str(defect), cell_size)
-            if len(reg_hits) == 1:
-                ph_path = reg_hits[0]
-                spectrum = parse_phonon_data(ph_path)
-                LOGGER.info(f"  Registry: using phonon file {ph_path} for {defect}_{cell_size}")
-            elif len(reg_hits) > 1:
-                LOGGER.debug(
-                    f"  Registry: {len(reg_hits)} phonon files match {defect}_{cell_size}; "
-                    "pass --phonon-file to pick one. First match used: "
-                    f"{reg_hits[0]}"
-                )
-                ph_path = reg_hits[0]
-                spectrum = parse_phonon_data(ph_path)
 
         # Resolve calc_method (avoid string "None")
         if calc_method in (None, "None", ""):
