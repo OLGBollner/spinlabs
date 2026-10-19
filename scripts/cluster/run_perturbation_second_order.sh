@@ -64,6 +64,71 @@ echo $NJOBS
 
 set -eu
 
+# ---- run-directory lock ----
+# Two arrays submitted on the same tree used to work in the same run directories at once:
+# both copied input/ and perturbed POSCAR (2x-9x displacements in NV_64), and two VASP
+# processes wrote one OUTCAR. A task now works only in a run directory it has locked
+# (mkdir is atomic, also on Lustre). A lock whose job is no longer in squeue is stale and
+# is taken over; if squeue cannot be asked, remove <run dir>/.lock by hand once no job
+# runs there.
+JOB_TAG=${SLURM_ARRAY_JOB_ID:+${SLURM_ARRAY_JOB_ID}_${SLURM_ARRAY_TASK_ID:-}}
+JOB_TAG=${JOB_TAG:-${SLURM_JOB_ID:-local-$$}}
+HELD_LOCK=""
+
+write_lock_owner() {
+  printf 'job=%s\nhost=%s\nsince=%s\n' "$JOB_TAG" "$(hostname)" "$(date '+%Y-%m-%d %H:%M:%S')" > "$1/owner"
+}
+
+# acquire_lock DIR: 0 = this task now holds DIR's lock, 1 = another job holds it (skip DIR).
+acquire_lock() {
+  lock="$HEAD_DIR/$1/.lock"
+  mkdir -p "$HEAD_DIR/$1"
+  if mkdir "$lock" 2>/dev/null; then
+    write_lock_owner "$lock"
+    HELD_LOCK=$lock
+    return 0
+  fi
+  owner_job=$(sed -n 's/^job=//p' "$lock/owner" 2>/dev/null || true)
+  owner_info=$(tr '\n' ' ' < "$lock/owner" 2>/dev/null || true)
+  if [ -z "$owner_job" ]; then
+    echo "$ID: skipping $1 -- locked, owner not recorded yet (remove $lock if no job runs there)"
+    return 1
+  fi
+  if ! jobs_now=$(squeue -h -u "$(id -un)" -o %i 2>/dev/null); then
+    echo "$ID: skipping $1 -- locked by $owner_info and squeue is unavailable (remove $lock if no job runs there)"
+    return 1
+  fi
+  if printf '%s\n' "$jobs_now" | grep -qx "$owner_job"; then
+    echo "$ID: skipping $1 -- locked by running job: $owner_info"
+    return 1
+  fi
+  # Stale: rename it first, so two tasks finding the same stale lock cannot both take it.
+  stale="$lock.stale.$JOB_TAG.$$"
+  if mv "$lock" "$stale" 2>/dev/null && mkdir "$lock" 2>/dev/null; then
+    rm -rf "$stale"
+    write_lock_owner "$lock"
+    HELD_LOCK=$lock
+    echo "$ID: took over stale lock on $1 (was: $owner_info)"
+    return 0
+  fi
+  rm -rf "$stale" 2>/dev/null || true
+  echo "$ID: skipping $1 -- another task took over its stale lock"
+  return 1
+}
+
+release_lock() {
+  if [ -n "$HELD_LOCK" ]; then
+    rm -rf "$HELD_LOCK"
+    HELD_LOCK=""
+  fi
+}
+
+# A cancelled task (SLURM sends TERM before KILL) frees its lock; a KILL leaves it stale.
+trap 'release_lock' EXIT
+trap 'release_lock; exit 143' TERM
+trap 'release_lock; exit 130' INT
+# ---- end lock ----
+
 mkdir -p runs
 
 PAIR_ID=0
@@ -83,7 +148,14 @@ for i in $MODES; do
         PAIR_ID=$((PAIR_ID + 1))
         continue
       fi
-      mkdir -p $TARGET_DIR
+      acquire_lock "$TARGET_DIR" || { PAIR_ID=$((PAIR_ID + 1)); continue; }
+      # Another job may have finished this directory before the lock was ours.
+      if [ -f "$TARGET_DIR"/OUTCAR ] && grep -qzP "$ZFS_REGEX_PATTERN" "$TARGET_DIR"/OUTCAR; then
+        echo "$ID: skipping $i, $j (finished by another job)"
+        release_lock
+        PAIR_ID=$((PAIR_ID + 1))
+        continue
+      fi
       cp "$INPUT_DIR"/* "$TARGET_DIR"/
       cd "$TARGET_DIR"
       echo "$ID: starting job for pair $i, $j"
@@ -109,6 +181,7 @@ for i in $MODES; do
         echo "$ID: pair $i, $j did not finish -- keeping CHGCAR/CHG so it can resume"
       fi
       cd "$HEAD_DIR"
+      release_lock
     fi
     PAIR_ID=$((PAIR_ID + 1))
   done
