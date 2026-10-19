@@ -188,7 +188,9 @@ def save_npz(
     if extras:
         payload.update(extras)
 
-    np.savez(path, **payload)
+    # Compressed: the dense N x N second-order coupling arrays are mostly zeros
+    # (NV_512: 226 MB -> 0.4 MB). np.load reads compressed and plain files alike.
+    np.savez_compressed(path, **payload)
     return path
 
 
