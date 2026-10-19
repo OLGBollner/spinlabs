@@ -226,7 +226,7 @@ def _scan_raw(args: argparse.Namespace, defect_folder: Path, methods: list[str])
                     sim_folder=datasets[o][pert_scale], order=_ORDER_NUM[o], calc_method=method, verbose=True
                 )
                 raw = data if raw is None else raw.combine(data)
-            if raw is None:
+            if raw is None or not (raw.first_order or raw.second_order):
                 warnings.warn(f"No data parsed for {defect_folder.name} ({calc_method}, pert {pert_scale:g}); skipping")
                 continue
             found.append(_Scanned(defect, cell_size, calc_method, pert_scale, raw))

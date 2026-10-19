@@ -333,3 +333,13 @@ def test_pipeline_registers_one_run_for_all_init_states(tmp_path, dummy_coupling
     assert rows == [('["ms_0", "ms_-1"]', str(Path(res["run_dir"]).resolve()))]
     # The state filter matches any state the run solved.
     assert registry.find_runs(registry.ensure_db(), [("init_state", "ms_-1")]) == [Path(rows[0][1])]
+
+
+def test_input_without_perturbation_tensors_fails_before_creating_a_run(tmp_path):
+    raw = RawZFSData(defect="NV", cell_size=512, pert_scale=0.05, calc_method="all_bands", order=1,
+                     ground_state_zfs=ZFSTensor(matrix=np.diag([-1000.0, -1000.0, 2000.0]), unit="MHz"))
+    raw_file = raw.save(tmp_path / "NV_512_raw_zfs_data_all_bands_1d.npz")
+
+    with pytest.raises(ValueError, match="No perturbation tensors"):
+        run_full_pipeline(raw_zfs_file=raw_file, output_root=tmp_path / "runs", save_plots=False)
+    assert not (tmp_path / "runs").exists()

@@ -255,31 +255,54 @@ def _run_query(args: argparse.Namespace) -> None:
     # With multiple matched datasets, disambiguate the run-name so each
     # dataset lands in its own <run_name>_<stem> directory instead of
     # silently sharing/creating duplicate <run_name>_1, _2, ... folders.
-    for path, defect, cell_size, pert_scale in files:
-        LOGGER.info(f"Running: {path}")
+    failed: list[tuple[Path, Exception]] = []
+    for n, (path, defect, cell_size, pert_scale) in enumerate(files, start=1):
+        # Shown without -v, so warnings and errors below can be traced to their dataset.
+        print(f"[{n}/{len(files)}] {path}", flush=True)
         method = _infer_method_from_file(Path(path))
         if args.run_name and len(files) > 1:
             run_name = f"{args.run_name}_{Path(path).stem}"
         else:
             run_name = args.run_name
-        run_full_pipeline(
-            raw_zfs_file=str(path),
-            phonon_file=args.phonon_file,
-            two_phonon_file=args.two_phonon,
-            calc_method=_METHOD_MAP[method][0],
-            zfs_folder=_METHOD_MAP[method][1],
-            order=parse_orders(args.order) if args.order else None,
-            pert_scale=pert_scale,
-            defect=defect,
-            cell_size=cell_size,
-            t_start=args.t_start,
-            t_end=args.t_end,
-            t_step=args.t_step,
-            temperatures=args.temperatures,
-            init_state=args.init_state,
-            output_root=args.output_root if args.output_root else "runs",
-            run_name=run_name,
-            save_plots=args.plot,
-            show_plots=False,
+        try:
+            _run_one_query_dataset(args, path, method, pert_scale, defect, cell_size, run_name)
+        except Exception as error:  # one bad dataset must not stop the rest of the query
+            LOGGER.error(f"Failed: {path}: {error}")
+            failed.append((Path(path), error))
+    print(f"Done: {len(files) - len(failed)} of {len(files)} dataset(s) analyzed.")
+    if failed:
+        raise SystemExit(
+            f"{len(failed)} dataset(s) failed:\n" + "\n".join(f"  {path}: {error}" for path, error in failed)
         )
-    LOGGER.info(f"Done: {len(files)} dataset(s).")
+
+
+def _run_one_query_dataset(
+    args: argparse.Namespace,
+    path: Path,
+    method: str,
+    pert_scale: float | None,
+    defect: str | None,
+    cell_size: int | None,
+    run_name: str | None,
+) -> None:
+    """Run the pipeline on one packaged dataset with the query's options."""
+    run_full_pipeline(
+        raw_zfs_file=str(path),
+        phonon_file=args.phonon_file,
+        two_phonon_file=args.two_phonon,
+        calc_method=_METHOD_MAP[method][0],
+        zfs_folder=_METHOD_MAP[method][1],
+        order=parse_orders(args.order) if args.order else None,
+        pert_scale=pert_scale,
+        defect=defect,
+        cell_size=cell_size,
+        t_start=args.t_start,
+        t_end=args.t_end,
+        t_step=args.t_step,
+        temperatures=args.temperatures,
+        init_state=args.init_state,
+        output_root=args.output_root if args.output_root else "runs",
+        run_name=run_name,
+        save_plots=args.plot,
+        show_plots=False,
+    )

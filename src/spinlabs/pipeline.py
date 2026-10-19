@@ -427,6 +427,8 @@ def _execute_pipeline(
         )
         if combine_orders:
             order = 2  # both orders present; run combined analysis
+        if not (raw_data.first_order or raw_data.second_order):
+            raise ValueError(f"No perturbation tensors in the input ({raw_zfs_file or sim_folder}); nothing to analyze")
         defect = raw_data.defect or defect or "defect"
         cell_size = raw_data.cell_size or cell_size or 0
 

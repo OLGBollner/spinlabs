@@ -1,9 +1,10 @@
+import warnings
 from pathlib import Path
 
 import numpy as np
 import scipy.constants as Cn
 from scipy.integrate import odeint
-from scipy.optimize import curve_fit
+from scipy.optimize import OptimizeWarning, curve_fit
 from spinlabs.logging_utils import get_logger
 
 LOGGER = get_logger(__name__)
@@ -91,7 +92,11 @@ class RelaxationDynamics:
         initial_guess = [T1_eigenval, steady_state, a_init]
 
         try:
-            popt, _ = curve_fit(exp_func, time_points, population, p0=initial_guess, maxfev=5000)
+            with warnings.catch_warnings(), np.errstate(over="ignore"):
+                # Only the fitted T1 is used, not its covariance; trial parameters
+                # may overflow exp, and the result is checked below.
+                warnings.simplefilter("ignore", OptimizeWarning)
+                popt, _ = curve_fit(exp_func, time_points, population, p0=initial_guess, maxfev=5000)
             extracted_T1 = float(popt[0])
             if not np.isfinite(extracted_T1) or extracted_T1 <= 0:
                 return T1_eigenval
@@ -152,7 +157,7 @@ class RelaxationDynamics:
     def get_time_estimate(self, T=None, temp_index=None):
         T1_eigenval, _, _ = self.get_T1_eigenval(T=T, temp_index=temp_index)
         T = T if T else self.temperatures[temp_index]
-        if not np.isfinite(1 / T):
+        if T == 0 or not np.isfinite(T):  # no 1/T time scale at 0 K
             return None
 
         t_end = float(np.real(10 * T1_eigenval + 1 / T))

@@ -471,3 +471,12 @@ def test_no_mass_weighted_flag_is_stored(tmp_path, monkeypatch, no_mass_weighted
     (path,) = (tmp_path / "data").rglob("*.npz")
     assert RawZFSData.load(path).mass_weighted is (not no_mass_weighted)
 
+
+def test_empty_datasets_are_not_saved(tmp_path, monkeypatch):
+    """A pert folder without OUTCARs parses to no tensors; it is skipped, not saved empty."""
+    _tree(tmp_path)
+    _registry(monkeypatch, tmp_path)
+    empty = RawZFSData(defect="NV", cell_size=512, pert_scale=0.025, calc_method="all_bands", order=1)
+    with _patch(lambda **kw: empty), pytest.warns(UserWarning, match="No data parsed"):
+        _run(_make_args(tmp_path))
+    assert not list((tmp_path / "data").rglob("*.npz"))
