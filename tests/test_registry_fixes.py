@@ -61,6 +61,35 @@ def test_find_packaged_filters_by_calc_method(tmp_path):
     assert [p.name for p in hits] == [f_all.name]
 
 
+def test_find_packaged_latest_keeps_newest_package_per_configuration(tmp_path):
+    conn = ensure_db()
+    old, new = tmp_path / "20261015", tmp_path / "20261016"
+    old.mkdir(), new.mkdir()
+    name = "NV_512_raw_zfs_data_all_bands_12d.npz"
+    _register(conn, old / name, orders=[1, 2])
+    _register(conn, new / name, orders=[1, 2])
+    other = tmp_path / "NV_512_raw_zfs_data_all_bands_12d_pert01.npz"
+    _register(conn, other, orders=[1, 2], pert=0.1)  # another configuration
+
+    assert set(find_packaged(conn, latest=True)) == {new / name, other}
+    # Re-registering the old package (e.g. package --register-only) does not make it newest.
+    _register(conn, old / name, orders=[1, 2])
+    assert set(find_packaged(conn, latest=True)) == {new / name, other}
+    assert len(find_packaged(conn)) == 3
+
+
+def test_find_packaged_returns_already_analyzed_data(tmp_path):
+    from spinlabs.registry import finish_run, register_run
+
+    conn = ensure_db()
+    path = tmp_path / "NV_512_raw_zfs_data_all_bands_12d.npz"
+    _register(conn, path, orders=[1, 2])
+    run_id = register_run(conn, run_dir=tmp_path / "run", zfs_files=[str(path.resolve())], method="all_bands")
+    finish_run(conn, run_id, "done")
+
+    assert find_packaged(conn, latest=True) == [path]
+
+
 def test_run_query_normalizes_method(tmp_path, monkeypatch):
     """`spinlabs run --query --method all` must query calc_method='all_bands'."""
     from spinlabs.cli import run as run_mod

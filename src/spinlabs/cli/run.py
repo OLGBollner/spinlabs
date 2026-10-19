@@ -28,8 +28,9 @@ def build_run_parser(parser: argparse.ArgumentParser) -> None:
     inputs.add_argument(
         "--query",
         action="store_true",
-        help="Run every packaged dataset in the registry matching the filters "
-        "(--defect/--cell-size/--method/--order/--pert-scale); files already analyzed are skipped. "
+        help="Run the newest packaged dataset of every configuration in the registry matching the filters "
+        "(--defect/--cell-size/--method/--order/--pert-scale). Analyzed data is run again into a new "
+        "run folder; plot/table with --latest to use the newest. "
         "All other run options (temperatures, --init-state, --plot, ...) apply to each dataset",
     )
 
@@ -214,6 +215,10 @@ def _run_query(args: argparse.Namespace) -> None:
     """
     Resolve packaged data from the registry and run each dataset.
 
+    Each configuration runs on its newest package, even when it was analyzed
+    before: every run gets a new timestamped folder, and ``--latest`` picks
+    the newest when plotting or tabulating.
+
     Every option accepted by ``run`` is forwarded to the pipeline exactly as in the
     non-query path, so ``--query`` never silently computes something other than what
     was asked for. ``--defect``/``--cell-size``/``--method``/``--order``/``--pert-scale``
@@ -238,13 +243,14 @@ def _run_query(args: argparse.Namespace) -> None:
             calc_method=normalize_calc_method(method),
             pert_scale=pert_scale,
             pert_order=parse_orders(args.order) if args.order else None,
+            latest=True,
         )
         for path in matched:
             if path not in seen:
                 seen.add(path)
                 files.append((path, defect, cell_size, pert_scale))
     if not files:
-        LOGGER.warning("No unanalyzed packaged data matching the query.")
+        LOGGER.warning("No packaged data matching the query.")
         return
     # With multiple matched datasets, disambiguate the run-name so each
     # dataset lands in its own <run_name>_<stem> directory instead of

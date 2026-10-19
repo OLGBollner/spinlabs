@@ -112,7 +112,6 @@ def _run_defects(args: argparse.Namespace) -> None:
                 defect=defect,
                 cell_size=cell,
                 calc_method=_METHODS.get(method),
-                exclude_run=False,
             ):
                 if path not in sources:
                     sources.append(path)

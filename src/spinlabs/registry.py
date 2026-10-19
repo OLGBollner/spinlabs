@@ -328,15 +328,19 @@ def find_packaged(
     calc_method: str | None = None,
     pert_scale: float | None = None,
     pert_order: list[int] | int | None = None,
-    exclude_run: bool = True,
+    latest: bool = False,
 ) -> list[Path]:
     """Packaged ZFS files matching the filters.
 
-    With ``exclude_run`` (default) files that already have a successful run
-    registered against them are skipped, so repeated query runs pick up only
-    new data.
+    With ``latest`` only the newest package of each configuration (defect,
+    cell, method, pert-scale, orders) is kept, so repackaged data replaces
+    older versions. Newest is the latest first registration (highest id):
+    re-registering a file keeps its id but rewrites ``registered_at``.
     """
-    sql = "SELECT path, pert_order FROM files WHERE kind = 'packaged_zfs'"
+    sql = (
+        "SELECT path, pert_order, defect, cell_size, calc_method, pert_scale FROM files"
+        " WHERE kind = 'packaged_zfs'"
+    )
     params: list[object] = []
     if defect is not None:
         sql += " AND defect = ?"
@@ -352,14 +356,11 @@ def find_packaged(
         params.append(pert_scale)
     if pert_order is not None:
         wanted = set(parse_orders(pert_order))
-    if exclude_run:
-        sql += """ AND NOT EXISTS (
-            SELECT 1 FROM runs, json_each(COALESCE(runs.zfs_files, '[]')) AS j
-            WHERE runs.status = 'done' AND j.value = files.path
-        )"""
+    sql += " ORDER BY id"
     cur = conn.execute(sql, params)  # type: ignore[arg-type]
     results = []
-    for (p_, stored,) in cur.fetchall():
+    newest: dict[tuple, Path] = {}
+    for p_, stored, *config in cur.fetchall():
         if pert_order is not None:
             # Exact set membership on the stored JSON list, not substring matching.
             try:
@@ -368,9 +369,15 @@ def find_packaged(
                 stored_orders = set()
             if not wanted.issubset(stored_orders):
                 continue
-        if Path(p_).exists():
+        if not Path(p_).exists():
+            continue
+        if latest:
+            # Rows are oldest first; a later package of the same configuration replaces it.
+            newest.pop((*config, stored), None)
+            newest[(*config, stored)] = Path(p_)
+        else:
             results.append(Path(p_))
-    return results
+    return list(newest.values()) if latest else results
 
 
 def find_runs(
