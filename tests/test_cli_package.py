@@ -458,3 +458,16 @@ def test_register_only_registers_packaged_phonon(tmp_path, monkeypatch):
     _register_only(tmp_path / "data")
     row = sqlite3.connect(db).execute("SELECT kind, defect, cell_size FROM files").fetchone()
     assert row == ("phonon", "ClV", 128)
+
+
+@pytest.mark.parametrize("no_mass_weighted", [False, True])
+def test_no_mass_weighted_flag_is_stored(tmp_path, monkeypatch, no_mass_weighted):
+    _tree(tmp_path)
+    _registry(monkeypatch, tmp_path)
+    args = _make_args(tmp_path)
+    args.no_mass_weighted = no_mass_weighted
+    with _patch(lambda **kw: _raw(order=kw["order"])):
+        _run(args)
+    (path,) = (tmp_path / "data").rglob("*.npz")
+    assert RawZFSData.load(path).mass_weighted is (not no_mass_weighted)
+

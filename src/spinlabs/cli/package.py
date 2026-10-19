@@ -83,6 +83,12 @@ def build_package_parser(parser: argparse.ArgumentParser) -> None:
         help="ZFS calculation method(s) to package: all or approx (default: all).",
     )
     parser.add_argument(
+        "--no-mass-weighted",
+        action="store_true",
+        help="The perturbed structures were displaced by Q*e instead of Q*e/sqrt(m) (runs made before mass "
+        "weighting was added). Stored as mass_weighted=False; the analysis then corrects the amplitudes.",
+    )
+    parser.add_argument(
         "--output-root",
         type=Path,
         default=Path("data"),
@@ -139,12 +145,14 @@ def _run(args: argparse.Namespace) -> None:
         if found and phonon is not None:
             phonons[(found[0].defect, found[0].cell_size)] = phonon
     _print_scan_summary(scanned, phonons)
+    if getattr(args, "no_mass_weighted", False) and scanned:
+        print("Perturbations marked as NOT mass-weighted (--no-mass-weighted).\n")
     if args.scan or not scanned:
         return
     if not getattr(args, "yes", False) and not _confirm("Save the perturbation data to file? (Y/n): "):
         print("Nothing saved.")
         return
-    _save_raw(scanned, args.output_root)
+    _save_raw(scanned, args.output_root, mass_weighted=not getattr(args, "no_mass_weighted", False))
     _save_phonons(phonons, args.output_root)
 
 
@@ -290,10 +298,11 @@ def _print_scan_summary(scanned: list[_Scanned], phonons: dict[tuple[str, int], 
     print()
 
 
-def _save_raw(scanned: list[_Scanned], output_root: Path) -> None:
+def _save_raw(scanned: list[_Scanned], output_root: Path, mass_weighted: bool = True) -> None:
     """Write each scanned dataset to <output_root>/<defect>_<cell>/pert_<p>/<method>/<date>/ and register it."""
     date_dir = date.today().strftime("%Y%m%d")
     for s in scanned:
+        s.raw.mass_weighted = mass_weighted
         pert_folder = output_root / f"{s.defect}_{s.cell_size}" / f"pert_{s.pert_scale:g}" / s.calc_method / date_dir
         pert_folder.mkdir(parents=True, exist_ok=True)
         save_path = s.raw.save(pert_folder / s.raw._default_name())
@@ -433,6 +442,8 @@ def _run_conv(args: argparse.Namespace, defect_folder: Path) -> None:
     for opt in ("orders", "pert", "method"):
         if getattr(args, opt, defaults[opt]) != defaults[opt]:
             LOGGER.warning(f"--{opt.replace('_', '-')} is ignored with --conv")
+    if getattr(args, "no_mass_weighted", False):
+        LOGGER.warning("--no-mass-weighted is ignored with --conv")
     conv_roots = sorted(p for p in defect_folder.glob("convergence*") if p.is_dir())
     if not conv_roots:
         raise SystemExit(f"No convergence* folders found under {defect_folder}")

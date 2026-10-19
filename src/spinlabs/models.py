@@ -653,18 +653,25 @@ class PhononSpectrum:
         self,
         perturbation_scale_si: float = 1.0,
         perturbation_scale: Optional[float] = None,
+        *,
+        mass_weighted: bool = True,
     ) -> dict[str, Any]:
         """
         Computes mass-weighted perturbation displacements (SI), frequencies (J), symmetries, and IPRs.
 
         The perturbation amplitude for each mode follows the mass-weighted
         phonon coordinate  q = q0 * sqrt(2*omega/hbar). Modes with frequency <= 0 get None.
+
+        ``mass_weighted=False`` is for runs displaced by q0 * e instead of
+        q0 * e / sqrt(m): their actual amplitude along mode k is q0 times the
+        mode's effective sqrt-mass (:meth:`effective_sqrt_mass`).
         """
         scale = perturbation_scale if perturbation_scale is not None else perturbation_scale_si
         omega_rads = self.frequencies_mev * CONSTANTS["meV2rads"]
+        weights = np.ones(self.n_modes) if mass_weighted else self.effective_sqrt_mass()
         displacements = [
-            scale * np.sqrt(2.0 * omega / Cn.hbar) if freq > 0 else None
-            for freq, omega in zip(self.frequencies_mev, omega_rads)
+            scale * w * np.sqrt(2.0 * omega / Cn.hbar) if freq > 0 else None
+            for freq, omega, w in zip(self.frequencies_mev, omega_rads, weights)
         ]
         freqs_j = self.frequencies_to_unit("J")
         iprs = self.get_ipr()
@@ -677,6 +684,19 @@ class PhononSpectrum:
             "ipr": iprs,
             "eigs": self.eigenvectors,
         }
+
+    def effective_sqrt_mass(self) -> np.ndarray:
+        """Per-mode sum_j sqrt(m_j) |e_kj|^2 / sum_j |e_kj|^2, in sqrt(amu).
+
+        Displacing the atoms by Q * e_k (no 1/sqrt(m)) moves the mass-weighted
+        normal coordinate of mode k by Q times this factor: sqrt(12.011) for
+        an all-carbon mode, more where the mode moves heavier atoms.
+        """
+        if self.atomic_masses is None:
+            raise ValueError("Phonon spectrum has no atomic masses; cannot correct non-mass-weighted perturbations")
+        weight = np.sum(np.abs(np.asarray(self.eigenvectors)) ** 2, axis=2)  # (n_modes, n_atoms)
+        sqrt_m = np.sqrt(np.asarray(self.atomic_masses, dtype=float))
+        return (weight @ sqrt_m) / weight.sum(axis=1)
 
     def calc_ipr(self) -> np.ndarray:
         """Calculates and caches the Inverse Participation Ratio (IPR) for all phonon modes."""
@@ -925,6 +945,9 @@ class RawZFSData:
     pert_scale: float
     calc_method: Optional[str] = None
     spin_correction_applied: bool = False
+    # False for runs displaced by Q * e instead of Q * e / sqrt(m) (before mass
+    # weighting was added); the couplings then rescale q, see PhononSpectrum.get_phonon_pert.
+    mass_weighted: bool = True
     order: Optional[int] = None
     ground_state_zfs: Optional[ZFSTensor] = None
     eigen_rotation: Optional[np.ndarray] = None
@@ -1031,6 +1054,12 @@ class RawZFSData:
                 "Correct the raw dataset first (RawZFSData.load with apply_corrections=True)."
             )
 
+        if self.mass_weighted != other.mass_weighted:
+            raise ValueError(
+                "Cannot combine mass-weighted and non-mass-weighted perturbation datasets: "
+                "their perturbation amplitudes differ per mode."
+            )
+
         merged_metadata = dict(self.metadata)
         for k, v in other.metadata.items():
             if k == "sim_path":
@@ -1051,6 +1080,7 @@ class RawZFSData:
             pert_scale=merged_scale,
             calc_method=merged_method,
             spin_correction_applied=merged_correction,
+            mass_weighted=self.mass_weighted,
             order=eff_order,
             ground_state_zfs=gs,
             eigen_rotation=merged_rotation,
@@ -1110,6 +1140,7 @@ class RawZFSData:
             pert_scale=self.pert_scale,
             calc_method=self.calc_method,
             spin_correction_applied=self.spin_correction_applied,
+            mass_weighted=self.mass_weighted,
             order=self.order,
             ground_state_zfs=new_gs,
             eigen_rotation=self.eigen_rotation.copy() if self.eigen_rotation is not None else None,
@@ -1124,7 +1155,7 @@ class RawZFSData:
         C3v symmetries, and IPRs from the given phonon spectrum.
         """
         pert_SI = (self.pert_scale or 1.0) * CONSTANTS["ang_amu2SI"]
-        phonon_pert = spectrum.get_phonon_pert(pert_SI)
+        phonon_pert = spectrum.get_phonon_pert(pert_SI, mass_weighted=self.mass_weighted)
         disps = phonon_pert.get("disp", [])
         syms = phonon_pert.get("sym", [])
         iprs = phonon_pert.get("ipr", [])
@@ -1172,6 +1203,7 @@ class RawZFSData:
         FieldSpec("pert_scale", "float"),
         FieldSpec("calc_method", "str", optional=True, decode=_decode_calc_method),
         FieldSpec("spin_correction_applied", "bool", optional=True),
+        FieldSpec("mass_weighted", "bool", optional=True),
         FieldSpec("order", "int", optional=True),
         FieldSpec("ground_state_zfs", "zfstensor", optional=True, legacy_keys=("zfs_relaxed",)),
         FieldSpec("eigen_rotation", "array", optional=True),
@@ -1271,6 +1303,11 @@ class RawZFSData:
             for k, v in (fields.get("second_order") or {}).items():
                 second_order.setdefault(k, v)
 
+        # Files without the key predate it and were mass-weighted.
+        weighted = {f.get("mass_weighted") is not False for f in scaled_fields}
+        if len(weighted) > 1:
+            raise ValueError("Cannot load mass-weighted and non-mass-weighted perturbation files together")
+
         order = base.get("order")
         if second_order:
             order = 2
@@ -1285,6 +1322,7 @@ class RawZFSData:
             # all(): if some files are uncorrected (only possible with
             # apply_corrections=False), never report the merge as corrected.
             spin_correction_applied=all(f.get("spin_correction_applied") for f in scaled_fields),
+            mass_weighted=weighted.pop(),
             order=order,
             ground_state_zfs=base.get("ground_state_zfs"),
             eigen_rotation=base.get("eigen_rotation"),

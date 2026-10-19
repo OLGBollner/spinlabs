@@ -99,6 +99,14 @@ class ZFSManager:
         self.calc_method: Optional[str] = (
             raw_data.calc_method or raw_data.metadata.get("calc_method") if raw_data else None
         )
+        self.mass_weighted: bool = raw_data.mass_weighted if raw_data else True
+        if not self.mass_weighted:
+            if spectrum is None:
+                raise ValueError(
+                    "Non-mass-weighted perturbation data needs the phonon spectrum (eigenvectors and masses) "
+                    "to correct the perturbation amplitudes"
+                )
+            LOGGER.info("Perturbations are not mass-weighted: scaling q by each mode's effective sqrt(mass)")
 
         # Processed ZFS data in defect principal frame
         self.zfs_relaxed: Optional[np.ndarray] = None  # Shape (3, 3) in J
@@ -141,7 +149,7 @@ class ZFSManager:
 
     def get_phonon_pert(self, pert_scale_si: float) -> Optional[dict[str, Any]]:
         if self.spectrum is not None:
-            return self.spectrum.get_phonon_pert(pert_scale_si)
+            return self.spectrum.get_phonon_pert(pert_scale_si, mass_weighted=self.mass_weighted)
         return None
 
     def _ingest_raw_data(self, raw: RawZFSData):
@@ -683,6 +691,7 @@ class ZFSManager:
                 # Tensors stored on the manager were ingested via parse/load,
                 # which apply the 3/2 correction for approx data at intake.
                 spin_correction_applied=normalize_calc_method(self.calc_method) == "defect_band_approx",
+                mass_weighted=self.mass_weighted,
                 order=kwargs.get("order", 1 if first is not None else 2),
                 ground_state_zfs=gs_tensor,
                 eigen_rotation=self.eigen_rotation,
