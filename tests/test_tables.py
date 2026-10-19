@@ -9,7 +9,7 @@ from spinlabs.tables import _fmt_ms, collect_t1_rows, format_t1_table, t1_at
 
 
 def _add_run(conn, tmp_path, name, *, t1_s, init_state="ms_0", method="all_bands", defect="NV",
-             cell=512, pert=0.1, legacy=False):
+             cell=512, pert=0.1, legacy=False, order=(1, 2)):
     """Register a completed run whose T1 is ``t1_s`` seconds at every temperature."""
     run_dir = tmp_path / "runs" / f"{defect}_{cell}" / method / f"pert_{pert}" / name
     run_dir.mkdir(parents=True)
@@ -23,7 +23,7 @@ def _add_run(conn, tmp_path, name, *, t1_s, init_state="ms_0", method="all_bands
         temperatures=temps,
         t1_fit=np.full_like(temps, t1_s),
     )
-    meta = {} if legacy else {"defect": defect, "cell": cell, "pert": pert, "order": [1, 2]}
+    meta = {} if legacy else {"defect": defect, "cell": cell, "pert": pert, "order": list(order)}
     run_id = registry.register_run(conn, run_dir=run_dir, method=method, init_state=init_state, **meta)
     registry.finish_run(conn, run_id, "done")
     return run_dir
@@ -187,3 +187,36 @@ def test_t1_file_without_state_is_skipped_when_run_solved_several(tmp_path):
     _add_stateless_run(conn, tmp_path, "run", ["ms_1", "ms_0"])
 
     assert collect_t1_rows(conn) == []
+
+
+def test_merged_rows_prefer_runs_with_second_order_and_report_the_choice(tmp_path, caplog):
+    conn = registry.ensure_db()
+    _add_run(conn, tmp_path, "full", t1_s=0.005, pert=0.1)
+    _add_run(conn, tmp_path, "first_only", t1_s=5000.0, pert=0.025, order=(1,))  # newer, but no 2nd order
+
+    (row,) = collect_t1_rows(conn, by_pert=False)
+
+    assert row.t1 == {"ms_0": pytest.approx(0.005)}
+    assert "runs at pert 0.025 orders [1], pert 0.1 orders [1, 2]; using pert 0.1 orders [1, 2]" in caplog.text
+
+
+def test_newer_complete_run_still_wins(tmp_path, caplog):
+    conn = registry.ensure_db()
+    _add_run(conn, tmp_path, "old", t1_s=0.005, pert=0.1)
+    _add_run(conn, tmp_path, "new", t1_s=0.002, pert=0.025)
+
+    (row,) = collect_t1_rows(conn, by_pert=False)
+
+    assert row.t1 == {"ms_0": pytest.approx(0.002)}
+    assert "using pert 0.025 orders [1, 2]" in caplog.text
+
+
+def test_reruns_of_one_configuration_are_not_reported(tmp_path, caplog):
+    conn = registry.ensure_db()
+    _add_run(conn, tmp_path, "a", t1_s=0.005)
+    _add_run(conn, tmp_path, "b", t1_s=0.004)
+
+    (row,) = collect_t1_rows(conn, by_pert=False)
+
+    assert row.t1 == {"ms_0": pytest.approx(0.004)}
+    assert "runs at" not in caplog.text

@@ -106,8 +106,10 @@ def collect_t1_rows(
     """Latest completed run per defect, cell, method, pert-scale and initial state.
 
     With ``by_pert=False`` runs of all pert-scales share one row per
-    defect/cell/method and the newest run of each state wins (the row's
-    ``pert`` is then ``None``).
+    defect/cell/method (the row's ``pert`` is then ``None``). A run with
+    second-order data is preferred over a first-order-only one, then the
+    newest wins; rows that had runs at several pert-scales or order sets to
+    choose from are reported with the one used.
 
     Runs are those matching ``filters`` (same fields as :func:`find_runs`).
     Each run directory holds one T1 file per initial state it solved
@@ -116,12 +118,14 @@ def collect_t1_rows(
     Runs without a T1 file or metadata to place them are skipped with a warning.
     """
     rows: dict[tuple, T1Row] = {}
+    chosen: dict[tuple, tuple] = {}  # (row key, state) -> (has 2nd order, pert, orders) of the run used
+    seen: dict[tuple, set] = {}  # row key -> {(pert, orders)} of every candidate run
     # find_runs yields oldest first, so later runs overwrite earlier ones.
     run_dirs = find_runs(conn, filters or [], output_root=output_root)
     meta = {
         row[0]: row[1:]
         for row in conn.execute(
-            "SELECT run_dir, defect, cell, method, pert, init_state FROM runs WHERE status = 'done'"
+            'SELECT run_dir, defect, cell, method, pert, init_state, "order" FROM runs WHERE status = \'done\''
         )
     }
     by_name = {Path(k).name: v for k, v in meta.items() if k}
@@ -130,13 +134,14 @@ def collect_t1_rows(
         if not t1_files:
             LOGGER.warning(f"Skipping {run_dir}: no t1_relaxation*.npz")
             continue
-        run_defect, run_cell, run_method, pert, run_states = meta.get(str(run_dir)) or by_name.get(
-            run_dir.name, (None,) * 5
+        run_defect, run_cell, run_method, pert, run_states, run_orders = meta.get(str(run_dir)) or by_name.get(
+            run_dir.name, (None,) * 6
         )
         if pert is None:
             match = _PERT_RE.search(str(run_dir))
             pert = float(match.group(1).rstrip(".")) if match else None
-        pert = float(pert) if pert is not None and by_pert else None
+        run_pert = float(pert) if pert is not None else None
+        row_pert = run_pert if by_pert else None
         for npz in t1_files:
             data = np.load(str(npz), allow_pickle=True)
             defect = run_defect or _npz_str(data, "defect")
@@ -147,11 +152,43 @@ def collect_t1_rows(
                 LOGGER.warning(f"Skipping {npz}: missing defect/method/initial state metadata")
                 continue
             cell = int(cell) if cell is not None else None
-            key = (defect, cell, method, pert)
-            row = rows.setdefault(key, T1Row(defect, cell, method, pert))
+            orders = _run_orders(run_orders, data)
+            complete = 2 in orders
+            key = (defect, cell, method, row_pert)
+            seen.setdefault(key, set()).add((run_pert, orders))
+            # A first-order-only run lacks the two-phonon channel, so it never
+            # replaces a run with second-order data; otherwise the newer run wins.
+            previous = chosen.get((key, init_state))
+            if previous is not None and previous[0] and not complete:
+                continue
+            chosen[(key, init_state)] = (complete, run_pert, orders)
+            row = rows.setdefault(key, T1Row(defect, cell, method, row_pert))
             row.t1[init_state] = t1_at(npz, temperature)
             row.run_dirs[init_state] = run_dir
+    for key, configs in seen.items():
+        if len(configs) > 1 and key in rows:
+            used = {chosen[(key, state)][1:] for state in rows[key].t1}
+            LOGGER.warning(
+                f"{rows[key].label}: runs at {_fmt_configs(configs)}; using {_fmt_configs(used)}"
+            )
     return sorted(rows.values(), key=T1Row.sort_key)
+
+
+def _run_orders(registry_orders: str | None, data: np.lib.npyio.NpzFile) -> tuple[int, ...]:
+    """Perturbation orders a run analyzed: the registry's JSON list, else the T1 file's ``order``."""
+    try:
+        orders = json.loads(registry_orders) if registry_orders else None
+    except json.JSONDecodeError:
+        orders = None
+    if orders is None and "order" in data.files:
+        orders = np.atleast_1d(data["order"]).tolist()
+    return tuple(sorted(int(o) for o in orders or []))
+
+
+def _fmt_configs(configs: set[tuple]) -> str:
+    """'pert 0.025 orders [1], pert 0.1 orders [1, 2]' for a set of (pert, orders)."""
+    ordered = sorted(configs, key=lambda c: (c[0] is None, c[0] or 0.0, c[1]))
+    return ", ".join(f"pert {'?' if p is None else f'{p:g}'} orders {list(o)}" for p, o in ordered)
 
 
 def _fmt_ms(seconds: float | None) -> str:
