@@ -83,6 +83,9 @@ class TestZFSManager:
             }
         }
         manager.treated_modes = {0}
+        # The synthetic tensors are not a consistent first/second-order pair (the
+        # linear-response check would exclude them); this test checks the formula.
+        manager.exclude_inconsistent_pairs = False
 
         derivs_2d, V_00_2nd, V_pm_2nd, V_0pm_2nd = manager.calculate_second_order_derivatives(zfs_1d_derivs)
 

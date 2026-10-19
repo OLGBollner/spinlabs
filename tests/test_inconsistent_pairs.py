@@ -1,4 +1,4 @@
-"""Second-order entries that are a larger copy of the first-order response are excluded and reported."""
+"""Second-order entries far off the first-order response (a multiple of it, either sign) are excluded and reported."""
 
 import logging
 import warnings
@@ -13,7 +13,7 @@ STEP = np.diag([-1.0, -1.0, 2.0])
 CURVE = np.diag([-0.01, -0.01, 0.02])  # small genuine curvature
 
 
-def _manager(keep=False):
+def _manager(keep=False, cancel_33=False):
     spectrum = PhononSpectrum(
         frequencies_mev=np.array([10.0, 30.0, 30.0, 40.0]),
         symmetries=["A1", "Ex", "Ey", "A1"],
@@ -28,7 +28,8 @@ def _manager(keep=False):
     first = {i: {"tensor": GS + lin.get(i, 0.0) * STEP, "unit": "MHz"} for i in range(4)}
     second = {
         (0, 0): {"tensor": GS + 2 * lin[0] * STEP + CURVE, "unit": "MHz"},
-        (3, 3): {"tensor": GS + 2 * lin[3] * STEP + CURVE, "unit": "MHz"},
+        # cancel_33: the 2Q run shows no ZFS change at all, cancelling the linear response (alpha = -1).
+        (3, 3): {"tensor": GS + (0.0 if cancel_33 else 2 * lin[3]) * STEP + CURVE, "unit": "MHz"},
         # Displaced twice as far: twice the linear response, no real curvature.
         (0, 3): {"tensor": GS + 2 * (lin[0] + lin[3]) * STEP, "unit": "MHz"},
     }
@@ -61,3 +62,14 @@ def test_keep_inconsistent_pairs_keeps_them_but_still_reports(caplog):
     assert len(manager.inconsistent_pairs) == 1
     assert v00[0, 3] > 0
     assert "Kept (--keep-inconsistent-pairs) 1 of 3" in caplog.text
+
+
+def test_entry_cancelling_the_linear_response_is_excluded(caplog):
+    with caplog.at_level(logging.WARNING):
+        manager, (_, v00, _, _) = _manager(cancel_33=True)
+
+    flagged = {(i, j): a for i, j, a, _ in manager.inconsistent_pairs}
+    assert set(flagged) == {(0, 3), (3, 3)}
+    assert abs(flagged[(3, 3)] + 1.0) < 0.01
+    assert v00[3, 3] == 0
+    assert "4_4 (alpha=-1.00)" in caplog.text

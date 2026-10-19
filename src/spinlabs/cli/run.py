@@ -104,7 +104,7 @@ def build_run_parser(parser: argparse.ArgumentParser) -> None:
     opt.add_argument(
         "--keep-inconsistent-pairs",
         action="store_true",
-        help="Keep second-order entries whose ZFS change is mostly a larger copy of the first-order response "
+        help="Keep second-order entries whose ZFS change departs from the first-order response by a multiple of it "
         "(over-displaced or stale runs); they are excluded and listed by default",
     )
     add_verbosity_args(opt)

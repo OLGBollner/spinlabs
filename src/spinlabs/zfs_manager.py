@@ -17,7 +17,8 @@ LOGGER = get_logger(__name__)
 
 # Healthy second-order entries have alpha ~ 0 (|alpha| < 0.05 for NV_64): the
 # curvature is far below the linear response at the perturbation amplitude.
-# Over-displaced runs give alpha ~ 1 or more.
+# Over-displaced runs give alpha ~ 1 or more; runs whose change cancels the
+# linear response (wrong state or geometry) give alpha ~ -1. Both are excluded.
 INCONSISTENT_ALPHA = 0.5
 
 
@@ -457,16 +458,16 @@ class ZFSManager:
 
             # The pair displaces Q_i + Q_j, so its ZFS change is the first-order
             # response dD_i q_i + dD_j q_j plus a small remainder (the curvature).
-            # A remainder that is mostly a larger copy of that linear response
-            # (alpha > INCONSISTENT_ALPHA) means the run was displaced too far or
-            # its result is stale; its "curvature" is not physical.
+            # A remainder that is a sizeable multiple of that linear response
+            # (|alpha| > INCONSISTENT_ALPHA) means the run was displaced too far,
+            # its result is stale, or it cancels the response; not physical curvature.
             if i in self.treated_modes and j in self.treated_modes:
                 linear = dD_qi * q_i + dD_qj * q_j
                 remainder = (D_qi_qj - self.zfs_relaxed) - linear
                 norm = np.sum(linear * linear)
                 if norm > (0.05 * CONSTANTS["MHz2J"]) ** 2:
                     alpha = float(np.sum(remainder * linear) / norm)
-                    if alpha > INCONSISTENT_ALPHA:
+                    if abs(alpha) > INCONSISTENT_ALPHA:
                         self.inconsistent_pairs.append(
                             (i, j, alpha, float(np.linalg.norm(remainder) / CONSTANTS["MHz2J"]))
                         )
@@ -530,8 +531,8 @@ class ZFSManager:
             action = "Excluded" if self.exclude_inconsistent_pairs else "Kept (--keep-inconsistent-pairs)"
             LOGGER.warning(
                 f"{action} {len(self.inconsistent_pairs)} of {len(self.zfs_tensors_2d)} second-order entries "
-                f"whose ZFS change is mostly a larger copy of the first-order response (alpha > "
-                f"{INCONSISTENT_ALPHA}: over-displaced or stale runs). Run folders (1-based): "
+                f"whose ZFS change departs from the first-order response by a multiple of it (|alpha| > "
+                f"{INCONSISTENT_ALPHA}: over-displaced, stale or inconsistent runs). Run folders (1-based): "
                 + ", ".join(f"{i + 1}_{j + 1} (alpha={a:.2f})" for i, j, a, _ in self.inconsistent_pairs)
             )
 
