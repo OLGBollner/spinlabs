@@ -48,9 +48,6 @@ def main(argv: list[str] | None = None) -> None:
     # Configure console logging once at the entry point so every subcommand
     # (including ones without their own flags, e.g. `plot`) gets sane levels.
     verbosity = getattr(args, "verbose", 0)
-    if getattr(args, "debug", False):
-        # --debug dumps go out as DEBUG records; show them on the console.
-        verbosity = max(verbosity, 2)
     quiet = getattr(args, "quiet", False)
     configure_logging(verbosity=verbosity, quiet=quiet)
     args.func(args)

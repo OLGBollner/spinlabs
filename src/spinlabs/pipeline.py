@@ -188,7 +188,6 @@ def run_full_pipeline(
     run_name: str | None = None,
     save_plots: bool = True,
     show_plots: bool = False,
-    debug: bool = False,
 ) -> dict[str, Any]:
     """
     Executes the entire end-to-end pipeline:
@@ -230,7 +229,6 @@ def run_full_pipeline(
             run_name=run_name,
             save_plots=save_plots,
             show_plots=show_plots,
-            debug=debug,
         )
     finally:
         if owns_db_logging:
@@ -261,7 +259,6 @@ def _execute_pipeline(
     run_name: str | None = None,
     save_plots: bool = True,
     show_plots: bool = False,
-    debug: bool = False,
 ) -> dict[str, Any]:
     """Pipeline body of :func:`run_full_pipeline` (DB logging already owned)."""
 
@@ -489,7 +486,7 @@ def _execute_pipeline(
         coupling_data.save(coupling_path)
         LOGGER.info(f"[2/5] Using provided coupling data -> {coupling_path.name}")
     else:
-        manager = ZFSManager(raw_data=raw_data, spectrum=spectrum, debug=debug)
+        manager = ZFSManager(raw_data=raw_data, spectrum=spectrum)
         if calc_method:
             manager.calc_method = calc_method
         out_base = str(run_dir / "spin_phonon_coupling")

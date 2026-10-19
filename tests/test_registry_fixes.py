@@ -83,7 +83,6 @@ def test_run_query_normalizes_method(tmp_path, monkeypatch):
         pert_scale=None,
         order=None,
         output_root=str(tmp_path / "runs"),
-        debug=False,
     )
     run_mod._run_query(args)
     assert captured["calc_method"] == "all_bands"

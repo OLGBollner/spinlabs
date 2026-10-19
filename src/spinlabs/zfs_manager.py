@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import warnings
 from pathlib import Path
 from typing import Any, Optional, Union
@@ -26,7 +27,6 @@ class ZFSManager:
         self,
         spectrum: Optional[PhononSpectrum] = None,
         raw_data: Optional[RawZFSData] = None,
-        debug: bool = False,
     ):
         # spectrum is the primary dataclass
         if spectrum is not None:
@@ -106,8 +106,6 @@ class ZFSManager:
         self.first_order: dict[int, dict[str, Any]] = {}  # 1D perturbations
         self.second_order: dict[tuple[int, int], dict[str, Any]] = {}  # 2D perturbations
         self.treated_modes: set[int] = set()
-
-        self.debug = debug
 
         if raw_data is not None:
             self._ingest_raw_data(raw_data)
@@ -307,35 +305,6 @@ class ZFSManager:
 
         self.treated_modes = self._get_symmetry_factor()
 
-    def _estimate_q0(self) -> Optional[float]:
-        """Estimate the uniform q0 = amp^2 / (2*f) from modes present in both the
-        raw 1D data and the spectrum (their original indices)."""
-        if self.spectrum is None or self.spectrum.original_indices is None:
-            return None
-        freqs = np.asarray(self.spectrum.frequencies_mev)
-        oas = np.asarray(self.spectrum.original_indices, int)
-        vals = []
-        for sp, entry in self.first_order.items():
-            if sp >= len(freqs):
-                continue
-            pert = entry.get("pert")
-            if pert is None:
-                pert = (
-                    getattr(self.raw_data.first_order.get(int(oas[sp]), None), "pert", None)
-                    if hasattr(self, "raw_data")
-                    else None
-                )
-            if pert is None:
-                continue
-            amp = pert[0] if isinstance(pert, (list, tuple, np.ndarray)) else pert
-            if amp is None or amp == 0:
-                continue
-            vals.append(float(amp) ** 2 / (2.0 * freqs[sp]))
-        if not vals:
-            return None
-        vals = np.array(vals)
-        return float(np.median(vals))
-
     def _get_symmetry_factor(self) -> set[int]:
         total_modes = self.nmodes
         n_1d = len(self.zfs_tensors)
@@ -416,7 +385,7 @@ class ZFSManager:
                     V_0_pm[twin] = np.where(V_0_pm[twin] == 0, V_0_pm[i], V_0_pm[twin])
                     V_p_m[twin] = np.where(V_p_m[twin] == 0, V_p_m[i], V_p_m[twin])
 
-            if self.debug:
+            if LOGGER.isEnabledFor(logging.DEBUG):
                 self._debug_derivs(
                     dD_dq / CONSTANTS["MHz2J"],
                     q,
@@ -510,7 +479,7 @@ class ZFSManager:
             V_p_m_2nd[j, i] = V_p_m_2nd[i, j]
             V_0_pm_2nd[j, i] = V_0_pm_2nd[i, j]
 
-            if self.debug:
+            if LOGGER.isEnabledFor(logging.DEBUG):
                 self._debug_derivs(
                     d2D_dqidqj / CONSTANTS["MHz2J"],
                     item["pert"],
