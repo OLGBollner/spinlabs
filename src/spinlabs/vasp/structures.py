@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import itertools
+import re
 
 import numpy as np
 from pymatgen.core.structure import Structure
@@ -18,6 +19,24 @@ from spinlabs.parsers import parse_phonon_data
 def load_poscar(poscar_file: str | Path) -> Structure:
     """Load a VASP POSCAR file into a pymatgen Structure."""
     return Poscar.from_file(poscar_file).structure
+
+
+def structure_file(path: str | Path) -> Path:
+    """The POSCAR-format file for ``path``: itself, or the POSCAR of a run directory or next to an OUTCAR.
+
+    A run's POSCAR is the geometry the calculation started from, which is the
+    perturbation that was applied (the ZFS runs do not relax).
+    """
+    path = Path(path)
+    if path.is_dir():
+        candidate = path / "POSCAR"
+    elif path.name.startswith(("OUTCAR", "OSZICAR", "vasprun")):
+        candidate = path.with_name("POSCAR")
+    else:
+        return path
+    if not candidate.is_file():
+        raise FileNotFoundError(f"No POSCAR for {path} (looked for {candidate})")
+    return candidate
 
 
 @dataclass(frozen=True)
@@ -346,9 +365,12 @@ def compare_displacement(reference: str | Path, perturbed: str | Path) -> dict:
     same phonon/defect tree, so the atom order is identical. Fractional
     differences are wrapped to the nearest periodic image, so a structure
     written into a neighbouring cell by VASP compares as identical.
+
+    Each argument may be a POSCAR/CONTCAR, a run directory, or an OUTCAR;
+    see :func:`structure_file`.
     """
-    ref = load_poscar(reference)
-    pert = load_poscar(perturbed)
+    ref = load_poscar(structure_file(reference))
+    pert = load_poscar(structure_file(perturbed))
     if len(ref) != len(pert):
         raise ValueError(f"Atom count mismatch: {len(ref)} vs {len(pert)}")
     if ref.composition.reduced_formula != pert.composition.reduced_formula:
@@ -371,8 +393,55 @@ def compare_displacement(reference: str | Path, perturbed: str | Path) -> dict:
     }
 
 
-def compare_displacement_cli(reference: str | Path, perturbed: list[str | Path]) -> None:
-    """Print a table of displacement statistics for one or more structures."""
+def run_modes(path: str | Path) -> tuple[int, ...] | None:
+    """1-based modes of a perturbation run folder: ``runs/<i>`` (first order) or ``runs/<i>_<j>`` (pair)."""
+    path = Path(path)
+    folder = path if path.is_dir() else path.parent
+    match = re.fullmatch(r"(\d+)(?:_(\d+))?", folder.name)
+    return tuple(int(g) for g in match.groups() if g) if match else None
+
+
+def run_pert_scale(path: str | Path) -> float | None:
+    """Perturbation scale from a ``pert_<x>`` component of the path, or None."""
+    for part in reversed(Path(path).resolve().parts):
+        match = re.fullmatch(r"pert_(-?[0-9.]+)", part)
+        if match:
+            return float(match.group(1))
+    return None
+
+
+def expected_displacement(
+    spectrum: PhononSpectrum, modes: tuple[int, ...], amplitude: float, *, mass_weighted: bool = True
+) -> np.ndarray:
+    """Per-atom displacement (n_atoms, 3) in Å for ``amplitude`` along each 1-based mode, summed.
+
+    This is what the generator applies: a pair folder i_j displaces along both
+    modes and i_i twice along one. Without mass weighting each mode is displaced
+    by Q * e instead of Q * e / sqrt(m), as the earliest perturbation runs were.
+    """
+    eigs = np.real(np.asarray(spectrum.eigenvectors))
+    masses = np.asarray(spectrum.atomic_masses, dtype=float) if mass_weighted else np.ones(eigs.shape[1])
+    total = np.zeros(eigs.shape[1:])
+    for mode in modes:
+        total += _displacement(eigs, masses, _resolve_mode(mode, spectrum.original_indices, eigs.shape[0]), amplitude)
+    return total
+
+
+def compare_displacement_cli(
+    reference: str | Path,
+    perturbed: list[str | Path],
+    *,
+    spectrum: PhononSpectrum | None = None,
+    amplitude: float | None = None,
+    mass_weighted: bool = True,
+) -> None:
+    """Print a table of displacement statistics for one or more structures.
+
+    With ``spectrum`` each run folder's modes (``runs/<i>`` or ``runs/<i>_<j>``)
+    are compared with the expected displacement at ``amplitude`` (default: the
+    path's ``pert_<x>``): the fitted scale is actual/expected along the expected
+    direction, and the residual is the part of the displacement it leaves out.
+    """
     rows = []
     for path in perturbed:
         try:
@@ -385,13 +454,40 @@ def compare_displacement_cli(reference: str | Path, perturbed: list[str | Path])
             f"{path}\n    max |disp| = {stats['max']:.6f} Å "
             f"(atom {stats['max_index'] + 1})"
             f"\n    rms        = {stats['rms']:.6f} Å"
-            f"\n    n_atoms    = {stats['n_atoms']}\n"
+            f"\n    n_atoms    = {stats['n_atoms']}"
         )
+        if spectrum is not None:
+            print(_expected_report(path, stats["disp"], spectrum, amplitude, mass_weighted))
+        print()
     if len(rows) > 1:
         print("Relative sizes (max |disp|, first entry = 1.000):")
         base = rows[0][1]["max"]
         for path, stats in rows:
             print(f"    {stats['max'] / base:8.3f}  {path}")
+
+
+def _expected_report(
+    path: str | Path, disp: np.ndarray, spectrum: PhononSpectrum, amplitude: float | None, mass_weighted: bool
+) -> str:
+    modes = run_modes(path)
+    amplitude = amplitude if amplitude is not None else run_pert_scale(path)
+    if modes is None or amplitude is None:
+        return "    expected   = ? (modes need a runs/<i> or runs/<i>_<j> folder, amplitude --pert or pert_<x>)"
+    try:
+        expected = expected_displacement(spectrum, modes, amplitude, mass_weighted=mass_weighted)
+    except ValueError as e:
+        return f"    expected   = ? ({e})"
+    if expected.shape != disp.shape:
+        return f"    expected   = ? (phonon file has {len(expected)} atoms, structure {len(disp)})"
+    norms = np.linalg.norm(expected, axis=1)
+    scale = float(np.sum(disp * expected) / np.sum(expected * expected))
+    residual = float(np.linalg.norm(disp - scale * expected) / np.linalg.norm(disp)) if np.any(disp) else 0.0
+    weighting = "mass-weighted" if mass_weighted else "not mass-weighted"
+    return (
+        f"    expected   = max {norms.max():.6f} Å, rms {np.sqrt((norms**2).mean()):.6f} Å "
+        f"(modes {'+'.join(map(str, modes))}, Q={amplitude:g}, {weighting})"
+        f"\n    scale      = {scale:.3f} x expected (residual {residual:.1%})"
+    )
 
 
 def write_perturbed_poscar(
