@@ -19,8 +19,8 @@ LOGGER = get_logger(__name__)
 _V_KEYS = ("V_0_0", "V_p_m", "V_0_pm")
 
 
-def build_coupling_parser(parser: argparse.ArgumentParser) -> None:
-    """Configure ``parser`` as the ``run coupling`` subcommand."""
+def add_input_args(parser: argparse.ArgumentParser) -> argparse._ArgumentGroup:
+    """Input and coupling options shared by the run stages that start from raw ZFS data."""
     inputs = parser.add_argument_group("input mode (exactly one)")
     inputs.add_argument("--sim-folder", nargs="+", metavar="DIR", help="Path to VASP simulation folder(s)")
     inputs.add_argument("--raw-zfs-file", metavar="FILE", help="Path to a raw ZFS .npz dataset file")
@@ -44,6 +44,17 @@ def build_coupling_parser(parser: argparse.ArgumentParser) -> None:
     opt.add_argument("--pert-scale", type=float, help="Override perturbation scale (as for run)")
     opt.add_argument("--defect", help="Override defect name")
     opt.add_argument("--cell-size", type=int, help="Override supercell size")
+    opt.add_argument(
+        "--keep-inconsistent-pairs",
+        action="store_true",
+        help="Keep second-order entries failing the linear-response check (excluded and listed by default)",
+    )
+    return opt
+
+
+def build_coupling_parser(parser: argparse.ArgumentParser) -> None:
+    """Configure ``parser`` as the ``run coupling`` subcommand."""
+    opt = add_input_args(parser)
     opt.add_argument("--top", type=int, default=10, help="Number of strongest modes/pairs to list (default: 10)")
     opt.add_argument(
         "--mode",
@@ -53,17 +64,16 @@ def build_coupling_parser(parser: argparse.ArgumentParser) -> None:
         metavar="N",
         help="Also list these modes (1-based, as in the -vv derivative details and POSCAR generator)",
     )
-    opt.add_argument(
-        "--keep-inconsistent-pairs",
-        action="store_true",
-        help="Keep second-order entries failing the linear-response check (excluded and listed by default)",
-    )
     add_verbosity_args(opt)
 
     parser.set_defaults(func=_run_coupling)
 
 
-def _run_coupling(args: argparse.Namespace) -> None:
+def load_manager(args: argparse.Namespace, command: str):
+    """ZFSManager for the inputs in ``args``, loaded as ``spinlabs run`` loads them.
+
+    Returns ``(manager, phonon_path, orders)``; ``orders`` is what to compute.
+    """
     from spinlabs.cli.run import _METHOD_MAP, _infer_method
     from spinlabs.pipeline import load_raw_inputs
     from spinlabs.zfs_manager import ZFSManager
@@ -79,11 +89,11 @@ def _run_coupling(args: argparse.Namespace) -> None:
     ]
     if len(given) != 1:
         raise SystemExit(
-            "spinlabs run coupling: exactly one of --sim-folder, --raw-zfs-file, --raw-zfs-file-1d/2d is required"
+            f"{command}: exactly one of --sim-folder, --raw-zfs-file, --raw-zfs-file-1d/2d is required"
             + (f" (got {', '.join(given)})" if given else "")
         )
     if (args.raw_zfs_file_1d is None) != (args.raw_zfs_file_2d is None):
-        raise SystemExit("spinlabs run coupling: --raw-zfs-file-1d and --raw-zfs-file-2d must be given together")
+        raise SystemExit(f"{command}: --raw-zfs-file-1d and --raw-zfs-file-2d must be given together")
 
     # _infer_method reads run's namespace, where --method and --raw-zfs-file are lists.
     method_args = argparse.Namespace(
@@ -120,15 +130,19 @@ def _run_coupling(args: argparse.Namespace) -> None:
         raw_data=raw_data, spectrum=spectrum, exclude_inconsistent_pairs=not args.keep_inconsistent_pairs
     )
     manager.calc_method = calc_method
-
     if not manager.zfs_tensors:
         raise SystemExit("No first-order tensors in the input; every coupling needs the first-order derivatives.")
+    if 2 in orders and not manager.zfs_tensors_2d and args.order:
+        raise SystemExit("--order 2 requested, but the input has no second-order tensors.")
+    return manager, ph_path, orders
+
+
+def _run_coupling(args: argparse.Namespace) -> None:
+    manager, ph_path, orders = load_manager(args, "spinlabs run coupling")
     first = manager.calculate_first_order_derivatives()
     second = None
     if 2 in orders and manager.zfs_tensors_2d:
         second = manager.calculate_second_order_derivatives(first[0])
-    elif 2 in orders and args.order:
-        raise SystemExit("--order 2 requested, but the input has no second-order tensors.")
 
     print(_summary(manager, ph_path, first, second, args.top, [m - 1 for m in args.mode]))
 

@@ -10,17 +10,22 @@ from spinlabs.models import PhononSpectrum, RawZFSData, ZFSTensor
 N_MODES = 4
 
 
-def _inputs(tmp_path, *, second_order=True):
-    """A raw ZFS file with a linear response per mode, plus a matching phonon file."""
+def _inputs(tmp_path, *, second_order=True, spin_flip=False):
+    """A raw ZFS file with a linear response per mode, plus a matching phonon file.
+
+    With ``spin_flip`` the E modes change D_xz/D_xx-D_yy (couplings that flip the
+    spin), so the rates and T1 are finite; otherwise every response is A1-shaped.
+    """
     gs = np.diag([-1000.0, -1000.0, 2000.0])
-    step = np.diag([-1.0, -1.0, 2.0])
     syms = ["A1", "Ex", "Ey", "A1"]
+    e_step = np.array([[1.0, 0.0, 1.0], [0.0, -1.0, 0.0], [1.0, 0.0, 0.0]])
+    steps = [e_step if spin_flip and syms[i] in ("Ex", "Ey") else np.diag([-1.0, -1.0, 2.0]) for i in range(N_MODES)]
     first = {
-        i: {"tensor": gs + (i + 1) * step, "unit": "MHz", "pert": 1e-25, "symmetry": syms[i], "ipr": 0.5}
+        i: {"tensor": gs + (i + 1) * steps[i], "unit": "MHz", "pert": 1e-25, "symmetry": syms[i], "ipr": 0.5}
         for i in range(N_MODES)
     }
     second = {
-        (i, i): {"tensor": gs + 2.1 * (i + 1) * step, "unit": "MHz", "pert": (1e-25, 1e-25),
+        (i, i): {"tensor": gs + 2.1 * (i + 1) * steps[i], "unit": "MHz", "pert": (1e-25, 1e-25),
                  "symmetry": (syms[i], syms[i]), "ipr": (0.5, 0.5)}
         for i in range(N_MODES)
     } if second_order else {}
@@ -80,3 +85,33 @@ def test_coupling_stage_rejects_order_2_without_second_order_data(tmp_path):
 def test_coupling_stage_needs_exactly_one_input(tmp_path):
     with pytest.raises(SystemExit, match="exactly one of"):
         cli.main(["run", "coupling", "-q"])
+
+
+def test_sigma_scan_reports_t1_per_sigma_and_saves_only_the_plot(tmp_path, capsys, monkeypatch):
+    raw_file = _inputs(tmp_path, spin_flip=True)
+    monkeypatch.chdir(tmp_path)
+    before = _files(tmp_path)
+    plot = tmp_path / "scan.png"
+
+    cli.main(["run", "sigma-scan", "--raw-zfs-file", str(raw_file), "--sigma", "7.5", "1",
+              "--temperature", "300", "--init-state", "0", "--plot", str(plot), "-q"])
+
+    out = capsys.readouterr().out
+    assert "[1/2] sigma 1 meV" in out and "[2/2] sigma 7.5 meV" in out
+    assert "ms_0 @300K" in out and "max/min" in out
+    rows = [line.split() for line in out.splitlines() if line.strip().startswith(("1 ", "7.5*"))]
+    assert len(rows) == 2 and all(0 < float(r[1]) < np.inf for r in rows)
+    assert _files(tmp_path) == sorted(before + [plot])
+    assert registry.ensure_db().execute("SELECT COUNT(*) FROM runs").fetchone() == (0,)
+
+
+def test_sigma_scan_without_spin_flip_coupling_reports_infinite_t1(tmp_path, capsys):
+    """A1-only responses give no transitions: T1 is infinite, and the plot is skipped with a note."""
+    raw_file = _inputs(tmp_path)
+
+    cli.main(["run", "sigma-scan", "--raw-zfs-file", str(raw_file), "--sigma", "1", "--init-state", "0",
+              "--plot", str(tmp_path / "scan.png"), "-q"])
+
+    out = capsys.readouterr().out
+    assert "inf" in out and "No finite T1 to plot" in out
+    assert not (tmp_path / "scan.png").exists()

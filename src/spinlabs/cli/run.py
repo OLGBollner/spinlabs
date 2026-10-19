@@ -6,8 +6,9 @@ from pathlib import Path
 
 from spinlabs.cli import add_verbosity_args
 from spinlabs.cli.coupling import build_coupling_parser
+from spinlabs.cli.sigma_scan import build_sigma_scan_parser
 from spinlabs.models import normalize_calc_method
-from spinlabs.pipeline import run_full_pipeline
+from spinlabs.pipeline import DEFAULT_SIGMA_MEV, run_full_pipeline
 from spinlabs.registry import ensure_db, parse_orders
 from spinlabs.relaxation_dynamics import INIT_STATES, normalize_init_state
 
@@ -93,6 +94,14 @@ def build_run_parser(parser: argparse.ArgumentParser) -> None:
     )
     opt.add_argument("--plot", action="store_true", help="Generate plots inside <run_dir>/figures/")
     opt.add_argument(
+        "--sigma",
+        type=float,
+        default=DEFAULT_SIGMA_MEV,
+        metavar="MEV",
+        help=f"Gaussian broadening of the spectral functions in meV, standing in for the continuous phonon "
+        f"bands of a macroscopic crystal (default: {DEFAULT_SIGMA_MEV:g}; see run sigma-scan)",
+    )
+    opt.add_argument(
         "--keep-inconsistent-pairs",
         action="store_true",
         help="Keep second-order entries whose ZFS change is mostly a larger copy of the first-order response "
@@ -108,6 +117,12 @@ def build_run_parser(parser: argparse.ArgumentParser) -> None:
         stages.add_parser(
             "coupling",
             help="Only compute the spin-phonon couplings (ZFSManager) and print a summary; nothing is saved",
+        )
+    )
+    build_sigma_scan_parser(
+        stages.add_parser(
+            "sigma-scan",
+            help="T1 against the spectral broadening sigma for one dataset; nothing is saved",
         )
     )
 
@@ -215,6 +230,7 @@ def _run(args: argparse.Namespace) -> None:
         save_plots=args.plot,
         show_plots=False,
         keep_inconsistent_pairs=args.keep_inconsistent_pairs,
+        sigma=args.sigma,
     )
 
 
@@ -313,4 +329,5 @@ def _run_one_query_dataset(
         save_plots=args.plot,
         show_plots=False,
         keep_inconsistent_pairs=args.keep_inconsistent_pairs,
+        sigma=args.sigma,
     )

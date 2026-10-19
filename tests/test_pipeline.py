@@ -343,3 +343,16 @@ def test_input_without_perturbation_tensors_fails_before_creating_a_run(tmp_path
     with pytest.raises(ValueError, match="No perturbation tensors"):
         run_full_pipeline(raw_zfs_file=raw_file, output_root=tmp_path / "runs", save_plots=False)
     assert not (tmp_path / "runs").exists()
+
+
+def test_sigma_is_used_and_recorded(tmp_path, dummy_coupling_file):
+    results = {}
+    for sigma in (7.5, 1.0):
+        res = run_full_pipeline(coupling_file=dummy_coupling_file, output_root=tmp_path / f"runs_{sigma:g}",
+                                temperatures=[50.0, 150.0], sigma=sigma, save_plots=False)
+        info = json.loads((res["run_dir"] / "run_info.json").read_text())
+        assert info["sigma_mev"] == sigma
+        t1 = np.load(res["t1_paths"]["ms_0"])
+        assert float(t1["sigma_mev"]) == sigma
+        results[sigma] = np.load(res["rates_path"], allow_pickle=True)["two_phonon"].item()["0_1"]
+    assert not np.allclose(results[7.5], results[1.0])

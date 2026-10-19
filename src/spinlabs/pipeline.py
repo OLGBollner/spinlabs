@@ -260,6 +260,83 @@ def load_raw_inputs(
     return raw_data, spectrum, ph_path
 
 
+DEFAULT_SIGMA_MEV = 7.5  # Gaussian broadening of the spectral functions (meV)
+
+
+def temperature_grid(
+    t_start: float = 0.0, t_end: float = 300.0, t_step: float = 10.0, temperatures: Sequence[float] | None = None
+) -> np.ndarray:
+    """The run's temperature grid in K: ``temperatures`` if given, else t_start..t_end (finer below 1 K)."""
+    if temperatures is not None:
+        return np.asarray(temperatures, dtype=float)
+    if t_start < 1.0:
+        low_range = np.arange(t_start, 1.0, max(0.01, t_step / 100))
+        high_range = np.arange(1.0 + t_step, t_end + t_step, t_step)
+        return np.unique(np.concatenate([low_range, high_range]))
+    return np.arange(t_start, t_end + t_step, t_step)
+
+
+def compute_rates(
+    coupling_path: str | Path,
+    temps: Sequence[float],
+    *,
+    sigma: float = DEFAULT_SIGMA_MEV,
+    two_phonon_file: str | Path | None = None,
+    has_second_order: bool = False,
+) -> tuple[np.ndarray, dict, dict]:
+    """Transition rates of a coupling file at each temperature.
+
+    ``sigma`` (meV) broadens each mode in the 1D and 2D spectral functions,
+    standing in for the continuous phonon bands of a macroscopic crystal. The
+    2D grid spacing follows it (at most sigma/4, 0.5 meV by default); the rates
+    do not depend on the spacing beyond that resolution. Returns the
+    temperatures with a result, the total rates per process and the
+    directional rates.
+    """
+    two_ph_p = Path(two_phonon_file) if two_phonon_file else None
+    calculator = TransitionRate(str(coupling_path), two_phonon_data_file=two_ph_p)
+    two_phonon = two_ph_p is not None or has_second_order
+    # For combined 1d+2d runs the coupling file itself carries the second-order
+    # coefficients (V2_*); make sure the calculator sees them as the 2-phonon source.
+    if two_ph_p is None and has_second_order:
+        calculator.data_2ph = calculator.data
+
+    omega, J_0_pm, J_p_m, J_0_0 = calculator.get_spectral_density(res=0.02, sigma=sigma)
+    if two_phonon:
+        omega_x, omega_y, J2_0_pm, J2_p_m, J2_0_0 = calculator.get_2d_spectral_density(
+            res=min(0.5, sigma / 4), sigma=sigma
+        )
+    omega_zfs = calculator.data["zfs"] / CONSTANTS["meV2J"]
+
+    rate_results = {k: {"0_1": [], "1_-1": []} for k in ("first_order", "second_order", "two_phonon")}
+    directional_results = {k: [] for k in ("0_to_1", "0_to_-1", "1_to_0", "-1_to_0", "1_to_-1", "-1_to_1")}
+    valid_temps = []
+    for T in temps:
+        calculator.compute_transition_rates(T, omega, J_0_pm, J_p_m, J_0_0, omega_zfs)
+        if two_phonon:
+            calculator.compute_two_phonon_rates(T, omega_x, omega_y, J2_0_pm, J2_p_m, J2_0_0, omega_zfs)
+        total_rates = calculator.get_total_rates()
+        dir_rates = calculator.get_directional_rates()
+        if total_rates and dir_rates:
+            for k, val in dir_rates.items():
+                directional_results[k].append(val)
+            for ord_k in rate_results:
+                for trans_k in ("0_1", "1_-1"):
+                    rate_results[ord_k][trans_k].append(total_rates[ord_k][trans_k])
+            valid_temps.append(float(T))
+    return np.asarray(valid_temps, dtype=float), rate_results, directional_results
+
+
+def solve_t1(directional_rates_path: str | Path, init_state: str) -> tuple[np.ndarray, np.ndarray]:
+    """ODE-fit and eigenvalue T1 (s) at each temperature of a directional-rates file."""
+    dynamics = RelaxationDynamics(init_state=INIT_POPULATIONS[init_state], rates_data=str(directional_rates_path))
+    t1_fit = np.asarray(dynamics.compute_T1_range(), dtype=float)
+    t1_eig = np.asarray(
+        [dynamics.get_T1_eigenval(temp_index=i)[0] for i in range(len(dynamics.temperatures))], dtype=float
+    )
+    return t1_fit, t1_eig
+
+
 def run_full_pipeline(
     *,
     sim_folder: str | Path | Sequence[str | Path] | None = None,
@@ -285,6 +362,7 @@ def run_full_pipeline(
     save_plots: bool = True,
     show_plots: bool = False,
     keep_inconsistent_pairs: bool = False,
+    sigma: float = DEFAULT_SIGMA_MEV,
 ) -> dict[str, Any]:
     """
     Executes the entire end-to-end pipeline:
@@ -327,6 +405,7 @@ def run_full_pipeline(
             save_plots=save_plots,
             show_plots=show_plots,
             keep_inconsistent_pairs=keep_inconsistent_pairs,
+            sigma=sigma,
         )
     finally:
         if owns_db_logging:
@@ -358,6 +437,7 @@ def _execute_pipeline(
     save_plots: bool = True,
     show_plots: bool = False,
     keep_inconsistent_pairs: bool = False,
+    sigma: float = DEFAULT_SIGMA_MEV,
 ) -> dict[str, Any]:
     """Pipeline body of :func:`run_full_pipeline` (DB logging already owned)."""
 
@@ -561,65 +641,15 @@ def _execute_pipeline(
         LOGGER.info(f"[2/5] Computed and saved spin-phonon coupling -> {coupling_path.name}")
 
     # ── 6. Transition Rates Calculation ──────────────────────────────────────
-    if temperatures is None:
-        if t_start < 1.0:
-            low_range = np.arange(t_start, 1.0, max(0.01, t_step / 100))
-            high_range = np.arange(1.0 + t_step, t_end + t_step, t_step)
-            temps = np.unique(np.concatenate([low_range, high_range]))
-        else:
-            temps = np.arange(t_start, t_end + t_step, t_step)
-    else:
-        temps = np.asarray(temperatures, dtype=float)
-
-    two_ph_p = Path(two_phonon_file) if two_phonon_file else None
-    calculator = TransitionRate(str(coupling_path), two_phonon_data_file=two_ph_p)
-
-    # For combined 1d+2d runs the coupling file itself carries the second-order
-    # coefficients (V2_*); make sure the calculator sees them as the 2-phonon source.
-    if two_ph_p is None and coupling_data is not None and coupling_data.has_second_order:
-        calculator.data_2ph = calculator.data
-
-    omega, J_0_pm, J_p_m, J_0_0 = calculator.get_spectral_density(res=0.02, sigma=7.5)
-    if two_ph_p is not None or (coupling_data is not None and coupling_data.has_second_order):
-        omega_x, omega_y, J2_0_pm, J2_p_m, J2_0_0 = calculator.get_2d_spectral_density(res=0.5, sigma=7.5)
-    else:
-        omega_x = omega_y = J2_0_pm = J2_p_m = J2_0_0 = None
-
-    omega_zfs = calculator.data["zfs"] / CONSTANTS["meV2J"]
-
-    rate_results = {
-        "first_order": {"0_1": [], "1_-1": []},
-        "second_order": {"0_1": [], "1_-1": []},
-        "two_phonon": {"0_1": [], "1_-1": []},
-    }
-    directional_results = {
-        "0_to_1": [],
-        "0_to_-1": [],
-        "1_to_0": [],
-        "-1_to_0": [],
-        "1_to_-1": [],
-        "-1_to_1": [],
-    }
-    valid_temps = []
-
-    LOGGER.info(f"[3/5] Computing transition rates for {len(temps)} temperature points...")
-    for T in temps:
-        calculator.compute_transition_rates(T, omega, J_0_pm, J_p_m, J_0_0, omega_zfs)
-        if two_ph_p is not None or (coupling_data is not None and coupling_data.has_second_order):
-            calculator.compute_two_phonon_rates(T, omega_x, omega_y, J2_0_pm, J2_p_m, J2_0_0, omega_zfs)
-
-        total_rates = calculator.get_total_rates()
-        dir_rates = calculator.get_directional_rates()
-
-        if total_rates and dir_rates:
-            for k, val in dir_rates.items():
-                directional_results[k].append(val)
-            for ord_k in ["first_order", "second_order", "two_phonon"]:
-                for trans_k in ["0_1", "1_-1"]:
-                    rate_results[ord_k][trans_k].append(total_rates[ord_k][trans_k])
-            valid_temps.append(float(T))
-
-    valid_temps_arr = np.asarray(valid_temps, dtype=float)
+    temps = temperature_grid(t_start, t_end, t_step, temperatures)
+    LOGGER.info(f"[3/5] Computing transition rates for {len(temps)} temperature points (sigma {sigma:g} meV)...")
+    valid_temps_arr, rate_results, directional_results = compute_rates(
+        coupling_path,
+        temps,
+        sigma=sigma,
+        two_phonon_file=two_phonon_file,
+        has_second_order=coupling_data is not None and coupling_data.has_second_order,
+    )
 
     # Save rates
     rates_path = run_dir / "transition_rates.npz"
@@ -652,12 +682,7 @@ def _execute_pipeline(
     t1_paths: dict[str, Path] = {}
     for state in init_states:
         LOGGER.info(f"[4/5] Solving population relaxation dynamics (initial state: {state})...")
-        dynamics = RelaxationDynamics(init_state=INIT_POPULATIONS[state], rates_data=str(dir_rates_path))
-
-        t1_fit_arr = np.asarray(dynamics.compute_T1_range(), dtype=float)
-        t1_eig_arr = np.asarray(
-            [dynamics.get_T1_eigenval(temp_index=i)[0] for i in range(len(valid_temps_arr))], dtype=float
-        )
+        t1_fit_arr, t1_eig_arr = solve_t1(dir_rates_path, state)
         rates_fit = np.where(np.isfinite(t1_fit_arr) & (t1_fit_arr > 0), 1.0 / t1_fit_arr, np.nan)
         rates_eig = np.where(np.isfinite(t1_eig_arr) & (t1_eig_arr > 0), 1.0 / t1_eig_arr, np.nan)
 
@@ -670,6 +695,7 @@ def _execute_pipeline(
             order=analyzed,
             init_state=state,
             pert_scale=pert_eff if pert_eff is not None else np.nan,
+            sigma_mev=sigma,
             temperatures=valid_temps_arr,
             t1_fit=t1_fit_arr,
             t1_eigenval=t1_eig_arr,
@@ -707,6 +733,7 @@ def _execute_pipeline(
             "points": len(valid_temps_arr),
         },
         "init_state": init_states,
+        "sigma_mev": sigma,
         # Second-order entries failing the linear-response check (run folders, 1-based).
         "inconsistent_second_order": {
             "excluded": bool(inconsistent_pairs) and not keep_inconsistent_pairs,

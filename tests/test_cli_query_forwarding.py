@@ -266,3 +266,10 @@ def test_query_continues_past_a_failing_dataset_and_reports_it(monkeypatch, caps
     out = capsys.readouterr().out
     assert "[2/3] /data/NV_216_raw_zfs_data_all_bands_12d.npz" in out
     assert "Done: 2 of 3 dataset(s) analyzed." in out
+
+
+def test_query_forwards_sigma(captured, monkeypatch):
+    _matches(monkeypatch, "/data/NV_512_raw_zfs_data_all_bands_12d.npz")
+    args = _parse(["--query", "--sigma", "2"])
+    args.func(args)
+    assert captured[0]["sigma"] == 2.0
