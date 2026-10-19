@@ -18,10 +18,11 @@ def main() -> int:
     ap = argparse.ArgumentParser(
         description="Report max/rms Cartesian displacement of one or more "
         "perturbed structures relative to the relaxed reference. Each path may be a "
-        "POSCAR/CONTCAR, a run directory, or an OUTCAR (its run's POSCAR is used)"
+        "POSCAR/CONTCAR, an OUTCAR, or a run directory. An OUTCAR (also the one in a run directory) gives the "
+        "geometry VASP actually computed, which POSCAR/CONTCAR may not be after a rerun"
     )
     ap.add_argument("reference", type=Path, help="relaxed reference (e.g. ZFS_hyp/POSCAR, ZFS_hyp/ or ZFS_hyp/OUTCAR)")
-    ap.add_argument("perturbed", type=Path, nargs="+", help="perturbed structure(s) to compare, e.g. runs/38_57/")
+    ap.add_argument("perturbed", type=Path, nargs="+", help="perturbed structure(s) to compare, e.g. runs/38_57/OUTCAR")
     ap.add_argument(
         "--phonons",
         type=Path,

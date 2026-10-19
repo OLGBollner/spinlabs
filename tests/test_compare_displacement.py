@@ -96,32 +96,61 @@ def test_wrapped_structure_matches(ref_poscar, tmp_path):
     assert stats["rms"] == pytest.approx(0.0, abs=1e-10)
 
 
-def test_outcar_and_run_directory_use_the_runs_poscar(ref_poscar, tmp_path):
-    """Pointing at a run's OUTCAR or directory compares the POSCAR it started from."""
+def _write_outcar(path, struct):
+    """An OUTCAR header with VASP's lattice and initial-position blocks."""
+    lat = struct.lattice.matrix
+    lines = [" executed on             Dardel date 2026.02.19  14:42:53", "  direct lattice vectors                 reciprocal lattice vectors"]
+    lines += [f"    {a:12.9f} {b:12.9f} {c:12.9f}     0.0 0.0 0.0" for a, b, c in lat]
+    lines += ["", " position of ions in cartesian coordinates  (Angst):"]
+    lines += [f"     {x:11.8f} {y:11.8f} {z:11.8f}" for x, y, z in (site.coords for site in struct)]
+    lines += ["", " ZFS ..."]
+    path.write_text("\n".join(lines) + "\n")
+    return path
+
+
+def test_outcar_geometry_wins_over_a_rewritten_poscar(ref_poscar, tmp_path, capsys):
+    """A run's OUTCAR holds the geometry that was computed; its POSCAR may come from a later attempt."""
     ref_path, ref = ref_poscar
-    for name in ("ref_run", "pert_run"):
-        (tmp_path / name).mkdir()
-        (tmp_path / name / "OUTCAR").write_text(" executed on Dardel date 2026.02.19  14:42:53\n")
-    _write(tmp_path / "ref_run" / "POSCAR", ref.copy())
+    computed = ref.copy()
+    computed.sites[2].coords = ref.sites[2].coords + [0, 0.2, 0]
+    rewritten = ref.copy()
+    rewritten.sites[2].coords = ref.sites[2].coords + [0, 0.4, 0]  # perturbed again after the run
+    run = tmp_path / "run"
+    run.mkdir()
+    _write(run / "POSCAR", rewritten)
+    _write_outcar(run / "OUTCAR", computed)
+
+    assert compare_displacement(ref_path, run / "OUTCAR")["max"] == pytest.approx(0.2, abs=1e-6)
+    assert compare_displacement(ref_path, run)["max"] == pytest.approx(0.2, abs=1e-6)  # directory -> its OUTCAR
+    assert compare_displacement(ref_path, run / "POSCAR")["max"] == pytest.approx(0.4)
+
+    compare_displacement_cli(ref_path, [run])
+    assert "(geometry from OUTCAR)" in capsys.readouterr().out
+
+
+def test_run_directory_without_outcar_uses_its_poscar(ref_poscar, tmp_path):
+    ref_path, ref = ref_poscar
     pert = ref.copy()
-    pert.sites[2].coords = ref.sites[2].coords + [0, 0.2, 0]
-    _write(tmp_path / "pert_run" / "POSCAR", pert)
-
-    from_outcars = compare_displacement(tmp_path / "ref_run" / "OUTCAR", tmp_path / "pert_run" / "OUTCAR")
-    from_dirs = compare_displacement(tmp_path / "ref_run", tmp_path / "pert_run")
-
-    assert from_outcars["max"] == pytest.approx(0.2)
-    assert from_dirs["max"] == pytest.approx(0.2)
-
-
-def test_outcar_without_poscar_is_reported(ref_poscar, tmp_path, capsys):
-    ref_path, _ = ref_poscar
+    pert.sites[1].coords = ref.sites[1].coords + [0.1, 0, 0]
     (tmp_path / "run").mkdir()
-    (tmp_path / "run" / "OUTCAR").write_text("")
+    _write(tmp_path / "run" / "POSCAR", pert)
 
-    compare_displacement_cli(ref_path, [tmp_path / "run" / "OUTCAR"])
+    assert compare_displacement(ref_path, tmp_path / "run")["max"] == pytest.approx(0.1)
 
-    assert "No POSCAR for" in capsys.readouterr().out
+
+def test_unusable_outcar_is_reported(ref_poscar, tmp_path, capsys):
+    ref_path, ref = ref_poscar
+    (tmp_path / "unfinished").mkdir()
+    _write(tmp_path / "unfinished" / "POSCAR", ref.copy())
+    (tmp_path / "unfinished" / "OUTCAR").write_text(" executed on Dardel\n")
+    (tmp_path / "no_poscar").mkdir()
+    _write_outcar(tmp_path / "no_poscar" / "OUTCAR", ref)
+
+    compare_displacement_cli(ref_path, [tmp_path / "unfinished" / "OUTCAR", tmp_path / "no_poscar" / "OUTCAR"])
+
+    out = capsys.readouterr().out
+    assert "no complete 'direct lattice vectors' block" in out
+    assert "No POSCAR/CONTCAR next to" in out
 
 
 def _pair_run(tmp_path, ref, *, mass_weighted):

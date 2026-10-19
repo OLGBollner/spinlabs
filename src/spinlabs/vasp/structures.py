@@ -21,22 +21,52 @@ def load_poscar(poscar_file: str | Path) -> Structure:
     return Poscar.from_file(poscar_file).structure
 
 
-def structure_file(path: str | Path) -> Path:
-    """The POSCAR-format file for ``path``: itself, or the POSCAR of a run directory or next to an OUTCAR.
+def load_structure(path: str | Path) -> tuple[Structure, Path]:
+    """The structure for ``path`` and the file it was read from.
 
-    A run's POSCAR is the geometry the calculation started from, which is the
-    perturbation that was applied (the ZFS runs do not relax).
+    An OUTCAR (or a run directory containing one) gives the geometry VASP
+    actually computed: the lattice and ion positions printed in the OUTCAR,
+    with the species from the POSCAR next to it. This is the geometry behind
+    that run's ZFS result, even when POSCAR/CONTCAR were rewritten by a later
+    attempt. A run directory without an OUTCAR, or any other file, is read as
+    POSCAR-format (POSCAR, CONTCAR, ...).
     """
     path = Path(path)
     if path.is_dir():
-        candidate = path / "POSCAR"
-    elif path.name.startswith(("OUTCAR", "OSZICAR", "vasprun")):
-        candidate = path.with_name("POSCAR")
-    else:
-        return path
-    if not candidate.is_file():
-        raise FileNotFoundError(f"No POSCAR for {path} (looked for {candidate})")
-    return candidate
+        path = path / "OUTCAR" if (path / "OUTCAR").is_file() else path / "POSCAR"
+    if not path.is_file():
+        raise FileNotFoundError(f"Structure file not found: {path}")
+    if path.name.startswith("OUTCAR"):
+        return _outcar_structure(path), path
+    return load_poscar(path), path
+
+
+def _outcar_structure(outcar: Path) -> Structure:
+    """Initial lattice and Cartesian positions from an OUTCAR; species from the run's POSCAR."""
+    species_file = next((outcar.with_name(n) for n in ("POSCAR", "CONTCAR") if outcar.with_name(n).is_file()), None)
+    if species_file is None:
+        raise FileNotFoundError(f"No POSCAR/CONTCAR next to {outcar} to take the species from")
+    species = [site.specie for site in load_poscar(species_file)]
+    markers = {"direct lattice vectors": 3, "position of ions in cartesian coordinates": len(species)}
+    blocks: dict[str, np.ndarray] = {}
+    # Both blocks are in the OUTCAR header: stop reading once they are found.
+    with open(outcar, errors="replace") as f:
+        for line in f:
+            marker = next((m for m in markers if m in line and m not in blocks), None)
+            if marker is None:
+                continue
+            rows = [next(f, "").split() for _ in range(markers[marker])]
+            try:
+                blocks[marker] = np.array([[float(x) for x in row[:3]] for row in rows])
+            except (ValueError, IndexError):
+                break
+            if len(blocks) == len(markers):
+                break
+    missing = [m for m in markers if m not in blocks]
+    if missing:
+        raise ValueError(f"{outcar}: no complete '{missing[0]}' block (unfinished run?)")
+    lattice, positions = blocks["direct lattice vectors"], blocks["position of ions in cartesian coordinates"]
+    return Structure(lattice, species, positions, coords_are_cartesian=True)
 
 
 @dataclass(frozen=True)
@@ -367,10 +397,10 @@ def compare_displacement(reference: str | Path, perturbed: str | Path) -> dict:
     written into a neighbouring cell by VASP compares as identical.
 
     Each argument may be a POSCAR/CONTCAR, a run directory, or an OUTCAR;
-    see :func:`structure_file`.
+    see :func:`load_structure`. ``source`` in the result is the file read.
     """
-    ref = load_poscar(structure_file(reference))
-    pert = load_poscar(structure_file(perturbed))
+    ref, _ = load_structure(reference)
+    pert, source = load_structure(perturbed)
     if len(ref) != len(pert):
         raise ValueError(f"Atom count mismatch: {len(ref)} vs {len(pert)}")
     if ref.composition.reduced_formula != pert.composition.reduced_formula:
@@ -390,6 +420,7 @@ def compare_displacement(reference: str | Path, perturbed: str | Path) -> dict:
         "rms": float(np.sqrt((norms**2).mean())),
         "max_index": int(norms.argmax()),
         "n_atoms": len(ref),
+        "source": source,
     }
 
 
@@ -451,7 +482,7 @@ def compare_displacement_cli(
             continue
         rows.append((path, stats))
         print(
-            f"{path}\n    max |disp| = {stats['max']:.6f} Å "
+            f"{path}  (geometry from {stats['source'].name})\n    max |disp| = {stats['max']:.6f} Å "
             f"(atom {stats['max_index'] + 1})"
             f"\n    rms        = {stats['rms']:.6f} Å"
             f"\n    n_atoms    = {stats['n_atoms']}"
