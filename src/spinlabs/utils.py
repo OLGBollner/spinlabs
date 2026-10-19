@@ -13,6 +13,16 @@ class MathUtils:
         return delta
 
     @staticmethod
+    def gaussian_density(x, x0, width):
+        """Normalised Gaussian in ``x`` around ``x0``: a broadened delta(x - x0) in units of 1/[x].
+
+        Unlike :meth:`broad_delta` it is not rescaled to sum to 1 on the grid, so
+        ``sum(f * gaussian_density(...)) * dx`` approximates the integral of f
+        against the delta independently of the grid spacing.
+        """
+        return np.exp(-0.5 * ((x - x0) / width) ** 2) / (np.sqrt(2 * Cn.pi) * width)
+
+    @staticmethod
     def expand_data(freqs: np.ndarray, values: np.ndarray, res: float, sigma: float) -> Tuple[np.ndarray, np.ndarray]:
         freqs = np.array(freqs)
         values = np.array(values)
@@ -77,6 +87,11 @@ class MathUtils:
 
     @staticmethod
     def get_2d_spectral_density(freqs, values, res, sigma_phys):
+        """Pair weights ``values[i, j]`` at (freqs[i], freqs[j]), smeared by ``sigma_phys`` on each axis.
+
+        Returns the grid and the spectral density per unit frequency squared
+        (like :meth:`smear_data` in 1D), so its integral does not depend on ``res``.
+        """
         from scipy.ndimage import gaussian_filter
 
         x_array, y_array, dense_values = MathUtils.expand_data_2d(freqs, values, sigma=sigma_phys, res=res)
@@ -88,7 +103,8 @@ class MathUtils:
 
         X, Y = np.meshgrid(x_array, y_array)
 
-        return X, Y, smoothed
+        # The filter keeps each pixel's summed weight; per pixel area that is a density.
+        return X, Y, smoothed / res**2
 
     @staticmethod
     def rotation_matrix_around_axis(axis, angle):
