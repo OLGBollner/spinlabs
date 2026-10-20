@@ -24,6 +24,7 @@ from __future__ import annotations
 
 
 import json
+from dataclasses import dataclass
 from pathlib import Path
 import sys
 
@@ -63,17 +64,221 @@ def quad_fit(x: np.ndarray, y: np.ndarray) -> tuple[float, float, float, np.ndar
     return a, b, c, y_fit, y - y_fit
 
 
-def q_needed(c: float, noise: float, snr: float = 3.0) -> float | None:
-    """Amplitude Q at which the quadratic term c*Q^2 exceeds noise by snr.
+# --------------------------------------------------------------------------- #
+# signal-to-noise and a safe perturbation amplitude
+# --------------------------------------------------------------------------- #
+SNR_TARGET = 3.0  # finite difference at least this many times its error (noise + D0 offset)
+TRUNC_TOL = 0.1  # relative truncation error allowed (next Taylor term / estimate)
+SIGNIFICANCE = 2.0  # a fitted coefficient below this many standard errors is unresolved
 
-    noise is the max |linear-fit residual|, i.e. the numerical scatter in D.
-    Returns None when |c| is negligible (quadratic term stays buried at any
-    reachable amplitude) — comparing c*Q^2 to noise directly.
+
+def traceless_parts(tensor: np.ndarray, R: np.ndarray) -> np.ndarray:
+    """The 5 traceless components of ``tensor`` in the frame R, as (A1, E1..E4).
+
+    A1 = (2 D_zz - D_xx - D_yy)/sqrt 6, E = ((D_xx - D_yy)/sqrt 2, D_xy, D_xz, D_yz):
+    combinations with the noise of a single tensor element, so a per-element noise
+    sigma applies to each of them.
     """
-    if c == 0.0 or not np.isfinite(c):
+    d = R.T @ np.asarray(tensor, dtype=float) @ R
+    return np.array([
+        (2 * d[2, 2] - d[0, 0] - d[1, 1]) / np.sqrt(6),
+        (d[0, 0] - d[1, 1]) / np.sqrt(2),
+        d[0, 1],
+        d[0, 2],
+        d[1, 2],
+    ])
+
+
+def cubic_fit(perts: np.ndarray, values: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Fit values(Q) = a + b Q + c Q^2 + d Q^3 to the Q != 0 points.
+
+    The intercept is free and D0 is left out, so a is where the perturbed runs meet
+    at Q=0 and a - D0 measures D0's offset from them. values is (n_Q, ...).
+    Returns (coef (4, ...) = a, b, c, d; residuals at the Q != 0 points; design matrix).
+    """
+    perts = np.asarray(perts, dtype=float)
+    keep = ~np.isclose(perts, 0.0)
+    q = perts[keep]
+    X = np.vander(q, 4, increasing=True)
+    flat = values[keep].reshape(len(q), -1)
+    coef = np.linalg.lstsq(X, flat, rcond=None)[0]
+    resid = flat - X @ coef
+    return coef.reshape((4,) + values.shape[1:]), resid.reshape(values[keep].shape), X
+
+
+def pooled_noise(perts: list[np.ndarray], parts_by_mode: list[np.ndarray]) -> tuple[float, int]:
+    """Noise sigma (MHz per tensor element) from the cubic-fit scatter of every mode's D(Q).
+
+    Each mode's 5 traceless parts at Q != 0 are fitted with a cubic (cubic_fit); the
+    residuals of all modes are pooled. Returns (sigma, degrees of freedom); (nan, 0)
+    without 5+ amplitudes besides Q=0. Any response beyond Q^3 also lands in the
+    residual, so this is an upper bound.
+    """
+    sq, dof = 0.0, 0
+    for p, parts in zip(perts, parts_by_mode):
+        n = int(np.sum(~np.isclose(p, 0.0)))
+        if n < 5:
+            continue
+        sq += float(np.sum(cubic_fit(p, parts)[1] ** 2))
+        dof += (n - 4) * parts.shape[1]
+    return (float(np.sqrt(sq / dof)), dof) if dof else (float("nan"), 0)
+
+
+def d0_offset(perts: list[np.ndarray], parts_by_mode: list[np.ndarray], d0_parts: np.ndarray) -> np.ndarray:
+    """Offset (5 traceless parts, MHz) of D0 from where the perturbed runs meet at Q=0.
+
+    The median over modes of the cubic fits' intercept minus D0. D0 is usually a
+    separate ground-state run; any difference in its settings or convergence shows
+    up here, the same for every mode, and enters every finite difference as
+    offset/Q (first order) and offset/Q^2 (second order).
+    """
+    icpt = [cubic_fit(p, parts)[0][0] for p, parts in zip(perts, parts_by_mode)
+            if np.sum(~np.isclose(p, 0.0)) >= 5]
+    return np.median(np.array(icpt), axis=0) - d0_parts if icpt else np.zeros(5)
+
+
+@dataclass
+class SNRReport:
+    """Noise, D0 offset, Taylor coefficients and the safe amplitude window of one mode.
+
+    Coefficients are norms over the 5 traceless parts of D(Q) = a + b Q + c Q^2 + d Q^3,
+    fitted to the perturbed runs. The production schemes measure against D0:
+    first order (D(Q) - D0)/Q, with error hypot(sqrt 2 sigma, offset)/Q and
+    truncation c Q, and second order (D(2Q) - 2 D(Q) + D0)/Q^2 (the i = i pair), with
+    error hypot(sqrt 6 sigma, offset)/Q^2 and truncation 6 d Q on 2c. An unresolved
+    coefficient is replaced by its upper bound, so the window's upper end is then a
+    lower limit.
+    """
+
+    sigma: float
+    sigma_source: str
+    offset: float
+    b: float
+    c: float
+    d: float
+    c_resolved: bool
+    d_resolved: bool
+    q_lo1: float
+    q_hi1: float
+    q_lo2: float
+    q_hi2: float
+    target: float = SNR_TARGET
+    tol: float = TRUNC_TOL
+    b_resolved: bool = True
+
+    @property
+    def err1(self) -> float:
+        """Error of D(Q) - D0 (MHz): noise of two runs and D0's offset."""
+        return float(np.hypot(np.sqrt(2) * self.sigma, self.offset))
+
+    @property
+    def err2(self) -> float:
+        """Error of D(2Q) - 2 D(Q) + D0 (MHz): noise of three runs and D0's offset."""
+        return float(np.hypot(np.sqrt(6) * self.sigma, self.offset))
+
+    def first_order(self, q) -> tuple[np.ndarray, np.ndarray]:
+        """(noise + offset, truncation) relative errors of the first-order coefficient at q."""
+        q = np.asarray(q, dtype=float)
+        return self.err1 / (self.b * q), self._c_up * q / self.b
+
+    def second_order(self, q) -> tuple[np.ndarray, np.ndarray]:
+        """(noise + offset, truncation) relative errors of the diagonal second-order coefficient at q."""
+        q = np.asarray(q, dtype=float)
+        return self.err2 / (2 * self.c * q**2), 3 * self._d_up * q / self.c
+
+    @property
+    def _c_up(self) -> float:
+        return self.tol * self.b / self.q_hi1
+
+    @property
+    def _d_up(self) -> float:
+        return self.tol * self.c / (3 * self.q_hi2)
+
+
+def snr_report(
+    perts: np.ndarray,
+    parts: np.ndarray,
+    sigma: float | None = None,
+    sigma_source: str = "",
+    offset: np.ndarray | None = None,
+    target: float = SNR_TARGET,
+    tol: float = TRUNC_TOL,
+) -> SNRReport | None:
+    """Fit D(Q) per traceless part with a cubic and derive SNR and the safe Q window.
+
+    perts must contain Q=0 (D0); parts is (n_Q, 5) from traceless_parts. The cubic is
+    fitted to the other points (cubic_fit). Without ``sigma`` the noise is its residual,
+    without ``offset`` (5 parts) D0's offset is this mode's intercept minus D0.
+    Returns None without D0 or with fewer than 5 other amplitudes.
+    """
+    perts = np.asarray(perts, dtype=float)
+    zero = np.isclose(perts, 0.0)
+    if not zero.any() or np.sum(~zero) < 5:
         return None
-    q = float(np.sqrt(snr * abs(noise) / abs(c)))
-    return q if np.isfinite(q) else None
+    coef, resid, X = cubic_fit(perts, parts)
+    if sigma is None:
+        dof = (int(np.sum(~zero)) - 4) * parts.shape[1]
+        sigma = float(np.sqrt(np.sum(resid**2) / dof))
+        sigma_source = f"this mode's cubic-fit residuals, {dof} dof"
+    if offset is None:
+        offset = coef[0] - parts[zero][0]
+    delta = float(np.linalg.norm(offset))
+    se = sigma * np.sqrt(np.diag(np.linalg.inv(X.T @ X)))
+    # the norm over 5 parts of pure-noise coefficients is ~ sqrt 5 standard errors
+    floor = SIGNIFICANCE * se * np.sqrt(parts.shape[1])
+    b, c, d = np.linalg.norm(coef[1:], axis=1)
+    c_up, d_up = max(c, floor[2]), max(d, floor[3])
+    err1, err2 = np.hypot(np.sqrt(2) * sigma, delta), np.hypot(np.sqrt(6) * sigma, delta)
+    # a response that stays within noise + D0 offset even at the largest |Q| is ~ 0
+    qmax = float(np.max(np.abs(perts)))
+    return SNRReport(
+        sigma=sigma,
+        sigma_source=sigma_source,
+        offset=delta,
+        b=float(b),
+        c=float(c),
+        d=float(d),
+        b_resolved=bool(b > floor[1] and b * qmax > SIGNIFICANCE * err1),
+        c_resolved=bool(c > floor[2] and 2 * c * qmax**2 > SIGNIFICANCE * err2),
+        d_resolved=bool(d > floor[3]),
+        q_lo1=float(target * err1 / b),
+        q_hi1=float(tol * b / c_up),
+        q_lo2=float(np.sqrt(target * err2 / (2 * c))),
+        q_hi2=float(tol * c / (3 * d_up)),
+        target=target,
+        tol=tol,
+    )
+
+
+def format_snr(report: SNRReport, qs: list[float]) -> str:
+    """Text block: noise, coefficients, per-|Q| SNR and truncation, and the safe windows."""
+    r = report
+    lines = [
+        f"noise sigma {r.sigma:.3g} MHz per tensor element ({r.sigma_source}); D0 offset {r.offset:.3g} MHz",
+        f"|b| {r.b:.4g} MHz/Q, |c| {r.c:.4g} MHz/Q^2{'' if r.c_resolved else ' (unresolved)'}, "
+        f"|d| {r.d:.4g} MHz/Q^3{'' if r.d_resolved else ' (unresolved)'}",
+        "  SNR = coefficient / (noise + D0 offset)",
+        f"  {'|Q|':>8}  {'SNR 1st':>9}  {'trunc 1st':>10}  {'SNR 2nd':>9}  {'trunc 2nd':>10}",
+    ]
+    for q in qs:
+        n1, t1 = r.first_order(q)
+        n2, t2 = r.second_order(q)
+        lines.append(
+            f"  {q:>8.4g}  {1 / n1:>9.3g}  {'<' if not r.c_resolved else ' '}{t1:>9.2%}"
+            f"  {1 / n2:>9.3g}  {'<' if not r.d_resolved else ' '}{t2:>9.2%}"
+        )
+
+    def window(lo: float, hi: float, bound: bool) -> str:
+        if lo <= hi:
+            return f"{lo:.3g} .. {'>= ' if bound else ''}{hi:.3g}"
+        if bound:  # the truncation bound is only what the noise allows; the window may still exist
+            return f">= {lo:.3g}; upper end unknown (next Taylor term not resolved by these amplitudes)"
+        return f"none (SNR {r.target:g} needs |Q| >= {lo:.3g}, truncation exceeds {r.tol:.0%} above {hi:.3g})"
+
+    lines.append(f"safe |Q| (SNR >= {r.target:g}, truncation <= {r.tol:.0%}; '<' marks an upper bound):")
+    lines.append(f"  first order : {window(r.q_lo1, r.q_hi1, not r.c_resolved)}")
+    lines.append(f"  second order: {window(r.q_lo2, r.q_hi2, not r.d_resolved)}")
+    return "\n".join(lines)
 
 
 def one_sided_d2(p: np.ndarray, v: np.ndarray) -> float | None:
@@ -108,6 +313,123 @@ def one_sided_d2(p: np.ndarray, v: np.ndarray) -> float | None:
     return 2 * (v3[0] / (h1 * (h1 + h2)) - v3[1] / (h1 * h2) + v3[2] / (h2 * (h1 + h2)))
 
 
+PART_LABELS = ("A1", "(xx−yy)/√2", "xy", "xz", "yz")
+
+
+def _plot_finite_differences(axes, perts: np.ndarray, parts: np.ndarray, report: SNRReport) -> None:
+    """Bottom row: the measured finite differences of each traceless part vs |Q|.
+
+    The 5 traceless parts (traceless_parts) hold the E response of E modes too, which
+    sits in the off-diagonal elements the principal-value panels above do not show.
+    Parts with < 2% of the largest response are left out. All differences are taken
+    against D0, as in the coupling calculation. Error bars are the noise (sqrt 2
+    sigma/Q first order, sqrt 6 sigma/Q^2 second order); dashed lines are the Q -> 0
+    values b and 2c of the cubic fitted to the perturbed runs. A point drifting off
+    its line at large |Q| is truncation; at small |Q| it is D0's offset (growing as
+    1/Q, 1/Q^2) or noise (wide bars).
+    """
+    f0 = parts[np.isclose(perts, 0.0)][0]
+    coef = cubic_fit(perts, parts)[0]  # (4, 5): a, b, c, d per part
+    qmax = float(np.max(np.abs(perts)))
+    sigma = report.sigma
+    shown1 = np.abs(coef[1]) >= 0.02 * np.max(np.abs(coef[1]))
+    shown2 = np.abs(coef[2]) >= 0.02 * np.max(np.abs(coef[2]))
+    for k in range(parts.shape[1]):
+        color = f"C{k}"
+        label = PART_LABELS[k]
+        # first order (D(Q) - D0)/Q on both sides
+        for side, face in ((1, color), (-1, "white")) if shown1[k] else ():
+            q = np.sort(np.abs(perts[np.sign(perts) == side]))
+            if not len(q):
+                continue
+            vals = [(parts[np.isclose(perts, side * x)][0, k] - f0[k]) / (side * x) for x in q]
+            axes[0].errorbar(q, vals, yerr=np.sqrt(2) * sigma / q, fmt="o", color=color, mfc=face, ms=5, capsize=3,
+                             label=f"{label} {'+Q' if side > 0 else '−Q'}")
+        if shown1[k]:
+            axes[0].axhline(coef[1, k], color=color, ls="--", lw=0.8)
+        if not shown2[k]:
+            continue
+        # second order: central at each |Q|, and the i = i pair scheme (step Q, uses 2Q)
+        cq, cv = [], []
+        for x in sorted({abs(float(v)) for v in perts if v > 0}):
+            pos, neg = np.isclose(perts, x), np.isclose(perts, -x)
+            if pos.any() and neg.any():
+                cq.append(x)
+                cv.append((parts[pos][0, k] + parts[neg][0, k] - 2 * f0[k]) / x**2)
+        if cq:
+            cq = np.array(cq)
+            axes[1].errorbar(cq, cv, yerr=np.sqrt(6) * sigma / cq**2, fmt="o", color=color, ms=5, capsize=3,
+                             label=f"{label} central")
+        for side in (1, -1):
+            fq, fv = [], []
+            for x in sorted({abs(float(v)) for v in perts if np.sign(v) == side}):
+                one, two = np.isclose(perts, side * x), np.isclose(perts, 2 * side * x)
+                if one.any() and two.any():
+                    fq.append(x)
+                    fv.append((parts[two][0, k] - 2 * parts[one][0, k] + f0[k]) / x**2)
+            if fq:
+                fq = np.array(fq)
+                axes[1].errorbar(fq * (1.04 if side > 0 else 0.96), fv, yerr=np.sqrt(6) * sigma / fq**2, fmt="s",
+                                 color=color, mfc=color if side > 0 else "white", ms=5, capsize=3,
+                                 label=f"{label} pair {'+' if side > 0 else '−'}Q, 2Q")
+        axes[1].axhline(2 * coef[2, k], color=color, ls="--", lw=0.8)
+    for ax, lo, hi, resolved, title in (
+        (axes[0], report.q_lo1, report.q_hi1, report.c_resolved, "first order  (D(Q) − D0)/Q"),
+        (axes[1], report.q_lo2, report.q_hi2, report.d_resolved, "second order  d²D/dQ² estimates"),
+    ):
+        right = 1.15 * qmax
+        if lo < min(hi, right) or (not resolved and lo < right):
+            ax.axvspan(max(lo, 0), right if not resolved else min(hi, right), color="#7fb77e", alpha=0.2, lw=0)
+        window = f"{lo:.3g}–{'≥' if not resolved else ''}{hi:.3g}" if lo <= hi or not resolved else "none"
+        ax.set_title(f"{title}\nsafe |Q|: {window}  (SNR ≥ {report.target:g}, trunc ≤ {report.tol:.0%})", fontsize=9)
+        ax.set_xlim(0, right)
+        ax.set_xlabel("|Q|  (dashed: Q→0 value of the cubic fit; bars: noise ±1σ)", fontsize=8)
+        ax.axhline(0, color="#bbbbbb", lw=0.6)
+        ax.legend(fontsize=6, ncol=2)
+    axes[0].set_ylabel("traceless part (MHz/Q, MHz/Q²)")
+
+
+def common_window(reports: dict[int, SNRReport]) -> str:
+    """One |Q| range for all modes: the largest lower end and the smallest upper end.
+
+    A mode whose coefficient is not resolved from zero (e.g. no first-order coupling
+    by symmetry) sets no lower end for that order, and an unresolved next Taylor term
+    sets no upper end.
+    """
+    lines = [
+        "safe |Q| per mode and for all modes together:",
+        f"  {'mode':>6}  {'first order':>22}  {'second order':>22}",
+    ]
+
+    def cell(lo: float, hi: float, signal: bool, next_term: bool) -> str:
+        if not signal:
+            return "coefficient ~ 0"
+        return f"{lo:.3g} .. {hi:.3g}" if next_term else f"{lo:.3g} .. (>= {hi:.3g})"
+
+    for m, r in reports.items():
+        lines.append(
+            f"  {m:>6}  {cell(r.q_lo1, r.q_hi1, r.b_resolved, r.c_resolved):>22}"
+            f"  {cell(r.q_lo2, r.q_hi2, r.c_resolved, r.d_resolved):>22}"
+        )
+    for order, lo_key, hi_key, signal, next_term in (
+        ("first order ", "q_lo1", "q_hi1", "b_resolved", "c_resolved"),
+        ("second order", "q_lo2", "q_hi2", "c_resolved", "d_resolved"),
+    ):
+        los = {m: getattr(r, lo_key) for m, r in reports.items() if getattr(r, signal)}
+        his = {m: getattr(r, hi_key) for m, r in reports.items() if getattr(r, signal) and getattr(r, next_term)}
+        if not los:
+            lines.append(f"  all modes, {order}: no mode has a resolved coefficient")
+            continue
+        lo_mode = max(los, key=los.get)
+        lo_txt = f"{los[lo_mode]:.3g} (mode {lo_mode})"
+        if his:
+            hi_mode = min(his, key=his.get)
+            hi_txt = f"{his[hi_mode]:.3g} (mode {hi_mode})"
+            verdict = "OK" if los[lo_mode] <= his[hi_mode] else "no common |Q|"
+        else:
+            hi_txt, verdict = "not limited by these amplitudes", "OK"
+        lines.append(f"  all modes, {order}: {lo_txt} .. {hi_txt}: {verdict}")
+    return "\n".join(lines)
 
 
 def read_conv_metadata(npz_path: Path) -> dict:
@@ -133,8 +455,19 @@ def plot_pert_convergence(
     csv_path: Path | None = None,
     show: bool = False,
     drop_anchor: bool = False,
+    noise: float | None = None,
+    snr_target: float = SNR_TARGET,
+    trunc_tol: float = TRUNC_TOL,
 ) -> list[Path]:
     """Plot ZFS principal components vs perturbation scale from a packed npz.
+
+    With the Q=0 anchor and 5+ amplitudes a third row shows the finite differences
+    the coupling calculation uses, evaluated at each measured |Q| with their noise
+    error bars: first order (D(Q) - D0)/Q and second order, central
+    (D(Q) + D(-Q) - 2 D0)/Q^2 and the i = i pair's (D(2Q) - 2 D(Q) + D0)/Q^2. The
+    noise sigma is the cubic-fit scatter pooled over all modes of the npz (or
+    ``noise``); the shaded |Q| range has SNR >= snr_target and truncation <= trunc_tol,
+    and the log ends with the range common to all modes.
 
     Returns the list of written output files.
     """
@@ -195,6 +528,25 @@ def plot_pert_convergence(
 
     csv_rows: list[tuple] = []
     out_files: list[Path] = []
+    reports: dict[int, SNRReport] = {}
+
+    # noise and D0's offset from the convergence runs themselves, pooled over all modes
+    offset = None
+    noise_source = "--noise"
+    if q0_shared is not None:
+        frame = principal_frame(q0_shared)
+        finished = [~np.isnan(tensors[i]).any(axis=(1, 2)) for i in range(tensors.shape[0])]
+        p_modes = [perts[ok] for ok in finished]
+        parts_modes = [np.stack([traceless_parts(t, frame) for t in tensors[i][ok]]) for i, ok in enumerate(finished)]
+        if noise is None:
+            noise, n_dof = pooled_noise(p_modes, parts_modes)
+            noise_source = f"cubic-fit scatter of all {tensors.shape[0]} modes, {n_dof} dof"
+        offset = d0_offset(p_modes, parts_modes, traceless_parts(q0_shared, frame))
+        LOGGER.info(
+            f"noise sigma {noise:.3g} MHz per tensor element ({noise_source}); D0 sits "
+            f"{np.linalg.norm(offset):.3g} MHz from where the perturbed runs meet at Q=0 "
+            f"(A1, E parts: {np.array2string(offset, precision=4)})"
+        )
 
     for mode in wanted:
         if mode not in set(modes.tolist()):
@@ -242,8 +594,20 @@ def plot_pert_convergence(
         # instead of zigzagging between +Q and -Q
         sgn = np.argsort(p_use)
 
+        report = None
+        if noise is not None and np.isfinite(noise) and np.isclose(p_all, 0.0).any():
+            parts = np.stack([traceless_parts(t, R) for t in t_all])
+            report = snr_report(p_all, parts, noise, noise_source, offset, snr_target, trunc_tol)
         ncols = 2
-        fig, axes = plt.subplots(2, ncols, figsize=(5 * ncols, 6), sharex=True, gridspec_kw={"height_ratios": [3, 1]})
+        nrows = 3 if report is not None else 2
+        fig, axes = plt.subplots(
+            nrows, ncols, figsize=(5 * ncols, 9 if report else 6), gridspec_kw={"height_ratios": [3, 1, 2.4][:nrows]}
+        )
+        for j in range(ncols):
+            axes[0, j].sharex(axes[1, j])
+            axes[0, j].tick_params(labelbottom=False)
+            if report is not None:
+                axes[1, j].axhspan(-report.sigma, report.sigma, color="#d9d9d9", alpha=0.6, lw=0)
         trace_labeled = False
         for k in range(3):
             a, b, y_lin, res = linear_fit(p_use, vals[:, k])
@@ -280,14 +644,6 @@ def plot_pert_convergence(
                 )
                 msg += f"\n    quad: D(Q) = {qa:.4g} + {qb:.4g} Q + {qc:.4g} Q^2 (dof {len(p_use) - 3})"
                 msg += f"\n    d2D/dQ2: regression {d2:.4g}, one-sided fwd {fwd_txt} MHz/pert^2{rel}"
-                qreq = q_needed(qc, np.max(np.abs(res)))
-                if qreq is not None:
-                    msg += (
-                        f"\n    Q needed for quad term at SNR 3: |Q| ~ {qreq:.3g} "
-                        f"(current max |Q|: {np.max(np.abs(p_use)):.3g})"
-                    )
-                else:
-                    msg += "\n    Q needed for quad term at SNR 3: n/a (c negligible vs noise)"
                 row += [f"{d2:.6g}", fwd_txt]
                 # central second differences (f(+Q) + f(-Q) - 2 f(0)) / Q^2
                 if 0.0 in set(p_use.tolist()):
@@ -309,7 +665,13 @@ def plot_pert_convergence(
             axes[0, j].set_title(title)
             axes[0, j].set_ylabel("principal value (MHz)")
             axes[1, j].set_xlabel("perturbation scale")
-            axes[1, j].set_ylabel("residual (MHz)")
+            axes[1, j].xaxis.set_major_locator(plt.MaxNLocator(5))
+            axes[1, j].set_ylabel("residual (MHz)" + ("\n(grey: ±σ noise)" if report else ""))
+        if report is not None:
+            _plot_finite_differences(axes[2], p_all, parts, report)
+            reports[mode] = report
+            qs = sorted({abs(float(x)) for x in p_all if x != 0})
+            LOGGER.info(f"mode {mode}: signal-to-noise\n" + format_snr(report, qs))
         fig.suptitle(f"mode {mode}: $D_\\lambda$" if not deviation else f"mode {mode}: $D_\\lambda - D_0$")
         axes[0, 1].legend(fontsize=7)
         fig.tight_layout()
@@ -330,4 +692,6 @@ def plot_pert_convergence(
             for row in csv_rows:
                 fh.write(",".join(str(v) for v in row) + "\n")
         LOGGER.info(f"  -> {csv_path}")
+    if reports:
+        LOGGER.info(common_window(reports))
     return out_files

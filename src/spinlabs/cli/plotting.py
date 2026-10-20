@@ -6,7 +6,7 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 
 from spinlabs.cli import add_verbosity_args
-from spinlabs.convergence import plot_pert_convergence, read_conv_metadata
+from spinlabs.convergence import SNR_TARGET, TRUNC_TOL, plot_pert_convergence, read_conv_metadata
 from spinlabs.plotter import plot_run_coupling, plot_run_rates, plot_t1
 from spinlabs.registry import ensure_db, find_runs, parse_orders
 from spinlabs.relaxation_dynamics import INIT_STATES, find_t1_files, normalize_init_state
@@ -72,6 +72,13 @@ def build_plot_parser(subparsers: argparse._SubParsersAction) -> None:  # noqa: 
         action="store_true",
         help="exclude the Q=0 anchor from fits and residuals (curves still extrapolate to Q=0)",
     )
+    conv.add_argument(
+        "--noise", type=float, help="noise sigma per tensor element in MHz (default: cubic-fit scatter of all modes)"
+    )
+    conv.add_argument("--snr-target", type=float, default=SNR_TARGET, help=f"required SNR (default {SNR_TARGET:g})")
+    conv.add_argument(
+        "--trunc-tol", type=float, default=TRUNC_TOL, help=f"allowed relative truncation error (default {TRUNC_TOL:g})"
+    )
     _add_output_args(conv)
     conv.set_defaults(func=_run_convergence)
 
@@ -99,6 +106,9 @@ def _run_convergence(args: argparse.Namespace) -> None:
         csv_path=args.csv,
         show=args.show,
         drop_anchor=args.drop_anchor,
+        noise=args.noise,
+        snr_target=args.snr_target,
+        trunc_tol=args.trunc_tol,
     )
 
 

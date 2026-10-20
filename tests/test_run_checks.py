@@ -1,4 +1,4 @@
-"""Checks of single perturbation runs: displacement, VASP symmetry handling, ZFS change shape."""
+"""Checks of perturbation runs (displacement, VASP symmetry handling, ZFS change shape) and the noise/SNR estimates."""
 
 import subprocess
 import sys
@@ -182,3 +182,63 @@ def test_dataset_flags_name_run_folders(tmp_path):
     )
     flags = dataset_shape_flags(raw, _spectrum())
     assert [folder for folder, _ in flags] == ["4"]
+
+
+# ---- signal-to-noise of the finite differences (convergence module) ----
+
+def test_snr_report_recovers_coefficients_and_window():
+    from spinlabs.convergence import snr_report
+
+    rng = np.random.default_rng(1)
+    q = np.array([-0.1, -0.05, -0.025, 0.0, 0.025, 0.05, 0.1])
+    b, c, d = 100.0, 10.0, 50.0  # MHz/Q^k, all in the A1 part
+    parts = np.zeros((len(q), 5))
+    parts[:, 0] = b * q + c * q**2 + d * q**3
+    parts += rng.normal(scale=1e-4, size=parts.shape)
+    r = snr_report(q, parts, sigma=1e-4, offset=np.zeros(5), target=10.0)
+    assert r.c_resolved and r.d_resolved
+    assert abs(r.b - b) / b < 0.01 and abs(r.c - c) / c < 0.05 and abs(r.d - d) / d < 0.1
+    # SNR 10 for 2c Q^2 against sqrt 6 sigma, truncation 3 d Q / c = 10%
+    assert np.isclose(r.q_lo2, np.sqrt(10 * np.sqrt(6) * 1e-4 / (2 * r.c)))
+    assert np.isclose(r.q_hi2, 0.1 * r.c / (3 * r.d))
+    noise, trunc = r.second_order(r.q_lo2)
+    assert np.isclose(noise, 0.1)
+
+
+def test_snr_report_bounds_an_unresolved_cubic_term():
+    from spinlabs.convergence import format_snr, snr_report
+
+    q = np.array([-0.1, -0.05, -0.025, 0.0, 0.025, 0.05, 0.1])
+    parts = np.zeros((7, 5))
+    parts[:, 1] = 20.0 * q + 5.0 * q**2  # E part, no cubic term
+    r = snr_report(q, parts, sigma=1e-3, offset=np.zeros(5))
+    assert not r.d_resolved and r.q_hi2 > 0
+    assert "second order: " in format_snr(r, [0.05, 0.1]) and ">=" in format_snr(r, [0.05, 0.1])
+    assert snr_report(q[1:-1], parts[1:-1]) is None  # 4 amplitudes besides D0: too few for a cubic
+
+
+def test_pooled_noise_from_cubic_scatter():
+    from spinlabs.convergence import pooled_noise
+
+    rng = np.random.default_rng(2)
+    q = np.array([-0.1, -0.05, -0.025, 0.0, 0.025, 0.05, 0.1])
+    modes = [np.outer(q, rng.normal(size=5)) * 50 + np.outer(q**2, rng.normal(size=5)) * 10
+             + rng.normal(scale=0.002, size=(7, 5)) for _ in range(20)]
+    sigma, dof = pooled_noise([q] * 20, modes)
+    assert dof == 20 * 2 * 5  # 6 amplitudes besides Q=0, 4 cubic coefficients, 5 parts
+    assert 0.0017 < sigma < 0.0023
+
+
+def test_d0_offset_shows_in_the_error_budget():
+    from spinlabs.convergence import d0_offset, snr_report
+
+    q = np.array([-0.1, -0.05, -0.025, 0.0, 0.025, 0.05, 0.1])
+    parts = np.zeros((7, 5))
+    parts[:, 0] = 100.0 * q + 10.0 * q**2
+    parts[3, 2] = -0.01  # D0 off by 0.01 MHz in one E part
+    offset = d0_offset([q, q], [parts, parts], parts[3])
+    assert np.allclose(offset, [0, 0, 0.01, 0, 0])
+    r = snr_report(q, parts, sigma=1e-5, offset=offset, target=10.0)
+    assert np.isclose(r.offset, 0.01)
+    # second order needs 2 c Q^2 >= 10 x offset: Q >= sqrt(0.1 / 20)
+    assert np.isclose(r.q_lo2, np.sqrt(10 * r.err2 / (2 * r.c))) and r.q_lo2 > 0.07
