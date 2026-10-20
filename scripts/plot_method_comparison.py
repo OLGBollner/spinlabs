@@ -279,7 +279,7 @@ def plot_ratio_vs_ipr(results: list[dict], out: Path) -> None:
             ax.plot(xr, np.where(dense, med, np.nan), color=CH_COLOR[ch], lw=1.6, zorder=3)
             ax.plot(xs, strength, ls="none", marker=CH_MARKER[ch], ms=5, mfc="#ffffff", mec=CH_COLOR[ch],
                     mew=1.2, zorder=4)
-        ax.axhline(1.0, color=INK2, lw=0.8, ls="--", zorder=0)
+        ax.axhline(1.0, color=INK2, lw=0.8, ls="--", zorder=2.5)  # above bands and dots, below the medians
         ax.set_xscale("log")
         ax.set_yscale("log")
         ax.set_ylim(0.02, 6)
