@@ -14,7 +14,7 @@ and set against the mode's localization from the IPR (PhononSpectrum.get_ipr,
 N_eff = 1/IPR atoms). Writes, to figures/method_comparison/:
 
     coupling_scatter.pdf    corrected vs contaminated per mode, colored by IPR
-    ratio_vs_ipr.pdf        per-mode ratio vs N_eff with IPR-binned strength ratios
+    ratio_vs_ipr.pdf        per-mode ratio vs N_eff; running median and quartiles, binned strength ratios
     unpaired_fraction.pdf   share of the coupling strength the unpaired bands carry
     e_direction.pdf         alignment of the E responses of the two methods
     method_comparison.tex   summary table (booktabs, siunitx)
@@ -43,7 +43,7 @@ TEX_NAMES = {"NV_512": r"NV$^-$ (512)", "DiV_128": r"V$_\text{Si}$V$_\text{C}$ (
              "ClV_128": r"Cl$_\text{C}$V$_\text{Si}$ (128)", "ClV_576": r"Cl$_\text{C}$V$_\text{Si}$ (576)"}
 PLOT_NAMES = {"NV_512": "NV (512)", "DiV_128": "DiV (128)", "ClV_128": "ClV (128)", "ClV_576": "ClV (576)"}
 CHANNELS = ("V00", "Vpm", "V0pm")
-CH_LABEL = {"V00": r"$V_{00}$ (A$_1$)", "Vpm": r"$V_{+-}$ (E, in-plane)", "V0pm": r"$V_{0\pm}$ (E, tilt)"}
+CH_LABEL = {"V00": r"$V_{00}$", "Vpm": r"$V_{+-}$", "V0pm": r"$V_{0\pm}$"}
 CH_COLOR = {"V00": "#2a78d6", "Vpm": "#eb6834", "V0pm": "#1baf7a"}  # validated, all pairs (light)
 CH_MARKER = {"V00": "o", "Vpm": "s", "V0pm": "^"}  # second encoding: aqua is below 3:1 contrast
 SNR_MIN = 10.0  # a mode enters the ratios only when its contaminated coupling is this far above noise
@@ -193,45 +193,112 @@ def plot_scatter(results: list[dict], out: Path) -> None:
                 ax.set_ylabel("corrected (MHz/Q)")
     cbar = fig.colorbar(sc, ax=axes, shrink=0.5, pad=0.02)
     cbar.set_label("mode IPR (localization)")
-    fig.suptitle("Per-mode couplings: unpaired-only (corrected) vs all bands (contaminated)\n"
-                 "dashed: equal; solid: strength ratio $\\sqrt{\\Sigma V_\\mathrm{corr}^2/\\Sigma V_\\mathrm{cont}^2}$",
-                 fontsize=9, y=1.0)
     fig.savefig(out)
     plt.close(fig)
 
 
+N_BINS = 10  # log-spaced N_eff bins per defect
+MIN_BIN = 3  # fewest modes in a bin; sparser bins are merged with their neighbour
+
+
+SMOOTH_DEX = 0.25  # half-width of the running window in decades of N_eff
+SMOOTH_MIN = 10  # fewest modes in the running window; widened to the nearest ones where sparse
+
+
+def running_quartiles(neff: np.ndarray, ratio: np.ndarray, n_grid: int = 60) -> tuple[np.ndarray, ...]:
+    """25/50/75 % of ratio on a log grid of N_eff from the most delocalized to the most localized mode.
+
+    Each grid point takes the modes within SMOOTH_DEX decades, or the SMOOTH_MIN modes
+    nearest in log N_eff where fewer lie that close, so the curve reaches the most
+    localized mode while every point stays a median of several modes. The last array
+    marks the points whose window held SMOOTH_MIN modes without widening.
+    """
+    lx = np.log10(neff)
+    grid = np.linspace(lx.max(), lx.min(), n_grid)
+    q = np.empty((n_grid, 3))
+    dense = np.zeros(n_grid, dtype=bool)
+    for k, g in enumerate(grid):
+        d = np.abs(lx - g)
+        sel = d <= SMOOTH_DEX
+        dense[k] = sel.sum() >= SMOOTH_MIN
+        if not dense[k]:
+            sel = d <= np.sort(d)[min(SMOOTH_MIN, len(d)) - 1]
+        q[k] = np.percentile(ratio[sel], [25, 50, 75])
+    return 10**grid, q[:, 0], q[:, 1], q[:, 2], dense
+
+
+def merged_bins(neff: np.ndarray, edges: np.ndarray) -> list[np.ndarray]:
+    """Index groups of log-spaced bins, each merged with its neighbour until it holds MIN_BIN modes.
+
+    Merging starts at the localized end, so the last group holds the most localized
+    modes; a sparse remainder at the delocalized end joins the first full group there.
+    """
+    which = np.clip(np.digitize(neff, edges) - 1, 0, len(edges) - 2)
+    groups, current = [], []
+    for k in range(len(edges) - 1):  # bins from small (localized) to large N_eff
+        current += list(np.where(which == k)[0])
+        if len(current) >= MIN_BIN:
+            groups.append(np.array(current))
+            current = []
+    if current:
+        if groups:
+            groups[-1] = np.concatenate([groups[-1], current])
+        else:
+            groups.append(np.array(current))
+    return groups[::-1]  # delocalized first, as the axis reads
+
+
 def plot_ratio_vs_ipr(results: list[dict], out: Path) -> None:
-    n = len(results)
-    fig, axes = plt.subplots(1, n, figsize=(1.9 * n + 0.6, 2.6), sharey=True, squeeze=False)
-    for ax, res in zip(axes[0], results):
-        for ch in CHANNELS:
-            rows = channel_rows(res, ch)
+    """Per-mode ratio against N_eff, with medians, quartiles and strength ratios in log-spaced bins."""
+    from matplotlib.lines import Line2D
+    from matplotlib.patches import Patch
+
+    ncols = 2
+    nrows = -(-len(results) // ncols)
+    fig, axes = plt.subplots(nrows, ncols, figsize=(6.6, 2.5 * nrows + 0.5), sharey=True, squeeze=False)
+    for ax, res in zip(axes.flat, results):
+        per_ch = {ch: channel_rows(res, ch) for ch in CHANNELS}
+        neff_all = np.array([1 / r["ipr"] for rows in per_ch.values() for r in rows])
+        edges = np.geomspace(neff_all.min() * 0.999, neff_all.max() * 1.001, N_BINS + 1)
+        for ch, rows in per_ch.items():
             if not rows:
                 continue
             neff = np.array([1 / r["ipr"] for r in rows])
             ratio = np.array([r["corr"][ch] / r["cont"][ch] for r in rows])
             ax.scatter(neff, np.maximum(ratio, 1e-3), s=5, color=CH_COLOR[ch], alpha=0.25, lw=0,
                        marker=CH_MARKER[ch], zorder=1)
-            xs, ys = [], []
-            for _, grp in ipr_bins(rows):
-                if grp:
-                    xs.append(np.median([1 / r["ipr"] for r in grp]))
-                    ys.append(strength_ratio(grp, ch))
-            ax.plot(xs, ys, color=CH_COLOR[ch], lw=1.6, marker=CH_MARKER[ch], ms=5, mec="#ffffff", mew=0.8,
-                    label=CH_LABEL[ch], zorder=3)
+            xr, lo, med, hi, dense = running_quartiles(neff, ratio)
+            xs, strength = [], []
+            for idx in merged_bins(neff, edges):
+                xs.append(np.median(neff[idx]))
+                strength.append(strength_ratio([rows[i] for i in idx], ch))
+            # band and solid median only where the window held SMOOTH_MIN modes by itself;
+            # the widened (sparse, localized) end continues as a dashed median
+            ax.fill_between(xr, lo, hi, where=dense, color=CH_COLOR[ch], alpha=0.18, lw=0, zorder=2)
+            ax.plot(xr, med, color=CH_COLOR[ch], lw=1.3, ls=(0, (3, 2)), zorder=3)
+            ax.plot(xr, np.where(dense, med, np.nan), color=CH_COLOR[ch], lw=1.6, zorder=3)
+            ax.plot(xs, strength, ls="none", marker=CH_MARKER[ch], ms=5, mfc="#ffffff", mec=CH_COLOR[ch],
+                    mew=1.2, zorder=4)
         ax.axhline(1.0, color=INK2, lw=0.8, ls="--", zorder=0)
         ax.set_xscale("log")
         ax.set_yscale("log")
-        ax.set_ylim(0.02, 5)
-        ax.invert_xaxis()  # localized modes (few atoms) to the right
+        ax.set_ylim(0.02, 6)
+        ax.set_xlim(edges[-1] * 1.15, edges[0] / 1.15)  # localized modes (few atoms) to the right
         ax.set_title(PLOT_NAMES[res["defect"]])
-        ax.set_xlabel("$N_\\mathrm{eff}$ = 1/IPR  (→ localized)")
         ax.grid(True, color=GRID, lw=0.5, zorder=0)
-    axes[0, 0].set_ylabel("$V_\\mathrm{corr}/V_\\mathrm{cont}$")
-    handles, labels = axes[0, 0].get_legend_handles_labels()
-    fig.legend(handles, labels, loc="lower center", ncol=3, frameon=False, bbox_to_anchor=(0.5, -0.1))
-    fig.suptitle("Ratio vs mode localization (dots: modes; lines: strength ratio of IPR groups "
-                 "0-50, 50-90, 90-99 %, top 1 %)", fontsize=9)
+    for ax in axes[-1]:
+        ax.set_xlabel("$N_\\mathrm{eff}$ = 1/IPR  (→ localized)")
+    for ax in axes[:, 0]:
+        ax.set_ylabel("$V_\\mathrm{corr}/V_\\mathrm{cont}$")
+    for ax in list(axes.flat)[len(results):]:
+        ax.set_axis_off()
+    handles = [Patch(color=CH_COLOR[ch], label=CH_LABEL[ch]) for ch in CHANNELS] + [
+        Line2D([], [], color=INK2, lw=1.6, label="running median"),
+        Line2D([], [], color=INK2, lw=1.3, ls=(0, (3, 2)), label=f"median, under {SMOOTH_MIN} modes in window"),
+        Patch(color=INK2, alpha=0.25, label="25-75 %"),
+        Line2D([], [], ls="none", marker="o", mfc="#ffffff", mec=INK2, mew=1.2, label="strength ratio per bin"),
+    ]
+    fig.legend(handles=handles, loc="upper center", ncol=4, frameon=False, bbox_to_anchor=(0.5, 0.0))
     fig.tight_layout()
     fig.savefig(out)
     plt.close(fig)
