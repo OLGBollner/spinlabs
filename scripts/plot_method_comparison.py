@@ -201,8 +201,8 @@ N_BINS = 10  # log-spaced N_eff bins per defect
 MIN_BIN = 3  # fewest modes in a bin; sparser bins are merged with their neighbour
 
 
-SMOOTH_DEX = 0.25  # half-width of the running window in decades of N_eff
-SMOOTH_MIN = 10  # fewest modes in the running window; widened to the nearest ones where sparse
+SMOOTH_DEX = 0.35  # half-width of the running window in decades of N_eff
+SMOOTH_MIN = 20  # fewest modes in the running window; widened to the nearest ones where sparse
 
 
 def running_quartiles(neff: np.ndarray, ratio: np.ndarray, n_grid: int = 60) -> tuple[np.ndarray, ...]:
