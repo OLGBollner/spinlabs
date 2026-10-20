@@ -11,6 +11,10 @@ LOGGER = get_logger(__name__)
 # Initial spin states in table/column order, and their initial populations
 # over (ms=+1, ms=0, ms=-1).
 INIT_STATES = ("ms_1", "ms_0", "ms_-1")
+# Decays slower than this (T1 above 1e9 s, about 30 years) count as no relaxation: T1 = inf,
+# which plots leave out. Such rates are also built from underflowing low-temperature terms.
+MIN_DECAY_RATE = 1e-9  # s^-1
+
 INIT_POPULATIONS = {
     "ms_1": [1.0, 0.0, 0.0],
     "ms_0": [0.0, 1.0, 0.0],
@@ -138,8 +142,9 @@ class RelaxationDynamics:
         decays = np.real(np.delete(eigenvalues, steady))
         decays = decays[decays < 0]
 
-        # T1 = the slowest decay; no decaying eigenvalue (all rates zero) = no relaxation
-        relaxation_time = float(-1.0 / np.max(decays)) if len(decays) else np.inf
+        # T1 = the slowest decay; none faster than MIN_DECAY_RATE = no relaxation (T1 = inf)
+        slowest = -np.max(decays) if len(decays) else 0.0
+        relaxation_time = float(1.0 / slowest) if slowest >= MIN_DECAY_RATE else np.inf
 
         return relaxation_time, eigenvalues, eigenvectors
 
@@ -182,7 +187,7 @@ class RelaxationDynamics:
         T1_eigenval, _, _ = self.get_T1_eigenval(T=T, temp_index=temp_index)
         steady_state = self.get_steady_state(T=T, temp_index=temp_index)[self.population.argmax()]
 
-        if T1_eigenval > 1e9:
+        if T1_eigenval > 1.0 / MIN_DECAY_RATE:
             return T1_eigenval
 
         time_points = self.get_time_estimate(T, temp_index)
