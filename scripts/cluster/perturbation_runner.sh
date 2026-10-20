@@ -144,6 +144,7 @@ run_one() {
     release_lock
     return 0
   fi
+  rm -f "$TARGET_DIR"/CHECK  # from an earlier attempt
   cp "$INPUT_DIR"/* "$TARGET_DIR"/
   cd "$TARGET_DIR"
   echo "$ID: starting job for $label"
@@ -156,6 +157,16 @@ run_one() {
     echo "$MSG"
     exit 1
   fi
+  # The displacement must be Q along exactly these modes before any VASP time is spent.
+  if ! CHECK_MSG=$(python "$SCRIPTS/check_perturbation.py" POSCAR "$HEAD_DIR/$INPUT_DIR/POSCAR" "$PHONON_PATH" "$@" --pert "$PERT"); then
+    echo "$ID: $CHECK_MSG"
+    echo "$ID: $label: perturbed POSCAR is not the intended displacement -- VASP not started"
+    printf 'perturbation check failed\n%s\n' "$CHECK_MSG" > CHECK
+    cd "$HEAD_DIR"
+    release_lock
+    return 0
+  fi
+  echo "$ID: $CHECK_MSG"
   srun $binary
   echo "$ID: Done! $label"
   # Only drop the restart files once this directory really is complete -- the same test
@@ -165,6 +176,10 @@ run_one() {
   if [ -f OUTCAR ] && grep -qzP "$ZFS_REGEX_PATTERN" OUTCAR; then
     echo "$ID: removing excess VASP results (WAVECAR, CHGCAR, CHG)"
     rm -f WAVECAR CHGCAR CHG
+    # Completion, VASP's symmetry handling and the ZFS change's shape; a suspicious run
+    # keeps its result but gets a CHECK file for later filtering.
+    python "$SCRIPTS/check_run.py" "$HEAD_DIR/$TARGET_DIR" --phonons "$PHONON_PATH" --write-check \
+      | sed "s/^/$ID: /" || true
   else
     echo "$ID: $label did not finish -- keeping CHGCAR/CHG so it can resume"
   fi

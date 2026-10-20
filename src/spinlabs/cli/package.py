@@ -295,7 +295,39 @@ def _print_scan_summary(scanned: list[_Scanned], phonons: dict[tuple[str, int], 
         print("\nPhonon data:")
         for (defect, cell_size), path in phonons.items():
             print(f"{f'{defect}_{cell_size}':<12} {path}")
+        _print_shape_flags(scanned, phonons)
     print()
+
+
+def _print_shape_flags(scanned: list[_Scanned], phonons: dict[tuple[str, int], Path]) -> None:
+    """Flag entries whose ZFS change has the wrong shape for their modes' symmetry."""
+    from spinlabs.parsers import parse_phonon_data
+    from spinlabs.vasp.run_checks import dataset_shape_flags
+
+    print("\nD-tensor shape check (A1/A2 modes may only change the A1 part, E modes mainly the E part):")
+    spectra = {}
+    for key, path in phonons.items():
+        try:
+            spectra[key] = parse_phonon_data(path)
+        except Exception as error:  # a diagnostic must never stop packaging
+            print(f"  {key[0]}_{key[1]}: cannot read {path} ({error.__class__.__name__}); shape check skipped")
+    for s in scanned:
+        spectrum = spectra.get((s.defect, s.cell_size))
+        if spectrum is None:
+            continue
+        name = f"{s.defect}_{s.cell_size} {s.calc_method} pert {s.pert_scale:g}"
+        try:
+            flags = dataset_shape_flags(s.raw, spectrum)
+        except Exception as error:
+            print(f"  {name}: shape check failed ({error.__class__.__name__}: {error}); skipped")
+            continue
+        if not flags:
+            print(f"  {name}: all entries OK")
+            continue
+        shown = ", ".join(folder for folder, _ in flags[:15]) + (", ..." if len(flags) > 15 else "")
+        print(f"  {name}: {len(flags)} suspicious run folder(s): {shown}")
+        for folder, problem in flags:
+            LOGGER.warning(f"{name}: runs/{folder}: {problem}")
 
 
 def _save_raw(scanned: list[_Scanned], output_root: Path, mass_weighted: bool = True) -> None:

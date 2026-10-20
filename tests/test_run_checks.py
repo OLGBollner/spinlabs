@@ -1,0 +1,184 @@
+"""Checks of single perturbation runs: displacement, VASP symmetry handling, ZFS change shape."""
+
+import subprocess
+import sys
+from pathlib import Path
+
+import numpy as np
+import pytest
+from pymatgen.core import Lattice, Structure
+from pymatgen.io.vasp.inputs import Poscar
+
+from spinlabs.models import PhononSpectrum, RawZFSData, ZFSTensor
+from spinlabs.vasp.run_checks import (
+    check_perturbation,
+    check_run,
+    check_symmetry_ops,
+    check_zfs_shape,
+    dataset_shape_flags,
+    outcar_symmetry,
+    reference_outcar,
+)
+
+SCRIPTS = Path(__file__).resolve().parents[1] / "scripts" / "cluster"
+GS = np.array([[0.0, 1000.0, 1000.0], [1000.0, 0.0, 1000.0], [1000.0, 1000.0, 0.0]])  # NV along [111]
+SYMS = ["A1", "Ex", "Ey", "A2"]
+
+
+def _principal_change(a1: float = 0.0, exx: float = 0.0, xz: float = 0.0) -> np.ndarray:
+    """GS plus a change given in GS's principal frame: A1 (D_zz) and E (D_xx - D_yy, D_xz) parts."""
+    _, rot = np.linalg.eigh(GS)
+    d = np.diag([-a1 / 2 + exx / 2, -a1 / 2 - exx / 2, a1])
+    d[0, 2] = d[2, 0] = xz
+    return GS + rot @ d @ rot.T
+
+
+def _outcar(path: Path, tensor: np.ndarray, *, ops: int = 2, isym: int = 3, finished: bool = True) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    t = tensor
+    path.write_text(
+        f"   ISYM   =      {isym}\n The static configuration has the point symmetry C_s .\n"
+        f" GETGRP returns: Found  {ops} space group operations\n"
+        " Spin-spin contribution to zero-field splitting tensor (MHz)\n -------\n"
+        "      D_xx      D_yy      D_zz      D_xy      D_xz      D_yz\n -------\n"
+        f"  {t[0, 0]:.4f}  {t[1, 1]:.4f}  {t[2, 2]:.4f}  {t[0, 1]:.4f}  {t[0, 2]:.4f}  {t[1, 2]:.4f}\n -------\n"
+        + (" General timing and accounting informations for this job:\n" if finished else "")
+    )
+
+
+def _spectrum(n_atoms: int = 4) -> PhononSpectrum:
+    rng = np.random.default_rng(5)
+    eigs = rng.normal(size=(4, n_atoms, 3))
+    eigs /= np.linalg.norm(eigs.reshape(4, -1), axis=1)[:, None, None]
+    return PhononSpectrum(
+        frequencies_mev=np.array([20.0, 40.0, 40.0, 60.0]),
+        symmetries=SYMS,
+        eigenvectors=eigs,
+        atom_frac_coords=np.zeros((n_atoms, 3)),
+        atom_symbols=["C"] * (n_atoms - 1) + ["N"],
+        atomic_masses=np.array([12.011] * (n_atoms - 1) + [14.007]),
+        lattice=np.eye(3) * 3.57,
+    )
+
+
+# ---- ZFS shape ----
+
+@pytest.mark.parametrize(
+    "labels, change, flagged",
+    [
+        (["A1"], dict(a1=20.0), False),
+        (["A1"], dict(a1=5.0, exx=10.0), True),  # an A1 mode cannot make D_xx and D_yy differ
+        (["A2", "A2"], dict(a1=1.0), False),
+        (["Ex"], dict(exx=8.0, xz=6.0), False),
+        (["Ex"], dict(a1=30.0, exx=0.5), True),  # an E mode that only changes D_zz
+        (["Ex", "A1"], dict(a1=30.0, exx=0.5), False),  # mixed pairs have no fixed shape
+        (["A1"], dict(exx=0.1), False),  # below the noise floor
+    ],
+)
+def test_zfs_shape(labels, change, flagged):
+    _, problem = check_zfs_shape(_principal_change(**change), GS, labels)
+    assert (problem is not None) is flagged
+
+
+# ---- VASP symmetry handling ----
+
+def test_symmetry_ops_within_and_above_the_bound():
+    sym = outcar_symmetry(" ISYM = 3\n has the point symmetry C_s .\n GETGRP returns: Found  2 space\n General timing and accounting")
+    assert sym["n_ops"] == 2 and sym["isym"] == 3 and sym["finished"]
+    assert check_symmetry_ops(sym, ["Ex"])[1] == []
+    sym["n_ops"] = 6
+    assert "at most 2 ops expected but VASP found 6" in check_symmetry_ops(sym, ["Ex"])[1][0]
+    assert check_symmetry_ops(sym, ["A1"])[1] == []
+
+
+def test_symmetry_off_and_invgrp():
+    assert check_symmetry_ops(outcar_symmetry(" ISYM = -1\n"), ["Ex"])[1] == []
+    sym = outcar_symmetry(" internal error in subroutine INVGRP\n ISYM = 2\n GETGRP returns: Found 1 space")
+    assert any("INVGRP" in p for p in check_symmetry_ops(sym, ["A1"])[1])
+
+
+# ---- displacement ----
+
+def _structures(tmp_path: Path, factor: float):
+    from spinlabs.vasp.structures import expected_displacement
+
+    spectrum = _spectrum()
+    ref = Structure(Lattice.cubic(3.57), ["C", "C", "C", "N"], [[0, 0, 0], [0.25, 0.25, 0.25], [0.5, 0.5, 0], [0.75, 0.75, 0.75]])
+    spectrum.atom_frac_coords = np.array([s.frac_coords for s in ref])
+    pert = ref.copy()
+    disp = factor * expected_displacement(spectrum, (2, 3), 0.1)
+    for site, d in zip(pert.sites, disp):
+        site.coords = site.coords + d
+    Poscar(ref).write_file(tmp_path / "ref_POSCAR")
+    Poscar(pert).write_file(tmp_path / "POSCAR")
+    return spectrum
+
+
+def test_perturbation_check_accepts_the_intended_displacement(tmp_path):
+    spectrum = _structures(tmp_path, 1.0)
+    ok, line = check_perturbation(tmp_path / "POSCAR", tmp_path / "ref_POSCAR", spectrum, (2, 3), 0.1)
+    assert ok, line
+    assert "perturbation OK: modes 2+3, Q=0.1" in line and "scale 1.000 x expected" in line
+
+
+def test_perturbation_check_rejects_a_doubled_displacement(tmp_path):
+    spectrum = _structures(tmp_path, 2.0)
+    ok, line = check_perturbation(tmp_path / "POSCAR", tmp_path / "ref_POSCAR", spectrum, (2, 3), 0.1)
+    assert not ok and "perturbation WRONG" in line and "scale 2.000" in line
+
+
+# ---- whole run ----
+
+def _tree_run(tmp_path: Path, folder: str, tensor: np.ndarray, **outcar) -> Path:
+    """<defect>/second_order/pert_0.1/all_bands/runs/<folder> with the ground state in <defect>/ZFS_hyp."""
+    defect = tmp_path / "NV_64"
+    _outcar(defect / "ZFS_hyp" / "OUTCAR", GS, ops=6)
+    run = defect / "second_order" / "pert_0.1" / "all_bands" / "runs" / folder
+    _outcar(run / "OUTCAR", tensor, **outcar)
+    return run
+
+
+def test_reference_is_found_from_the_tree_layout(tmp_path):
+    run = _tree_run(tmp_path, "1_1", _principal_change(a1=10.0))
+    assert reference_outcar(run) == tmp_path / "NV_64" / "ZFS_hyp" / "OUTCAR"
+
+
+def test_healthy_run_is_ok(tmp_path):
+    run = _tree_run(tmp_path, "1_1", _principal_change(a1=10.0), ops=6)
+    check = check_run(run, _spectrum(), (1, 1))
+    assert check.status == "ok", check.report()
+    assert "modes 1+1: A1/A1" in check.report()
+
+
+def test_unfinished_wrongly_shaped_run_is_suspicious(tmp_path):
+    run = _tree_run(tmp_path, "1_4", _principal_change(a1=2.0, exx=10.0), ops=6, finished=False)
+    check = check_run(run, _spectrum(), (1, 4))
+    assert check.status == "suspicious"
+    text = check.report()
+    assert "did not finish" in text and "E fraction" in text
+
+
+def test_check_run_script_writes_check_file(tmp_path):
+    bad = _tree_run(tmp_path, "2", _principal_change(a1=30.0), ops=6)  # E mode: too many ops, A1-only change
+    good = bad.parent / "1"
+    _outcar(good / "OUTCAR", _principal_change(a1=10.0), ops=6)
+    phonons = tmp_path / "phonons.npz"
+    _spectrum().save(phonons)
+    r = subprocess.run([sys.executable, str(SCRIPTS / "check_run.py"), str(good), str(bad), "--phonons", str(phonons),
+                        "--write-check"], capture_output=True, text=True)
+    assert r.returncode == 1, r.stdout + r.stderr
+    assert "checked 2 run(s): 1 suspicious" in r.stdout
+    assert (bad / "CHECK").is_file() and not (good / "CHECK").exists()
+    assert "at most 2 ops expected but VASP found 6" in (bad / "CHECK").read_text()
+
+
+def test_dataset_flags_name_run_folders(tmp_path):
+    raw = RawZFSData(
+        defect="NV", cell_size=64, pert_scale=0.1, calc_method="all_bands",
+        ground_state_zfs=ZFSTensor(matrix=GS, unit="MHz"),
+        first_order={0: {"tensor": _principal_change(a1=10.0), "unit": "MHz"},
+                     3: {"tensor": _principal_change(exx=10.0), "unit": "MHz"}},  # A2 mode with an E change
+        second_order={(0, 0): {"tensor": _principal_change(a1=20.0), "unit": "MHz"}},
+    )
+    flags = dataset_shape_flags(raw, _spectrum())
+    assert [folder for folder, _ in flags] == ["4"]
