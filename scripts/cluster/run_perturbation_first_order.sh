@@ -8,171 +8,59 @@
 #SBATCH -a 0-9
 
 # First-order ZFS perturbation runs: perturb POSCAR along single phonon modes.
-# Copy this script into a defect's first_order/<pert>/all_bands/ folder and set
-# the config variables below (or export them before sbatch). Personal paths
-# belong in the config block only, not in the loop logic.
+#
+# This file holds only what belongs to one tree: the SLURM header and the config below.
+# The loop itself (scripts/cluster/perturbation_runner.sh), the structure scripts and the
+# spinlabs package come from the repo in SPINLABS_REPO. Submit with
+#     sh run_perturbation_first_order.sh [sbatch options]
+# not plain sbatch: that snapshots SPINLABS_REPO at its current commit into
+# .spinlabs-code/<commit>/ here and submits this file with it, so every task of the
+# submission runs that one version even if the repo is pulled while the job runs.
+# create_perturbation_tree.py places this file in a defect's first_order/<pert>/all_bands/ folder and fills
+# the config (or set it by hand / export the variables before submitting).
 
+# ---- config (override via environment, e.g. DEFECT=NV_512 sh run_perturbation_first_order.sh) ----
+DEFECT=${DEFECT:-<defect>}
+binary=${BINARY:-<vasp_binary>}
+PHONON_PATH=${PHONON_PATH:-<path_to_phonon_data.npz>}
+PERT=${PERT:-<pert_scale>}
+SPINLABS_REPO=${SPINLABS_REPO:-<path_to_spinlabs_repo>}
+# ------------------------------------------------------------------------------------------
+
+ORDER=first_order
+RUNNER=scripts/cluster/perturbation_runner.sh
+
+if [ -z "${SLURM_JOB_ID:-}" ]; then
+  # ---- submit (login node): snapshot the repo at its current commit, then sbatch this file ----
+  case $SPINLABS_REPO in *'<'*) echo "FATAL: SPINLABS_REPO still has placeholder: '$SPINLABS_REPO'" >&2; exit 1 ;; esac
+  command -v sbatch >/dev/null 2>&1 || { echo "FATAL: sbatch not found -- submit from a login node" >&2; exit 1; }
+  commit=$(git -C "$SPINLABS_REPO" rev-parse --short=12 HEAD) \
+    || { echo "FATAL: SPINLABS_REPO is not a git checkout: $SPINLABS_REPO" >&2; exit 1; }
+  [ -z "$(git -C "$SPINLABS_REPO" status --porcelain --untracked-files=no -- src scripts/cluster)" ] \
+    || echo "WARNING: $SPINLABS_REPO has uncommitted changes in src/ or scripts/cluster/; the job runs commit $commit without them" >&2
+  code="$(pwd)/.spinlabs-code/$commit"
+  if [ ! -f "$code/$RUNNER" ]; then
+    mkdir -p "$code.tmp.$$"
+    git -C "$SPINLABS_REPO" archive "$commit" src scripts/cluster | tar -x -C "$code.tmp.$$" \
+      || { rm -rf "$code.tmp.$$"; echo "FATAL: could not snapshot $SPINLABS_REPO at $commit" >&2; exit 1; }
+    mv "$code.tmp.$$" "$code" 2>/dev/null || rm -rf "$code.tmp.$$"  # another submission made it meanwhile
+  fi
+  [ -f "$code/$RUNNER" ] || { echo "FATAL: commit $commit of $SPINLABS_REPO has no $RUNNER -- update the checkout (git pull)" >&2; exit 1; }
+  echo "Submitting $ORDER with spinlabs commit $commit (snapshot $code)"
+  exec sbatch --export=ALL,SPINLABS_CODE="$code" "$@" "$0"
+fi
+
+# ---- job (started by SLURM): run the loop from the snapshot this submission made ----
+if [ -z "${SPINLABS_CODE:-}" ] || [ ! -f "$SPINLABS_CODE/$RUNNER" ]; then
+  echo "FATAL (task ${SLURM_ARRAY_TASK_ID:-?}): no code snapshot for this job -- submit with: sh $0 (not sbatch $0)" >&2
+  exit 1
+fi
 ml PDC/26.03
 ml miniconda3
 source activate /cfs/klemming/projects/supr/adaq/obollner/conda-dirs/envs/sim-env || {
   echo "FATAL: failed to activate conda env -- aborting before any VASP run" >&2
   exit 1
 }
-
-# ---- config (override via environment, e.g. DEFECT=NV_512 sbatch ...) ----
-DEFECT=${DEFECT:-<defect>}
-binary=${BINARY:-<vasp_binary>}
-create_struct=${CREATE_STRUCT:-<path_to>/create_phonon_struct.py}
-get_n_modes=${GET_N_MODES:-<path_to>/get_n_modes.py}
-PHONON_PATH=${PHONON_PATH:-<path_to_phonon_data.npz>}
-PERT=${PERT:-<pert_scale>}
-# --------------------------------------------------------------------------
-
-INPUT_DIR="input"
-HEAD_DIR=$(pwd)
-
-# ---- preflight: verify every dependency BEFORE burning core hours ----
-fail() { echo "FATAL (task ${SLURM_ARRAY_TASK_ID:-?}): $*" >&2; exit 1; }
-[ -d "$INPUT_DIR" ] || fail "input dir '$INPUT_DIR' missing (run this from the all_bands folder)"
-case $DEFECT in *'<defect>'*) fail "DEFECT still has placeholder: '$DEFECT'" ;; esac
-case $binary in *'<'*|*'/path/to/'*) fail "BINARY still has placeholder: '$binary'" ;; esac
-case $create_struct in *'<path_to>'*) fail "CREATE_STRUCT still has placeholder: '$create_struct'" ;; esac
-case $get_n_modes in *'<path_to>'*) fail "GET_N_MODES still has placeholder: '$get_n_modes'" ;; esac
-case $PHONON_PATH in *'<path_to_phonon_data.npz>'*) fail "PHONON_PATH still has placeholder: '$PHONON_PATH'" ;; esac
-case $PERT in *'<pert_scale>'*) fail "PERT still has placeholder: '$PERT'" ;; esac
-[ -x "$binary" ] || fail "VASP binary not found/executable: $binary"
-[ -f "$create_struct" ] || fail "create_struct script missing: $create_struct"
-[ -f "$get_n_modes" ] || fail "get_n_modes script missing: $get_n_modes"
-[ -f "$PHONON_PATH" ] || fail "phonon data file missing: $PHONON_PATH"
-python -c "import numpy, pymatgen.core" >/dev/null 2>&1 \
-  || fail "python env broken (numpy/pymatgen import failed) -- conda env did not activate?"
-python -c "import spinlabs" >/dev/null 2>&1 \
-  || fail "python cannot import spinlabs -- install/check sim-env"
-MODES=$(python "$get_n_modes" "$PHONON_PATH") || fail "get_n_modes exited nonzero on $PHONON_PATH"
-[ -n "$MODES" ] || fail "get_n_modes returned no modes for $PHONON_PATH"
-echo "Preflight OK: $(echo $MODES | wc -w) modes, binary=$binary"
-# ------------------------------------------------------------------------
-
-ID=$SLURM_ARRAY_TASK_ID
-NJOBS=$SLURM_ARRAY_TASK_COUNT
-ZFS_REGEX_PATTERN='Spin-spin contribution to zero-field splitting tensor \(MHz\)\s*-+\s*D_xx\s+D_yy\s+D_zz\s+D_xy\s+D_xz\s+D_yz\s*-+\s*([\s\d\.\-]+?)(?=\s*-{3,})'
-
-echo $ID
-echo $NJOBS
-
-set -eu
-
-# ---- run-directory lock ----
-# Two arrays submitted on the same tree used to work in the same run directories at once:
-# both copied input/ and perturbed POSCAR (2x-9x displacements in NV_64), and two VASP
-# processes wrote one OUTCAR. A task now works only in a run directory it has locked
-# (mkdir is atomic, also on Lustre). A lock whose job is no longer in squeue is stale and
-# is taken over; if squeue cannot be asked, remove <run dir>/.lock by hand once no job
-# runs there.
-JOB_TAG=${SLURM_ARRAY_JOB_ID:+${SLURM_ARRAY_JOB_ID}_${SLURM_ARRAY_TASK_ID:-}}
-JOB_TAG=${JOB_TAG:-${SLURM_JOB_ID:-local-$$}}
-HELD_LOCK=""
-
-write_lock_owner() {
-  printf 'job=%s\nhost=%s\nsince=%s\n' "$JOB_TAG" "$(hostname)" "$(date '+%Y-%m-%d %H:%M:%S')" > "$1/owner"
-}
-
-# acquire_lock DIR: 0 = this task now holds DIR's lock, 1 = another job holds it (skip DIR).
-acquire_lock() {
-  lock="$HEAD_DIR/$1/.lock"
-  mkdir -p "$HEAD_DIR/$1"
-  if mkdir "$lock" 2>/dev/null; then
-    write_lock_owner "$lock"
-    HELD_LOCK=$lock
-    return 0
-  fi
-  owner_job=$(sed -n 's/^job=//p' "$lock/owner" 2>/dev/null || true)
-  owner_info=$(tr '\n' ' ' < "$lock/owner" 2>/dev/null || true)
-  if [ -z "$owner_job" ]; then
-    echo "$ID: skipping $1 -- locked, owner not recorded yet (remove $lock if no job runs there)"
-    return 1
-  fi
-  if ! jobs_now=$(squeue -h -u "$(id -un)" -o %i 2>/dev/null); then
-    echo "$ID: skipping $1 -- locked by $owner_info and squeue is unavailable (remove $lock if no job runs there)"
-    return 1
-  fi
-  if printf '%s\n' "$jobs_now" | grep -qx "$owner_job"; then
-    echo "$ID: skipping $1 -- locked by running job: $owner_info"
-    return 1
-  fi
-  # Stale: rename it first, so two tasks finding the same stale lock cannot both take it.
-  stale="$lock.stale.$JOB_TAG.$$"
-  if mv "$lock" "$stale" 2>/dev/null && mkdir "$lock" 2>/dev/null; then
-    rm -rf "$stale"
-    write_lock_owner "$lock"
-    HELD_LOCK=$lock
-    echo "$ID: took over stale lock on $1 (was: $owner_info)"
-    return 0
-  fi
-  rm -rf "$stale" 2>/dev/null || true
-  echo "$ID: skipping $1 -- another task took over its stale lock"
-  return 1
-}
-
-release_lock() {
-  if [ -n "$HELD_LOCK" ]; then
-    rm -rf "$HELD_LOCK"
-    HELD_LOCK=""
-  fi
-}
-
-# A cancelled task (SLURM sends TERM before KILL) frees its lock; a KILL leaves it stale.
-trap 'release_lock' EXIT
-trap 'release_lock; exit 143' TERM
-trap 'release_lock; exit 130' INT
-# ---- end lock ----
-
-mkdir -p runs
-
-PAIR_ID=0
-for i in $MODES; do
-  if [ $((PAIR_ID % NJOBS)) -eq $ID ]; then
-    echo "$ID: processing mode $i"
-    TARGET_DIR="runs/"$i
-    if [ -f "$TARGET_DIR"/OUTCAR ] && grep -qzP "$ZFS_REGEX_PATTERN" "$TARGET_DIR"/OUTCAR; then
-      echo "$ID: skipping $i"
-      PAIR_ID=$((PAIR_ID + 1))
-      continue
-    fi
-    acquire_lock "$TARGET_DIR" || { PAIR_ID=$((PAIR_ID + 1)); continue; }
-    # Another job may have finished this directory before the lock was ours.
-    if [ -f "$TARGET_DIR"/OUTCAR ] && grep -qzP "$ZFS_REGEX_PATTERN" "$TARGET_DIR"/OUTCAR; then
-      echo "$ID: skipping $i (finished by another job)"
-      release_lock
-      PAIR_ID=$((PAIR_ID + 1))
-      continue
-    fi
-    cp "$INPUT_DIR"/* "$TARGET_DIR"/
-    cd "$TARGET_DIR"
-    echo "$ID: starting job for mode $i"
-    MSG=$(python $create_struct -o POSCAR POSCAR $PHONON_PATH $i $PERT)
-    if echo "$MSG" | grep -q "Success"; then
-      echo "Successfully created perturbed structure"
-    else
-      echo "Failed to create structure."
-      echo "Shutting down job $ID"
-      echo "$MSG"
-      exit 1
-    fi
-    srun $binary
-    echo "$ID: Done! $i"
-    # Only drop the restart files once this directory really is complete -- the same test
-    # the skip-guard above uses. VASP can exit 0 without writing a ZFS block; such a
-    # directory is not skipped on relaunch, so it restarts from scratch and needs
-    # CHGCAR/CHG to resume. (A cancelled job never reaches this line at all.)
-    if [ -f OUTCAR ] && grep -qzP "$ZFS_REGEX_PATTERN" OUTCAR; then
-      echo "$ID: removing excess VASP results (WAVECAR, CHGCAR, CHG)"
-      rm -f WAVECAR CHGCAR CHG
-    else
-      echo "$ID: mode $i did not finish -- keeping CHGCAR/CHG so it can resume"
-    fi
-    cd "$HEAD_DIR"
-    release_lock
-  fi
-  PAIR_ID=$((PAIR_ID + 1))
-done
+PYTHONPATH="$SPINLABS_CODE/src${PYTHONPATH:+:$PYTHONPATH}"
+export PYTHONPATH DEFECT binary PHONON_PATH PERT SPINLABS_CODE
+exec sh "$SPINLABS_CODE/$RUNNER" "$ORDER"

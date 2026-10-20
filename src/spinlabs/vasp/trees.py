@@ -5,6 +5,7 @@ from __future__ import annotations
 import math
 import re
 import shutil
+import subprocess
 from pathlib import Path
 
 import numpy as np
@@ -144,6 +145,21 @@ def forbid_relaxation(incar: str) -> tuple[str, str | None]:
         "LDMATRIX; corrected to IBRION=-1 (static run) so the "
         "ZFS is evaluated on the exact perturbed geometry"
     )
+
+
+def repo_root(scripts_dir: Path) -> Path:
+    """The git checkout holding ``scripts_dir`` (repo/scripts/cluster), resolved."""
+    scripts_dir = Path(scripts_dir).resolve()
+    try:
+        out = subprocess.run(
+            ["git", "-C", str(scripts_dir), "rev-parse", "--show-toplevel"],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        return Path(out.stdout.strip()).resolve()
+    except (OSError, subprocess.CalledProcessError):
+        return scripts_dir.parents[1]
 
 
 def replace_sbatch(text: str, directive: str, value: str) -> str:
@@ -336,9 +352,9 @@ def prepare_basis(
         text = replace_tag(text, "BINARY", str(vasp_binary))
     if pair_mode:
         text = replace_tag(text, "PAIR_MODE", pair_mode)
-    name = "create_combined_phonon_struct.py" if "second_order" in script_name else "create_phonon_struct.py"
-    text = replace_tag(text, "CREATE_STRUCT", str(scripts_dir / name))
-    text = replace_tag(text, "GET_N_MODES", str(scripts_dir / "get_n_modes.py"))
+    # The loop and the structure scripts run from a snapshot of this repo taken at
+    # submission (see the script header), so the script only names the checkout.
+    text = replace_tag(text, "SPINLABS_REPO", str(repo_root(scripts_dir)))
 
     # job name reflects defect, order and basis; time limit and array size
     # only change when the reference OUTCAR gave us a timing to compute from

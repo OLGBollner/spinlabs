@@ -1,4 +1,4 @@
-"""The perturbation job scripts lock each run directory so two arrays cannot work in it at once."""
+"""The perturbation runner locks each run directory so two arrays cannot work in it at once."""
 
 import os
 import re
@@ -8,13 +8,14 @@ from pathlib import Path
 import pytest
 
 SCRIPTS = Path(__file__).resolve().parents[1] / "scripts" / "cluster"
-NAMES = ("run_perturbation_first_order.sh", "run_perturbation_second_order.sh")
+RUNNER = SCRIPTS / "perturbation_runner.sh"
+WRAPPERS = ("run_perturbation_first_order.sh", "run_perturbation_second_order.sh")
 
 
-def _lock_block(name: str) -> str:
-    text = (SCRIPTS / name).read_text()
+def _lock_block() -> str:
+    text = RUNNER.read_text()
     match = re.search(r"# ---- run-directory lock ----\n.*?# ---- end lock ----\n", text, re.S)
-    assert match, f"no lock block in {name}"
+    assert match, "no lock block in the runner"
     return match.group(0)
 
 
@@ -29,7 +30,7 @@ def _sh(tmp_path: Path, body: str, *, running_jobs: str | None, job: str = "100_
         squeue.write_text(f"#!/bin/sh\nprintf '%s' '{running_jobs}'\n")
     squeue.chmod(0o755)
     array_job, task = job.split("_")
-    script = "set -eu\nHEAD_DIR=$(pwd)\nID=$SLURM_ARRAY_TASK_ID\n" + _lock_block(NAMES[0]) + body
+    script = "set -eu\nHEAD_DIR=$(pwd)\nID=$SLURM_ARRAY_TASK_ID\n" + _lock_block() + body
     env = {**os.environ, "PATH": f"{bin_dir}:{os.environ['PATH']}", "SLURM_ARRAY_JOB_ID": array_job,
            "SLURM_ARRAY_TASK_ID": task}
     return subprocess.run(["sh", "-c", script], cwd=tmp_path, env=env, capture_output=True, text=True)
@@ -42,18 +43,26 @@ def _hold(tmp_path: Path, job: str) -> None:
     (lock / "owner").write_text(f"job={job}\nhost=nid001\nsince=2026-10-19 10:00:00\n")
 
 
-def test_both_scripts_carry_the_same_lock_block():
-    assert _lock_block(NAMES[0]) == _lock_block(NAMES[1])
+@pytest.mark.parametrize("path", [RUNNER, *(SCRIPTS / w for w in WRAPPERS)], ids=lambda p: p.name)
+def test_job_scripts_parse(path):
+    assert subprocess.run(["sh", "-n", str(path)], capture_output=True).returncode == 0
 
 
-@pytest.mark.parametrize("name", NAMES)
-def test_scripts_take_the_lock_before_touching_a_run_directory(name):
-    text = (SCRIPTS / name).read_text()
-    loop = text[text.index("PAIR_ID=0"):]
-    assert loop.index('acquire_lock "$TARGET_DIR"') < loop.index('cp "$INPUT_DIR"/*')
+def test_runner_takes_the_lock_before_touching_a_run_directory():
+    text = RUNNER.read_text()
+    run_one = text[text.index("run_one() {"):text.index("mkdir -p runs")]
+    assert run_one.index('acquire_lock "$TARGET_DIR"') < run_one.index('cp "$INPUT_DIR"/*')
     # Released after the run, once back in the tree's top folder.
-    assert loop.rindex("release_lock") > loop.rindex('cd "$HEAD_DIR"')
-    assert 'mkdir -p $TARGET_DIR' not in loop  # the lock creates the directory
+    assert run_one.rindex("release_lock") > run_one.rindex('cd "$HEAD_DIR"')
+    assert "mkdir -p $TARGET_DIR" not in run_one  # the lock creates the directory
+
+
+@pytest.mark.parametrize("name", WRAPPERS)
+def test_wrappers_hold_no_loop_logic(name):
+    """Per-tree scripts only configure and start the runner, so a fix reaches every tree."""
+    text = (SCRIPTS / name).read_text()
+    assert "acquire_lock" not in text and "srun" not in text
+    assert 'exec sh "$SPINLABS_CODE/$RUNNER" "$ORDER"' in text
 
 
 def test_free_directory_is_locked_with_owner_and_released_on_exit(tmp_path):
