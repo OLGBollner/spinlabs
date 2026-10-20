@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
@@ -936,6 +937,17 @@ def normalize_calc_method(m: Optional[str]) -> Optional[str]:
     return str(m)
 
 
+def _merge_vasp_settings(a: Optional[dict], b: Optional[dict]) -> Optional[dict]:
+    """Settings of combined data: the trees of both, one ground state, all problems."""
+    if not a or not b:
+        return a or b
+    return {
+        "ground_state": a.get("ground_state") or b.get("ground_state"),
+        "trees": {**a.get("trees", {}), **b.get("trees", {})},
+        "problems": list(a.get("problems", [])) + [p for p in b.get("problems", []) if p not in a.get("problems", [])],
+    }
+
+
 @dataclass
 class RawZFSData:
     """Container for raw unperturbed and perturbed ZFS simulation data."""
@@ -954,6 +966,9 @@ class RawZFSData:
     first_order: dict[int, Union[PerturbationEntry, dict[str, Any]]] = field(default_factory=dict)
     second_order: dict[tuple[int, int], Union[PerturbationEntry, dict[str, Any]]] = field(default_factory=dict)
     metadata: dict[str, Any] = field(default_factory=dict)
+    # VASP settings of the ground state and of each perturbation tree, recorded by
+    # ``spinlabs package`` (spinlabs.vasp.settings): {"ground_state", "trees", "problems"}.
+    vasp_settings: Optional[dict[str, Any]] = None
 
     @property
     def has_second_order(self) -> bool:
@@ -1087,6 +1102,7 @@ class RawZFSData:
             first_order=merged_first,
             second_order=merged_second,
             metadata=merged_metadata,
+            vasp_settings=_merge_vasp_settings(self.vasp_settings, other.vasp_settings),
         )
 
     def __add__(self, other: RawZFSData) -> RawZFSData:
@@ -1147,6 +1163,7 @@ class RawZFSData:
             first_order=new_first,
             second_order=new_second,
             metadata=dict(self.metadata),
+            vasp_settings=self.vasp_settings,
         )
 
     def enrich_with_spectrum(self, spectrum: PhononSpectrum) -> None:
@@ -1222,6 +1239,13 @@ class RawZFSData:
             legacy_keys=("zfs_tensors_2d",),
             encode=_encode_second_order,
             decode=_decode_order_dict,
+        ),
+        FieldSpec(
+            "vasp_settings",
+            "str",
+            optional=True,
+            encode=lambda v: json.dumps(v, sort_keys=True),
+            decode=lambda v, _: json.loads(str(v)),
         ),
     ]
 
@@ -1329,6 +1353,8 @@ class RawZFSData:
             first_order=first_order,
             second_order=second_order,
         )
+        for fields in scaled_fields:
+            obj.vasp_settings = _merge_vasp_settings(obj.vasp_settings, fields.get("vasp_settings"))
         for p, (_, scaled_now) in zip(paths, scaled_pairs):
             if apply_corrections and scaled_now:
                 LOGGER.info(f"Applied spin correction scaling: {SPIN_CORRECTION_SCALE:g} (x3/2) [{p.name}]")

@@ -21,6 +21,8 @@ from spinlabs.models import RawZFSData, normalize_calc_method
 from spinlabs.registry import ensure_db, register_file
 from spinlabs.pack_convergence import pack_convergence
 from spinlabs.parsers import parse_zfs_simulation_dataset, split_defect_folder_name
+from spinlabs.vasp.run_checks import BASIS_SOURCE
+from spinlabs.vasp.settings import compare_settings, outcar_settings, read_incar, summary_line, tree_settings
 from spinlabs.vasp.trees import default_phonon
 
 from spinlabs.logging_utils import get_logger
@@ -217,8 +219,10 @@ def _scan_raw(args: argparse.Namespace, defect_folder: Path, methods: list[str])
         if not pert_scales:
             warnings.warn(f"No perturbation data found in {defect_folder.name} ({calc_method}); skipping")
             continue
+        ground = _ground_state_settings(defect_folder, calc_method)
         for pert_scale in pert_scales:
             raw = None
+            trees = {}
             for o in orders:
                 if pert_scale not in datasets[o]:
                     continue
@@ -226,11 +230,29 @@ def _scan_raw(args: argparse.Namespace, defect_folder: Path, methods: list[str])
                     sim_folder=datasets[o][pert_scale], order=_ORDER_NUM[o], calc_method=method, verbose=True
                 )
                 raw = data if raw is None else raw.combine(data)
+                basis = datasets[o][pert_scale] / calc_method
+                if basis.is_dir():
+                    trees[_ORDER_DIRS[o]] = tree_settings(basis)
             if raw is None or not (raw.first_order or raw.second_order):
                 warnings.warn(f"No data parsed for {defect_folder.name} ({calc_method}, pert {pert_scale:g}); skipping")
                 continue
+            raw.vasp_settings = {
+                "ground_state": ground,
+                "trees": trees,
+                "problems": compare_settings(ground, trees),
+            }
             found.append(_Scanned(defect, cell_size, calc_method, pert_scale, raw))
     return found
+
+
+def _ground_state_settings(defect_folder: Path, calc_method: str) -> dict[str, str] | None:
+    """VASP settings of the ground-state ZFS run (<defect>/ZFS_hyp or ZFS_occup), or None if absent."""
+    folder = defect_folder / BASIS_SOURCE[calc_method]
+    if (folder / "INCAR").is_file():
+        return read_incar(folder / "INCAR")
+    if (folder / "OUTCAR").is_file():
+        return outcar_settings(folder / "OUTCAR")
+    return None
 
 
 # Full-spectrum phonon files, most preferred first. Symmetry-reduced spectra
@@ -295,8 +317,30 @@ def _print_scan_summary(scanned: list[_Scanned], phonons: dict[tuple[str, int], 
         print("\nPhonon data:")
         for (defect, cell_size), path in phonons.items():
             print(f"{f'{defect}_{cell_size}':<12} {path}")
+    _print_settings(scanned)
+    if phonons:
         _print_shape_flags(scanned, phonons)
     print()
+
+
+def _print_settings(scanned: list[_Scanned]) -> None:
+    """Ground-state vs run VASP settings per dataset; every difference is a warning."""
+    print("\nVASP settings (ground state vs the runs differenced against it):")
+    for s in scanned:
+        settings = s.raw.vasp_settings or {}
+        name = f"{s.defect}_{s.cell_size} {s.calc_method} pert {s.pert_scale:g}"
+        ground, trees = settings.get("ground_state"), settings.get("trees", {})
+        n_runs = sum(t["n_runs"] for t in trees.values())
+        if not n_runs:
+            print(f"  {name}: no run INCAR or OUTCAR found; not checked")
+            continue
+        where = "" if ground is not None else " (no ground-state INCAR/OUTCAR found)"
+        problems = settings.get("problems", [])
+        status = "consistent" if not problems else f"{len(problems)} difference(s)"
+        print(f"  {name}: {status}; {summary_line(ground, trees)}{where}")
+        for problem in problems:
+            print(f"    !! {problem}")
+            LOGGER.warning(f"{name}: {problem}")
 
 
 def _print_shape_flags(scanned: list[_Scanned], phonons: dict[tuple[str, int], Path]) -> None:
