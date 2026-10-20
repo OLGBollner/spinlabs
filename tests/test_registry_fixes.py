@@ -78,6 +78,20 @@ def test_find_packaged_latest_keeps_newest_package_per_configuration(tmp_path):
     assert len(find_packaged(conn)) == 3
 
 
+def test_find_packaged_latest_prefers_the_package_with_more_orders(tmp_path):
+    """A newer first-order-only package never hides the combined package of the same configuration."""
+    conn = ensure_db()
+    old, new = tmp_path / "20261015", tmp_path / "20261016"
+    old.mkdir(), new.mkdir()
+    combined = old / "NV_512_raw_zfs_data_all_bands_12d.npz"
+    first = new / "NV_512_raw_zfs_data_all_bands_1d.npz"
+    _register(conn, combined, orders=[1, 2])
+    _register(conn, first, orders=[1])
+    assert find_packaged(conn, latest=True) == [combined]
+    assert find_packaged(conn, pert_order=1, latest=True) == [combined]
+    assert set(find_packaged(conn)) == {combined, first}
+
+
 def test_find_packaged_returns_already_analyzed_data(tmp_path):
     from spinlabs.registry import finish_run, register_run
 

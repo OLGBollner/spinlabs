@@ -11,7 +11,7 @@ from pathlib import Path
 import numpy as np
 
 from spinlabs.logging_utils import get_logger
-from spinlabs.registry import find_runs
+from spinlabs.registry import find_runs, more_complete
 from spinlabs.relaxation_dynamics import INIT_STATES, find_t1_files
 
 LOGGER = get_logger(__name__)
@@ -106,9 +106,9 @@ def collect_t1_rows(
     """Latest completed run per defect, cell, method, pert-scale and initial state.
 
     With ``by_pert=False`` runs of all pert-scales share one row per
-    defect/cell/method (the row's ``pert`` is then ``None``). A run with
-    second-order data is preferred over a first-order-only one, then the
-    newest wins; rows that had runs at several pert-scales or order sets to
+    defect/cell/method (the row's ``pert`` is then ``None``). The run with the
+    most perturbation orders is preferred (a first-order-only run never hides
+    one with second-order data), then the newest wins (``more_complete``); rows that had runs at several pert-scales or order sets to
     choose from are reported with the one used.
 
     Runs are those matching ``filters`` (same fields as :func:`find_runs`).
@@ -118,7 +118,7 @@ def collect_t1_rows(
     Runs without a T1 file or metadata to place them are skipped with a warning.
     """
     rows: dict[tuple, T1Row] = {}
-    chosen: dict[tuple, tuple] = {}  # (row key, state) -> (has 2nd order, pert, orders) of the run used
+    chosen: dict[tuple, tuple] = {}  # (row key, state) -> (orders, pert, orders) of the run used
     seen: dict[tuple, set] = {}  # row key -> {(pert, orders)} of every candidate run
     # find_runs yields oldest first, so later runs overwrite earlier ones.
     run_dirs = find_runs(conn, filters or [], output_root=output_root)
@@ -153,15 +153,14 @@ def collect_t1_rows(
                 continue
             cell = int(cell) if cell is not None else None
             orders = _run_orders(run_orders, data)
-            complete = 2 in orders
             key = (defect, cell, method, row_pert)
             seen.setdefault(key, set()).add((run_pert, orders))
-            # A first-order-only run lacks the two-phonon channel, so it never
-            # replaces a run with second-order data; otherwise the newer run wins.
+            # A run with fewer orders (e.g. no two-phonon channel) never replaces a more
+            # complete one; otherwise the newer run wins.
             previous = chosen.get((key, init_state))
-            if previous is not None and previous[0] and not complete:
+            if not more_complete(frozenset(orders), previous[0] if previous is not None else None):
                 continue
-            chosen[(key, init_state)] = (complete, run_pert, orders)
+            chosen[(key, init_state)] = (frozenset(orders), run_pert, orders)
             row = rows.setdefault(key, T1Row(defect, cell, method, row_pert))
             row.t1[init_state] = t1_at(npz, temperature)
             row.run_dirs[init_state] = run_dir

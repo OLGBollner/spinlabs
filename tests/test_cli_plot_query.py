@@ -347,3 +347,26 @@ def test_combined_figure_subdir_joins_differing_levels(tmp_path, monkeypatch):
     # Loose npz folders outside the run layout add no level.
     assert _combined_figure_subdir([tmp_path]) == Path()
     assert _combined_figure_subdir([tmp_path, a]) == Path("NV_64/pert_0.1/all_bands/20261015_094009")
+
+
+def test_latest_prefers_the_run_with_more_orders(tmp_path, monkeypatch):
+    """A newer first-order-only run never hides a run with second-order data of the same configuration."""
+    monkeypatch.setenv("SPINLABS_REGISTRY_DIR", str(tmp_path / "registry"))
+    conn = registry.ensure_db()
+    _add_run(conn, tmp_path / "r_1d_old", order=1, started_at="2026-10-01 12:00:00")
+    _add_run(conn, tmp_path / "r_12d", order=[1, 2], started_at="2026-10-05 12:00:00")
+    _add_run(conn, tmp_path / "r_1d_new", order=1, started_at="2026-10-09 12:00:00")
+    assert [d.name for d in registry.find_runs(conn, [("defect", "NV")], latest=True)] == ["r_12d"]
+    # Equally complete runs: the newest wins.
+    _add_run(conn, tmp_path / "r_12d_new", order=[1, 2], started_at="2026-10-10 12:00:00")
+    assert [d.name for d in registry.find_runs(conn, [("defect", "NV")], latest=True)] == ["r_12d_new"]
+    # Asking for first order only still shows the more complete run, which holds first order too.
+    assert [d.name for d in registry.find_runs(conn, [("order", "1")], latest=True)] == ["r_12d_new"]
+
+
+def test_latest_keeps_a_first_order_run_when_nothing_more_complete_exists(tmp_path, monkeypatch):
+    monkeypatch.setenv("SPINLABS_REGISTRY_DIR", str(tmp_path / "registry"))
+    conn = registry.ensure_db()
+    _add_run(conn, tmp_path / "r_1d_old", order=1, started_at="2026-10-01 12:00:00")
+    _add_run(conn, tmp_path / "r_1d_new", order=1, started_at="2026-10-09 12:00:00")
+    assert [d.name for d in registry.find_runs(conn, [("defect", "NV")], latest=True)] == ["r_1d_new"]

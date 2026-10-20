@@ -44,6 +44,30 @@ def parse_orders(value: object) -> list[int]:
     return sorted(out)
 
 
+def stored_orders(raw: object) -> frozenset[int]:
+    """Orders of a stored ``pert_order``/``order`` value: a JSON list, or a legacy scalar (1, 2, 12, '1+2')."""
+    if raw is None:
+        return frozenset()
+    try:
+        items = json.loads(raw) if isinstance(raw, str) else raw
+    except json.JSONDecodeError:
+        items = raw
+    try:
+        return frozenset(parse_orders(items))
+    except (TypeError, ValueError):
+        return frozenset()
+
+
+def more_complete(orders: frozenset[int], than: frozenset[int] | None) -> bool:
+    """Whether data with ``orders`` should replace data with ``than`` when picking the latest.
+
+    More perturbation orders is more complete data (a first-order-only package or run lacks the
+    two-phonon channel), so it wins over newer data with fewer orders; between equally
+    complete data the newer one wins, so callers go oldest first and replace on True.
+    """
+    return than is None or len(orders) >= len(than)
+
+
 def _normalize_orders(value: object) -> str | None:
     """Normalize a perturbation order value to a JSON list string, e.g. '[1, 2]'.
 
@@ -332,10 +356,12 @@ def find_packaged(
 ) -> list[Path]:
     """Packaged ZFS files matching the filters.
 
-    With ``latest`` only the newest package of each configuration (defect,
-    cell, method, pert-scale, orders) is kept, so repackaged data replaces
-    older versions. Newest is the latest first registration (highest id):
-    re-registering a file keeps its id but rewrites ``registered_at``.
+    With ``latest`` one package per configuration (defect, cell, method,
+    pert-scale) is kept: the one with the most perturbation orders, and among
+    those the newest (:func:`more_complete`), so repackaged data replaces older
+    versions and a first-order-only package never hides one with second-order
+    data. Newest is the latest first registration (highest id): re-registering
+    a file keeps its id but rewrites ``registered_at``.
     """
     sql = (
         "SELECT path, pert_order, defect, cell_size, calc_method, pert_scale FROM files"
@@ -359,25 +385,29 @@ def find_packaged(
     sql += " ORDER BY id"
     cur = conn.execute(sql, params)  # type: ignore[arg-type]
     results = []
-    newest: dict[tuple, Path] = {}
+    newest: dict[tuple, tuple[frozenset[int], Path]] = {}
     for p_, stored, *config in cur.fetchall():
         if pert_order is not None:
             # Exact set membership on the stored JSON list, not substring matching.
             try:
-                stored_orders = set(json.loads(stored)) if stored else set()
+                have = set(json.loads(stored)) if stored else set()
             except (TypeError, json.JSONDecodeError):
-                stored_orders = set()
-            if not wanted.issubset(stored_orders):
+                have = set()
+            if not wanted.issubset(have):
                 continue
         if not Path(p_).exists():
             continue
         if latest:
-            # Rows are oldest first; a later package of the same configuration replaces it.
-            newest.pop((*config, stored), None)
-            newest[(*config, stored)] = Path(p_)
+            # Rows are oldest first; a later package of the same configuration replaces it
+            # unless it has fewer orders.
+            orders = stored_orders(stored)
+            key = tuple(config)
+            if more_complete(orders, newest[key][0] if key in newest else None):
+                newest.pop(key, None)
+                newest[key] = (orders, Path(p_))
         else:
             results.append(Path(p_))
-    return list(newest.values()) if latest else results
+    return [path for _, path in newest.values()] if latest else results
 
 
 def find_runs(
@@ -402,9 +432,11 @@ def find_runs(
     matches when every requested order is present (``--order 1`` matches
     ``[1]`` and ``[1, 2]`` runs, ``--order 1 2`` matches only combined runs).
 
-    With ``latest`` only the most recent matching run (by ``started_at``) of
-    each configuration (defect, cell, method, order, pert) is returned, so a
-    query spanning several configurations yields the newest run of each. Directories stored from another host are resolved against
+    With ``latest`` one run per configuration (defect, cell, method, pert) is
+    returned: the one with the most perturbation orders, and among those the
+    most recent (by ``started_at``; :func:`more_complete`), so a query spanning
+    several configurations yields one run of each and a first-order-only run
+    never hides one with second-order data. Directories stored from another host are resolved against
     ``output_root`` by name when the stored path does not exist.
     """
     columns = {row[1] for row in conn.execute("PRAGMA table_info(runs)")}
@@ -475,8 +507,8 @@ def find_runs(
                 pass
         return f'"{column}" = ?', [value]
 
-    group_columns = [c for c in ("defect", "cell", "method", "order", "pert") if c in columns]
-    select = ", ".join(['"run_dir"'] + [f'"{c}"' for c in group_columns])
+    group_columns = [c for c in ("defect", "cell", "method", "pert") if c in columns]
+    select = ", ".join(['"run_dir"', '"order"'] + [f'"{c}"' for c in group_columns])
     sql = f"SELECT {select} FROM runs WHERE status = 'done'"
     params: list[object] = []
     for column, values in by_column.items():
@@ -492,8 +524,10 @@ def find_runs(
         # stays ordered by each configuration's newest run.
         newest: dict[tuple, tuple] = {}
         for row in rows:
-            newest.pop(row[1:], None)
-            newest[row[1:]] = row
+            key, orders = row[2:], stored_orders(row[1])
+            if more_complete(orders, stored_orders(newest[key][1]) if key in newest else None):
+                newest.pop(key, None)
+                newest[key] = row
         rows = list(newest.values())
     results: list[Path] = []
     root = Path(output_root).resolve() if output_root else None
