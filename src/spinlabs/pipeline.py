@@ -127,7 +127,11 @@ def find_default_phonon_file(sim_folder: Path | None) -> Path | None:
 
 
 def find_default_phonon_file_for_raw(raw_zfs_file: str | Path | Sequence[str | Path]) -> Path | None:
-    """Search next to the raw ZFS .npz file(s) for phonon_data.npz / phonopy.yaml."""
+    """Search next to the raw ZFS .npz file(s) for phonon_data.npz / phonopy.yaml.
+
+    Looks from the file's folder up to the defect folder of the packaged layout
+    ``data/<defect>/pert_<x>/<method>/<date>/<file>.npz``, nearest first.
+    """
     if raw_zfs_file is None:
         return None
     if isinstance(raw_zfs_file, (list, tuple)):
@@ -142,12 +146,26 @@ def find_default_phonon_file_for_raw(raw_zfs_file: str | Path | Sequence[str | P
         anchor_dir / "phonopy.yaml",
         anchor_dir.parent / "phonon_data.npz",
         anchor_dir.parent / "phonopy.yaml",
+        anchor_dir.parent.parent / "phonon_data.npz",
         anchor_dir.parent.parent / "data" / "phonon_data.npz",
+        anchor_dir.parent.parent.parent / "phonon_data.npz",
     ]
     for cand in candidates:
         if cand.exists():
             return cand
     return None
+
+
+def raw_mode_count(raw: RawZFSData) -> int:
+    """Number of modes a spectrum must have to hold every mode index of the raw data."""
+    indices = list(raw.first_order) + [i for pair in raw.second_order for i in pair]
+    return max(indices) + 1 if indices else 0
+
+
+def _covers(spectrum: PhononSpectrum, n_needed: int) -> bool:
+    """A spectrum fits the raw data when its full mode count reaches the highest raw mode index."""
+    n_full = getattr(spectrum, "n_full", None) or spectrum.n_modes
+    return n_full >= n_needed
 
 
 def _check_requested_orders(user_orders: Sequence[int], *, has_1d: bool | None, has_2d: bool) -> None:
@@ -239,23 +257,40 @@ def load_raw_inputs(
 
     defect = raw_data.defect or defect or "defect"
     cell_size = raw_data.cell_size or cell_size or 0
+    n_needed = raw_mode_count(raw_data)
+
+    # A phonon file found by searching (not passed explicitly) must hold the raw data's modes;
+    # otherwise it belongs to another cell and the registry is asked instead.
+    if spectrum is not None and phonon_file is None and not _covers(spectrum, n_needed):
+        LOGGER.warning(
+            f"Phonon file {ph_path} has {spectrum.n_modes} modes but the raw data uses mode indices up to "
+            f"{n_needed}; it belongs to another cell. Looking for a matching one in the registry."
+        )
+        spectrum, ph_path = None, None
 
     # Registry fallback: resolve phonon by defect/cell when no file found next to the inputs
     if spectrum is None:
         reg = ensure_db()
         reg_hits = find_phonon(reg, str(defect), cell_size)
-        if len(reg_hits) == 1:
-            ph_path = reg_hits[0]
-            spectrum = parse_phonon_data(ph_path)
-            LOGGER.info(f"  Registry: using phonon file {ph_path} for {defect}_{cell_size}")
-        elif len(reg_hits) > 1:
-            LOGGER.debug(
-                f"  Registry: {len(reg_hits)} phonon files match {defect}_{cell_size}; "
-                "pass --phonon-file to pick one. First match used: "
-                f"{reg_hits[0]}"
-            )
-            ph_path = reg_hits[0]
-            spectrum = parse_phonon_data(ph_path)
+        candidates = [(p, parse_phonon_data(p)) for p in reg_hits]
+        fitting = [(p, s) for p, s in candidates if _covers(s, n_needed)]
+        for p, s in candidates:
+            if not _covers(s, n_needed):
+                LOGGER.warning(
+                    f"  Registry: {p} is registered for {defect}_{cell_size} but has {s.n_modes} modes, "
+                    f"fewer than the raw data's {n_needed}; skipped (wrong registry entry?)"
+                )
+        if fitting:
+            ph_path, spectrum = fitting[0]
+            if len(fitting) > 1:
+                LOGGER.warning(
+                    f"  Registry: {len(fitting)} phonon files fit {defect}_{cell_size}; using {ph_path} "
+                    "(pass --phonon-file to pick another)"
+                )
+            else:
+                LOGGER.info(f"  Registry: using phonon file {ph_path} for {defect}_{cell_size}")
+        elif candidates:
+            LOGGER.warning(f"  Registry: no phonon file for {defect}_{cell_size} covers the raw data's modes")
 
     return raw_data, spectrum, ph_path
 
