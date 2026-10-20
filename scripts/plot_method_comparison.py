@@ -157,7 +157,9 @@ def _style() -> None:
 
 
 def plot_scatter(results: list[dict], out: Path) -> None:
-    fig, axes = plt.subplots(len(results), 3, figsize=(7.0, 2.1 * len(results)), squeeze=False)
+    fig, axes = plt.subplots(len(results), 3, figsize=(7.6, 2.2 * len(results)), squeeze=False)
+    # room for each panel's own y tick labels next to its left neighbour
+    fig.subplots_adjust(wspace=0.45, hspace=0.3)
     iprs = [r["ipr"] for res in results for r in res["rows"]]
     norm = LogNorm(vmin=min(iprs), vmax=max(iprs))
     for row, res in enumerate(results):
