@@ -47,6 +47,12 @@ def build_plot_parser(subparsers: argparse._SubParsersAction) -> None:  # noqa: 
         metavar="STATE",
         help="Only plot these initial spin state(s): ms_1 ms_0 ms_-1, or 1 0 -1 (default: every state found)",
     )
+    t1.add_argument(
+        "--rate", action="store_true", help="Plot the relaxation rate 1/T1 (s^-1) instead of T1 (saved as t1_rate)"
+    )
+    t1.add_argument(
+        "--log-temperature", action="store_true", help="Log temperature axis (power laws such as T^5 become lines)"
+    )
     t1.add_argument("--plain-name", action="store_true", help="Do not append metadata to the output filename")
     _add_output_args(t1)
     t1.set_defaults(func=_run_t1)
@@ -308,9 +314,18 @@ def _run_t1(args: argparse.Namespace) -> None:
         out = args.output
     else:
         run_dirs = dirs if args.query else [Path(p) if Path(p).is_dir() else Path(p).parent for p in inputs]
-        out = _figures_dir("t1") / _combined_figure_subdir(run_dirs) / f"t1.{args.fmt}"
+        name = "t1_rate" if args.rate else "t1"
+        out = _figures_dir("t1") / _combined_figure_subdir(run_dirs) / f"{name}.{args.fmt}"
         out.parent.mkdir(parents=True, exist_ok=True)
-    plot_t1(inputs, output_path=out, show=args.show, plain_name=args.plain_name, init_states=args.init_state)
+    plot_t1(
+        inputs,
+        output_path=out,
+        show=args.show,
+        plain_name=args.plain_name,
+        init_states=args.init_state,
+        rate=args.rate,
+        log_temperature=args.log_temperature,
+    )
 
 
 

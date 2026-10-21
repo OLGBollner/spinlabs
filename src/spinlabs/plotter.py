@@ -439,6 +439,8 @@ def plot_t1(
     show: bool = False,
     plain_name: bool = False,
     init_states: Sequence[str] | None = None,
+    rate: bool = False,
+    log_temperature: bool = False,
 ) -> tuple[plt.Figure, plt.Axes]:
     """
     Plot T_1 curves from one or more npz files or run directories in a single figure.
@@ -449,7 +451,9 @@ def plot_t1(
     are built from the npz metadata: details shared by every curve are left
     out, the rest go in each label. No title is set. The output filename gets the metadata
     appended unless ``plain_name`` is set. With ``init_states`` only curves of
-    those initial states (e.g. ``["ms_0"]``) are drawn.
+    those initial states (e.g. ``["ms_0"]``) are drawn. With ``rate`` the relaxation
+    rate 1/T_1 (s^-1) is drawn instead, and ``log_temperature`` puts temperature on a log
+    axis, where Raman processes show up as power laws (T^5, T^7).
     """
     fig, ax = plt.subplots(figsize=(10, 6))
     colors = plt.cm.tab10.colors
@@ -505,11 +509,14 @@ def plot_t1(
     for idx, (temps, t1, head, details) in enumerate(curves):
         own = [d for d in details if d not in shared]
         label = f"{head} ({', '.join(own)})" if own else head
-        ax.plot(temps, t1, "-", color=colors[idx % len(colors)], linewidth=2, label=label)
+        values = 1.0 / t1 if rate else t1
+        ax.plot(temps, values, "-", color=colors[idx % len(colors)], linewidth=2, label=label)
 
     ax.set_xlabel("Temperature (K)", fontsize=16)
-    ax.set_ylabel(r"$T_1$ (s)", fontsize=16)
+    ax.set_ylabel(r"$1/T_1$ (s$^{-1}$)" if rate else r"$T_1$ (s)", fontsize=16)
     ax.set_yscale("log")
+    if log_temperature:
+        ax.set_xscale("log")
     ax.grid(True, which="major", linestyle=":", alpha=0.6)
     ax.tick_params(axis="both", which="both", direction="in", labelsize=12)
     ax.legend(loc="best", frameon=True, fontsize=14)

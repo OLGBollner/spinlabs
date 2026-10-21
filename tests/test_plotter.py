@@ -94,6 +94,15 @@ class TestPlotter:
         assert ax.get_lines()[0].get_color() != ax.get_lines()[1].get_color()
         plt.close(fig)
 
+    def test_plot_t1_rate_draws_inverse_t1(self, tmp_path):
+        """--rate draws 1/T1 in s^-1; --log-temperature puts temperature on a log axis."""
+        p = self._make_t1_npz(tmp_path, "nv.npz", t1_fit=np.array([1e-3, 2e-3, 4e-3]))
+        fig, ax = plot_t1([p], rate=True, log_temperature=True)
+        np.testing.assert_allclose(ax.get_lines()[0].get_ydata(), [1000.0, 500.0, 250.0])
+        assert ax.get_ylabel() == r"$1/T_1$ (s$^{-1}$)"
+        assert ax.get_xscale() == "log" and ax.get_yscale() == "log"
+        plt.close(fig)
+
     def test_plot_t1_eigenval_not_plotted(self, tmp_path):
         """Only the ODE-fit T1 is drawn, even when t1_eigenval is present."""
         p = self._make_t1_npz(tmp_path, "both.npz", t1_eigenval=np.array([1e-4, 3e-4, 9e-4]))
