@@ -445,16 +445,31 @@ def save_phonon_npz(spectrum: PhononSpectrum, out_path: str | Path) -> str:
     return spectrum.save(out_path)
 
 
+_RUN_FOLDER = {1: re.compile(r"^(\d+)$"), 2: re.compile(r"^(\d+)_(\d+)$")}
+
+
+def _run_outcars(directory: Path, order: int) -> list[Path]:
+    """OUTCARs of the run folders below ``directory``.
+
+    Run folders are ``runs/<i>`` (first order) or ``runs/<i>_<j>`` (second order),
+    directly under ``runs/`` and named exactly so. Nothing else counts: a copy such as
+    ``old_data/85_85/OUTCAR`` or ``runs/85_85_old`` would otherwise get the same mode
+    numbers and silently replace the real run (ClV_128's pre-fix pair runs did).
+    """
+    pattern = _RUN_FOLDER[order]
+    runs = directory / "runs"
+    return sorted(p for p in runs.glob("*/OUTCAR") if pattern.match(p.parent.name)) if runs.is_dir() else []
+
+
 def _worker_parse_outcar_1d(outcar_file: Path) -> tuple[int, ZFSTensor, float | None] | None:
     zfs = parse_outcar_zfs(outcar_file)
     if zfs is None:
         return None
     try:
-        folder_name = outcar_file.parent.name
-        digits = re.findall(r"\d+", folder_name)
-        if not digits:
+        match = _RUN_FOLDER[1].match(outcar_file.parent.name)
+        if not match:
             return None
-        index = int(digits[0]) - 1
+        index = int(match.group(1)) - 1
         energy = parse_outcar_energy(outcar_file)
         return index, zfs, energy
     except Exception:
@@ -466,11 +481,10 @@ def _worker_parse_outcar_2d(outcar_file: Path) -> tuple[tuple[int, int], ZFSTens
     if zfs is None:
         return None
     try:
-        folder_name = outcar_file.parent.name
-        digits = re.findall(r"\d+", folder_name)
-        if len(digits) < 2:
+        match = _RUN_FOLDER[2].match(outcar_file.parent.name)
+        if not match:
             return None
-        indices = (int(digits[0]) - 1, int(digits[1]) - 1)
+        indices = (int(match.group(1)) - 1, int(match.group(2)) - 1)
         energy = parse_outcar_energy(outcar_file)
         return indices, zfs, energy
     except Exception:
@@ -485,10 +499,13 @@ def parse_perturbation_directory(
     verbose: bool = False,
 ) -> dict[Any, PerturbationEntry]:
     """
-    Parses all perturbed OUTCARs under a directory for 1D or 2D displacements in parallel.
+    Parses the run folders' OUTCARs under a directory for 1D or 2D displacements in parallel.
+
+    Only ``runs/<i>/OUTCAR`` (order 1) or ``runs/<i>_<j>/OUTCAR`` (order 2) are read
+    (see :func:`_run_outcars`); any other OUTCAR below the directory is ignored.
     """
     dir_path = Path(directory)
-    outcar_files = list(dir_path.glob("**/OUTCAR"))
+    outcar_files = _run_outcars(dir_path, order)
     if not outcar_files:
         if verbose:
             warnings.warn(f"No OUTCARs found in: {dir_path}")

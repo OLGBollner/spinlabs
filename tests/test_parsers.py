@@ -452,3 +452,26 @@ class TestSplitDefectFolderName:
     def test_no_cell_size(self):
         assert split_defect_folder_name("weirdname") == ("weirdname", None)
 
+
+
+def test_only_run_folders_directly_under_runs_are_parsed(tmp_path):
+    """Copies such as old_data/85_85/OUTCAR must not replace runs/85_85/OUTCAR."""
+    import pytest
+
+    from spinlabs.parsers import parse_perturbation_directory
+
+    def outcar(path, dzz):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            " Spin-spin contribution to zero-field splitting tensor (MHz)\n -------\n"
+            "      D_xx      D_yy      D_zz      D_xy      D_xz      D_yz\n -------\n"
+            f"  {-dzz / 2:.4f}  {-dzz / 2:.4f}  {dzz:.4f}  0.0000  0.0000  0.0000\n -------\n"
+        )
+
+    tree = tmp_path / "all_bands"
+    outcar(tree / "runs" / "85_85" / "OUTCAR", 2000.0)
+    outcar(tree / "old_data" / "85_85" / "OUTCAR", 1000.0)  # pre-fix copy, same name
+    outcar(tree / "runs" / "85_85_old" / "OUTCAR", 1500.0)
+    parsed = parse_perturbation_directory(tree, order=2, amplitude=(0.025, 0.025), max_workers=1)
+    assert list(parsed) == [(84, 84)]
+    assert parsed[(84, 84)].zfs_tensor.to_unit("MHz").matrix[2, 2] == pytest.approx(2000.0)
