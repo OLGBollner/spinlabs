@@ -36,10 +36,11 @@ case ${PERT:-} in ''|*'<pert_scale>'*) fail "PERT unset or still placeholder: '$
 if [ "$ORDER" = "second_order" ]; then
   case ${PAIR_MODE:-} in diag|all) ;; *) fail "PAIR_MODE must be diag or all, got: '${PAIR_MODE:-}'" ;; esac
 fi
-MASS_WEIGHTED=${MASS_WEIGHTED:-1}
+MASS_WEIGHTED=${MASS_WEIGHTED-1}  # unset: 1; set but empty (a broken config line) fails below
 case $MASS_WEIGHTED in
   1) MW_FLAG="" ;;
   0) MW_FLAG="--no-mass-weighted" ;;
+  '') fail "MASS_WEIGHTED is empty -- check the job script's config line (\${MASS_WEIGHTED:-0} needs the '-', or write MASS_WEIGHTED=0)" ;;
   *) fail "MASS_WEIGHTED must be 1 (Q*e/sqrt(m)) or 0 (Q*e), got: '$MASS_WEIGHTED'" ;;
 esac
 [ -x "$binary" ] || fail "VASP binary not found/executable: $binary"
