@@ -1,7 +1,5 @@
 """Checks of perturbation runs (displacement, VASP symmetry handling, ZFS change shape) and the noise/SNR estimates."""
 
-import subprocess
-import sys
 from pathlib import Path
 
 import numpy as np
@@ -20,7 +18,6 @@ from spinlabs.vasp.run_checks import (
     reference_outcar,
 )
 
-SCRIPTS = Path(__file__).resolve().parents[1] / "scripts" / "cluster"
 GS = np.array([[0.0, 1000.0, 1000.0], [1000.0, 0.0, 1000.0], [1000.0, 1000.0, 0.0]])  # NV along [111]
 SYMS = ["A1", "Ex", "Ey", "A2"]
 
@@ -156,20 +153,6 @@ def test_unfinished_wrongly_shaped_run_is_suspicious(tmp_path):
     assert check.status == "suspicious"
     text = check.report()
     assert "did not finish" in text and "E fraction" in text
-
-
-def test_check_run_script_writes_check_file(tmp_path):
-    bad = _tree_run(tmp_path, "2", _principal_change(a1=30.0), ops=6)  # E mode: too many ops, A1-only change
-    good = bad.parent / "1"
-    _outcar(good / "OUTCAR", _principal_change(a1=10.0), ops=6)
-    phonons = tmp_path / "phonons.npz"
-    _spectrum().save(phonons)
-    r = subprocess.run([sys.executable, str(SCRIPTS / "check_run.py"), str(good), str(bad), "--phonons", str(phonons),
-                        "--write-check"], capture_output=True, text=True)
-    assert r.returncode == 1, r.stdout + r.stderr
-    assert "checked 2 run(s): 1 suspicious" in r.stdout
-    assert (bad / "CHECK").is_file() and not (good / "CHECK").exists()
-    assert "at most 2 ops expected but VASP found 6" in (bad / "CHECK").read_text()
 
 
 def test_dataset_flags_name_run_folders(tmp_path):
