@@ -33,7 +33,7 @@ class ZFSManager:
         self,
         spectrum: Optional[PhononSpectrum] = None,
         raw_data: Optional[RawZFSData] = None,
-        exclude_inconsistent_pairs: bool = True,
+        exclude_inconsistent_pairs: bool = False,
     ):
         # spectrum is the primary dataclass
         if spectrum is not None:
@@ -456,17 +456,23 @@ class ZFSManager:
             D_qi_qj = item["tensor"]
             d2D_dqidqj = (D_qi_qj - self.zfs_relaxed) / (q_i * q_j) - dD_qi / q_j - dD_qj / q_i
 
-            # The pair displaces Q_i + Q_j, so its ZFS change is the first-order
-            # response dD_i q_i + dD_j q_j plus a small remainder (the curvature).
-            # A remainder that is a sizeable multiple of that linear response
-            # (|alpha| > INCONSISTENT_ALPHA) means the run was displaced too far,
-            # its result is stale, or it cancels the response; not physical curvature.
+            # The pair displaces Q_i + Q_j, so its ZFS change is expected to be the
+            # single-mode changes dD_i q_i + dD_j q_j plus a small remainder (the
+            # cross curvature). An A2 mode cannot change D linearly (C3v), so its
+            # single-mode change is pure curvature, which grows as Q^2: along 2Q
+            # (the diagonal pair) it is 4x the change at Q, not 2x. A remainder that
+            # is a sizeable multiple of the expectation (|alpha| > INCONSISTENT_ALPHA)
+            # means the response is strongly nonlinear at this Q, or the run was
+            # displaced too far or is stale; the geometry check tells these apart.
             if i in self.treated_modes and j in self.treated_modes:
-                linear = dD_qi * q_i + dD_qj * q_j
-                remainder = (D_qi_qj - self.zfs_relaxed) - linear
-                norm = np.sum(linear * linear)
+                if i == j and sym_i == "A2":
+                    expected = 4.0 * dD_qi * q_i
+                else:
+                    expected = dD_qi * q_i + dD_qj * q_j
+                remainder = (D_qi_qj - self.zfs_relaxed) - expected
+                norm = np.sum(expected * expected)
                 if norm > (0.05 * CONSTANTS["MHz2J"]) ** 2:
-                    alpha = float(np.sum(remainder * linear) / norm)
+                    alpha = float(np.sum(remainder * expected) / norm)
                     if abs(alpha) > INCONSISTENT_ALPHA:
                         self.inconsistent_pairs.append(
                             (i, j, alpha, float(np.linalg.norm(remainder) / CONSTANTS["MHz2J"]))
@@ -528,11 +534,16 @@ class ZFSManager:
                 )
 
         if self.inconsistent_pairs:
-            action = "Excluded" if self.exclude_inconsistent_pairs else "Kept (--keep-inconsistent-pairs)"
+            if self.exclude_inconsistent_pairs:
+                action, hint = "Excluded (--exclude-inconsistent-pairs)", ""
+            else:
+                action = "Kept"
+                hint = "; check the geometry with compare_displacement.py, --exclude-inconsistent-pairs drops them"
             LOGGER.warning(
                 f"{action} {len(self.inconsistent_pairs)} of {len(self.zfs_tensors_2d)} second-order entries "
-                f"whose ZFS change departs from the first-order response by a multiple of it (|alpha| > "
-                f"{INCONSISTENT_ALPHA}: over-displaced, stale or inconsistent runs). Run folders (1-based): "
+                f"whose ZFS change departs from the one expected from the first-order runs by a multiple of it "
+                f"(|alpha| > {INCONSISTENT_ALPHA}: strongly nonlinear at this Q, or an over-displaced or stale "
+                f"run{hint}). Run folders (1-based): "
                 + ", ".join(f"{i + 1}_{j + 1} (alpha={a:.2f})" for i, j, a, _ in self.inconsistent_pairs)
             )
 

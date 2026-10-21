@@ -78,7 +78,7 @@ def _query_args(tmp_path, out_root, run_name="spi17"):
         two_phonon=None,
         phonon_file=None,
         output_root=str(out_root),
-        keep_inconsistent_pairs=False,
+        exclude_inconsistent_pairs=False,
         sigma=7.5,
     )
 

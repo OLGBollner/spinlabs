@@ -396,7 +396,7 @@ def run_full_pipeline(
     run_name: str | None = None,
     save_plots: bool = True,
     show_plots: bool = False,
-    keep_inconsistent_pairs: bool = False,
+    exclude_inconsistent_pairs: bool = False,
     sigma: float = DEFAULT_SIGMA_MEV,
 ) -> dict[str, Any]:
     """
@@ -439,7 +439,7 @@ def run_full_pipeline(
             run_name=run_name,
             save_plots=save_plots,
             show_plots=show_plots,
-            keep_inconsistent_pairs=keep_inconsistent_pairs,
+            exclude_inconsistent_pairs=exclude_inconsistent_pairs,
             sigma=sigma,
         )
     finally:
@@ -471,7 +471,7 @@ def _execute_pipeline(
     run_name: str | None = None,
     save_plots: bool = True,
     show_plots: bool = False,
-    keep_inconsistent_pairs: bool = False,
+    exclude_inconsistent_pairs: bool = False,
     sigma: float = DEFAULT_SIGMA_MEV,
 ) -> dict[str, Any]:
     """Pipeline body of :func:`run_full_pipeline` (DB logging already owned)."""
@@ -651,7 +651,7 @@ def _execute_pipeline(
         LOGGER.info(f"[2/5] Using provided coupling data -> {coupling_path.name}")
     else:
         manager = ZFSManager(
-            raw_data=raw_data, spectrum=spectrum, exclude_inconsistent_pairs=not keep_inconsistent_pairs
+            raw_data=raw_data, spectrum=spectrum, exclude_inconsistent_pairs=exclude_inconsistent_pairs
         )
         if calc_method:
             manager.calc_method = calc_method
@@ -769,9 +769,9 @@ def _execute_pipeline(
         },
         "init_state": init_states,
         "sigma_mev": sigma,
-        # Second-order entries failing the linear-response check (run folders, 1-based).
+        # Second-order entries departing from the first-order expectation (run folders, 1-based).
         "inconsistent_second_order": {
-            "excluded": bool(inconsistent_pairs) and not keep_inconsistent_pairs,
+            "excluded": bool(inconsistent_pairs) and exclude_inconsistent_pairs,
             "pairs": [
                 {"pair": f"{i + 1}_{j + 1}", "alpha": round(a, 3), "remainder_mhz": round(r, 3)}
                 for i, j, a, r in inconsistent_pairs

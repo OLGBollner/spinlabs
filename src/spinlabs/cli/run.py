@@ -102,11 +102,14 @@ def build_run_parser(parser: argparse.ArgumentParser) -> None:
         f"bands of a macroscopic crystal (default: {DEFAULT_SIGMA_MEV:g}; see run sigma-scan)",
     )
     opt.add_argument(
-        "--keep-inconsistent-pairs",
+        "--exclude-inconsistent-pairs",
         action="store_true",
-        help="Keep second-order entries whose ZFS change departs from the first-order response by a multiple of it "
-        "(over-displaced or stale runs); they are excluded and listed by default",
+        help="Drop second-order entries whose ZFS change departs from the one expected from the first-order runs "
+        "by a multiple of it (strongly nonlinear modes, or over-displaced or stale runs); by default they are kept "
+        "and listed",
     )
+    # the old default; kept so existing commands still parse
+    opt.add_argument("--keep-inconsistent-pairs", action="store_true", help=argparse.SUPPRESS)
     add_verbosity_args(opt)
 
     parser.set_defaults(func=_run)
@@ -229,7 +232,7 @@ def _run(args: argparse.Namespace) -> None:
         run_name=args.run_name,
         save_plots=args.plot,
         show_plots=False,
-        keep_inconsistent_pairs=args.keep_inconsistent_pairs,
+        exclude_inconsistent_pairs=args.exclude_inconsistent_pairs,
         sigma=args.sigma,
     )
 
@@ -331,6 +334,6 @@ def _run_one_query_dataset(
         run_name=run_name,
         save_plots=args.plot,
         show_plots=False,
-        keep_inconsistent_pairs=args.keep_inconsistent_pairs,
+        exclude_inconsistent_pairs=args.exclude_inconsistent_pairs,
         sigma=args.sigma,
     )

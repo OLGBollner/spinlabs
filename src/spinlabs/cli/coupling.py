@@ -45,10 +45,11 @@ def add_input_args(parser: argparse.ArgumentParser) -> argparse._ArgumentGroup:
     opt.add_argument("--defect", help="Override defect name")
     opt.add_argument("--cell-size", type=int, help="Override supercell size")
     opt.add_argument(
-        "--keep-inconsistent-pairs",
+        "--exclude-inconsistent-pairs",
         action="store_true",
-        help="Keep second-order entries failing the linear-response check (excluded and listed by default)",
+        help="Drop second-order entries departing from the first-order expectation (kept and listed by default)",
     )
+    opt.add_argument("--keep-inconsistent-pairs", action="store_true", help=argparse.SUPPRESS)
     return opt
 
 
@@ -127,7 +128,7 @@ def load_manager(args: argparse.Namespace, command: str):
         cell_size=args.cell_size,
     )
     manager = ZFSManager(
-        raw_data=raw_data, spectrum=spectrum, exclude_inconsistent_pairs=not args.keep_inconsistent_pairs
+        raw_data=raw_data, spectrum=spectrum, exclude_inconsistent_pairs=args.exclude_inconsistent_pairs
     )
     manager.calc_method = calc_method
     if not manager.zfs_tensors:
