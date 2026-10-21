@@ -59,6 +59,13 @@ def main() -> int:
         "job count is raised until the limit fits (e.g. "
         "--max-hours 8)",
     )
+    ap.add_argument(
+        "--no-mass-weighted",
+        dest="mass_weighted",
+        action="store_false",
+        help="displace by Q*e instead of Q*e/sqrt(m) (MASS_WEIGHTED=0 in the job scripts), to stay consistent "
+        "with trees made that way, e.g. NV_64",
+    )
     args = ap.parse_args()
 
     if args.force:
@@ -85,6 +92,7 @@ def main() -> int:
             max_hours=args.max_hours,
             vasp_binary=vasp_binary,
             force=args.force,
+            mass_weighted=args.mass_weighted,
         )
     except FileNotFoundError as e:
         sys.exit(f"Error: {e}")

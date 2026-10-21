@@ -154,14 +154,13 @@ def _run(args: argparse.Namespace) -> None:
         if found and phonon is not None:
             phonons[(found[0].defect, found[0].cell_size)] = phonon
     _print_scan_summary(scanned, phonons)
-    if getattr(args, "no_mass_weighted", False) and scanned:
-        print("Perturbations marked as NOT mass-weighted (--no-mass-weighted).\n")
+    _print_mass_weighting(scanned, cli_unweighted=getattr(args, "no_mass_weighted", False))
     if args.scan or not scanned:
         return
     if not getattr(args, "yes", False) and not _confirm("Save the perturbation data to file? (Y/n): "):
         print("Nothing saved.")
         return
-    _save_raw(scanned, args.output_root, mass_weighted=not getattr(args, "no_mass_weighted", False))
+    _save_raw(scanned, args.output_root, cli_unweighted=getattr(args, "no_mass_weighted", False))
     _save_phonons(phonons, args.output_root)
 
 
@@ -173,6 +172,41 @@ class _Scanned(NamedTuple):
     calc_method: str
     pert_scale: float
     raw: RawZFSData
+    # MASS_WEIGHTED of the trees' job scripts (True/False), None when they do not say
+    mass_weighted: bool | None = None
+
+
+_MASS_WEIGHTED_LINE = re.compile(r"^\s*MASS_WEIGHTED\s*=\s*(\S+)", re.M)
+
+
+def tree_mass_weighted(basis: Path) -> bool | None:
+    """MASS_WEIGHTED from a tree's run_perturbation_*.sh: True (1, the default), False (0), None if absent."""
+    for script in sorted(basis.glob("run_perturbation_*_order.sh")):
+        match = _MASS_WEIGHTED_LINE.search(script.read_text(errors="replace"))
+        if match:
+            return match.group(1).strip("'\"") != "0"
+    return None
+
+
+def _mass_weighted_of(scanned: _Scanned, cli_unweighted: bool) -> bool:
+    """The convention a dataset is saved with: its trees' setting, else the --no-mass-weighted flag."""
+    return scanned.mass_weighted if scanned.mass_weighted is not None else not cli_unweighted
+
+
+def _print_mass_weighting(scanned: list[_Scanned], cli_unweighted: bool) -> None:
+    """Which displacement convention each dataset is saved with, and any conflict with the flag."""
+    if not scanned:
+        return
+    print("Displacements:")
+    for s in scanned:
+        name = f"{s.defect}_{s.cell_size} {s.calc_method} pert {s.pert_scale:g}"
+        weighted = _mass_weighted_of(s, cli_unweighted)
+        source = "trees' MASS_WEIGHTED" if s.mass_weighted is not None else (
+            "--no-mass-weighted" if cli_unweighted else "default")
+        print(f"  {name}: {'Q*e/sqrt(m) (mass-weighted)' if weighted else 'Q*e (not mass-weighted)'}  [{source}]")
+        if s.mass_weighted is True and cli_unweighted:
+            print("    !! --no-mass-weighted ignored: the trees' job scripts say MASS_WEIGHTED=1")
+    print()
 
 
 def _confirm(prompt: str) -> bool:
@@ -230,6 +264,7 @@ def _scan_raw(args: argparse.Namespace, defect_folder: Path, methods: list[str])
         for pert_scale in pert_scales:
             raw = None
             trees = {}
+            weighting: set[bool] = set()
             for o in orders:
                 if pert_scale not in datasets[o]:
                     continue
@@ -240,6 +275,9 @@ def _scan_raw(args: argparse.Namespace, defect_folder: Path, methods: list[str])
                 basis = datasets[o][pert_scale] / calc_method
                 if basis.is_dir():
                     trees[_ORDER_DIRS[o]] = tree_settings(basis)
+                    mw = tree_mass_weighted(basis)
+                    if mw is not None:
+                        weighting.add(mw)
             if raw is None or not (raw.first_order or raw.second_order):
                 warnings.warn(f"No data parsed for {defect_folder.name} ({calc_method}, pert {pert_scale:g}); skipping")
                 continue
@@ -249,7 +287,13 @@ def _scan_raw(args: argparse.Namespace, defect_folder: Path, methods: list[str])
                 "problems": compare_settings(ground, trees),
                 "start_differences": start_differences(ground, trees),
             }
-            found.append(_Scanned(defect, cell_size, calc_method, pert_scale, raw))
+            if len(weighting) > 1:
+                warnings.warn(
+                    f"{defect_folder.name} {calc_method} pert {pert_scale:g}: first and second order trees use "
+                    "different MASS_WEIGHTED settings; their displacements are not consistent"
+                )
+            mw = weighting.pop() if len(weighting) == 1 else None
+            found.append(_Scanned(defect, cell_size, calc_method, pert_scale, raw, mw))
     return found
 
 
@@ -389,11 +433,11 @@ def _print_shape_flags(scanned: list[_Scanned], phonons: dict[tuple[str, int], P
             print("    (every folder and its reason: rerun with -v)")
 
 
-def _save_raw(scanned: list[_Scanned], output_root: Path, mass_weighted: bool = True) -> None:
+def _save_raw(scanned: list[_Scanned], output_root: Path, cli_unweighted: bool = False) -> None:
     """Write each scanned dataset to <output_root>/<defect>_<cell>/pert_<p>/<method>/<date>/ and register it."""
     date_dir = date.today().strftime("%Y%m%d")
     for s in scanned:
-        s.raw.mass_weighted = mass_weighted
+        s.raw.mass_weighted = _mass_weighted_of(s, cli_unweighted)
         pert_folder = output_root / f"{s.defect}_{s.cell_size}" / f"pert_{s.pert_scale:g}" / s.calc_method / date_dir
         pert_folder.mkdir(parents=True, exist_ok=True)
         save_path = s.raw.save(pert_folder / s.raw._default_name())

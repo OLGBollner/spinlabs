@@ -288,6 +288,7 @@ def prepare_basis(
     vasp_binary: Path | None = None,
     pair_mode: str | None = None,
     max_hours: float | None = None,
+    mass_weighted: bool = True,
 ) -> list[str]:
     """Fill dst/input/ and write the prefilled SLURM script.
 
@@ -352,6 +353,8 @@ def prepare_basis(
         text = replace_tag(text, "BINARY", str(vasp_binary))
     if pair_mode:
         text = replace_tag(text, "PAIR_MODE", pair_mode)
+    # 0 keeps a tree displaced by Q*e (as NV_64's first trees were) consistent with its old runs
+    text = replace_tag(text, "MASS_WEIGHTED", "${MASS_WEIGHTED:-1}" if mass_weighted else "0")
     # The loop and the structure scripts run from a snapshot of this repo taken at
     # submission (see the script header), so the script only names the checkout.
     text = replace_tag(text, "SPINLABS_REPO", str(repo_root(scripts_dir)))
@@ -385,6 +388,7 @@ def build_perturbation_tree(
     max_hours: float | None = None,
     vasp_binary: Path | None = None,
     force: bool = False,
+    mass_weighted: bool = True,
 ) -> list[str]:
     """Build ready-to-go perturbed ZFS run folders under a defect directory.
 
@@ -440,6 +444,7 @@ def build_perturbation_tree(
                         basis=dst.name,
                         scripts_dir=scripts_dir,
                         vasp_binary=vasp_binary,
+                        mass_weighted=mass_weighted,
                         pair_mode=pair_mode if order == "second_order" else None,
                         max_hours=max_hours,
                     )

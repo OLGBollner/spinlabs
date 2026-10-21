@@ -9,6 +9,8 @@ from __future__ import annotations
 import argparse
 import sys
 
+import numpy as np
+
 
 from spinlabs.vasp import apply_perturbation, load_phonon_data, load_poscar, write_perturbed_poscar
 
@@ -29,6 +31,12 @@ def main() -> int:
     ap.add_argument("mode_indices", type=parse_index)
     ap.add_argument("amplitude", type=float, help="Normal coordinate amplitude Q in Angstrom*sqrt(amu)")
     ap.add_argument("-o", "--output", default=None)
+    ap.add_argument(
+        "--no-mass-weighted",
+        dest="mass_weighted",
+        action="store_false",
+        help="displace by Q*e instead of Q*e/sqrt(m), as the earliest runs (e.g. NV_64) were",
+    )
     args = ap.parse_args()
 
     structure = load_poscar(args.poscar_file)
@@ -38,7 +46,7 @@ def main() -> int:
         perturbed = apply_perturbation(
             structure,
             data.eigenvectors,
-            data.atomic_masses,
+            data.atomic_masses if args.mass_weighted else np.ones(len(data.atomic_masses)),
             idx,
             args.amplitude,
             original_indices=data.original_indices,

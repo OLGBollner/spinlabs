@@ -4,7 +4,8 @@
 # The per-tree wrappers start it inside a SLURM job, from the tree's all_bands folder:
 #     sh "$SPINLABS_CODE/scripts/cluster/perturbation_runner.sh" first_order|second_order
 # with the tree's config in the environment: DEFECT, binary, PHONON_PATH, PERT, PAIR_MODE
-# (second order) and SPINLABS_CODE, the snapshot of the spinlabs repo taken when the job
+# (second order), MASS_WEIGHTED (1: Q*e/sqrt(m), the default; 0: Q*e as the earliest
+# trees, e.g. NV_64, were made) and SPINLABS_CODE, the snapshot of the spinlabs repo taken when the job
 # was submitted. This file, the structure scripts and the spinlabs package all come from
 # that snapshot, so every task of a submission runs the same code.
 
@@ -35,6 +36,12 @@ case ${PERT:-} in ''|*'<pert_scale>'*) fail "PERT unset or still placeholder: '$
 if [ "$ORDER" = "second_order" ]; then
   case ${PAIR_MODE:-} in diag|all) ;; *) fail "PAIR_MODE must be diag or all, got: '${PAIR_MODE:-}'" ;; esac
 fi
+MASS_WEIGHTED=${MASS_WEIGHTED:-1}
+case $MASS_WEIGHTED in
+  1) MW_FLAG="" ;;
+  0) MW_FLAG="--no-mass-weighted" ;;
+  *) fail "MASS_WEIGHTED must be 1 (Q*e/sqrt(m)) or 0 (Q*e), got: '$MASS_WEIGHTED'" ;;
+esac
 [ -x "$binary" ] || fail "VASP binary not found/executable: $binary"
 [ -f "$create_struct" ] || fail "create_struct script missing from the code snapshot: $create_struct"
 [ -f "$get_n_modes" ] || fail "get_n_modes script missing from the code snapshot: $get_n_modes"
@@ -51,6 +58,11 @@ esac
 MODES=$(python "$get_n_modes" "$PHONON_PATH") || fail "get_n_modes exited nonzero on $PHONON_PATH"
 [ -n "$MODES" ] || fail "get_n_modes returned no modes for $PHONON_PATH"
 echo "Preflight OK: $ORDER, $(echo $MODES | wc -w) modes${PAIR_MODE:+, pair_mode=$PAIR_MODE}, binary=$binary"
+if [ "$MASS_WEIGHTED" = 0 ]; then
+  echo "displacements: Q*e (MASS_WEIGHTED=0, not mass-weighted; package with --no-mass-weighted)"
+else
+  echo "displacements: Q*e/sqrt(m) (mass-weighted)"
+fi
 echo "spinlabs code: $(basename "$SPINLABS_CODE") ($SPINLABS_CODE)"
 # ------------------------------------------------------------------------
 
@@ -148,7 +160,7 @@ run_one() {
   cp "$INPUT_DIR"/* "$TARGET_DIR"/
   cd "$TARGET_DIR"
   echo "$ID: starting job for $label"
-  MSG=$(python "$create_struct" -o POSCAR POSCAR "$PHONON_PATH" "$@" "$PERT")
+  MSG=$(python "$create_struct" -o POSCAR POSCAR "$PHONON_PATH" "$@" "$PERT" $MW_FLAG)
   if echo "$MSG" | grep -q "Success"; then
     echo "Successfully created perturbed structure"
   else
@@ -158,7 +170,7 @@ run_one() {
     exit 1
   fi
   # The displacement must be Q along exactly these modes before any VASP time is spent.
-  if ! CHECK_MSG=$(python "$SCRIPTS/check_perturbation.py" POSCAR "$HEAD_DIR/$INPUT_DIR/POSCAR" "$PHONON_PATH" "$@" --pert "$PERT"); then
+  if ! CHECK_MSG=$(python "$SCRIPTS/check_perturbation.py" POSCAR "$HEAD_DIR/$INPUT_DIR/POSCAR" "$PHONON_PATH" "$@" --pert "$PERT" $MW_FLAG); then
     echo "$ID: $CHECK_MSG"
     echo "$ID: $label: perturbed POSCAR is not the intended displacement -- VASP not started"
     printf 'perturbation check failed\n%s\n' "$CHECK_MSG" > CHECK
