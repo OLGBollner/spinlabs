@@ -22,7 +22,14 @@ from spinlabs.registry import ensure_db, register_file
 from spinlabs.pack_convergence import pack_convergence
 from spinlabs.parsers import parse_zfs_simulation_dataset, split_defect_folder_name
 from spinlabs.vasp.run_checks import BASIS_SOURCE
-from spinlabs.vasp.settings import compare_settings, outcar_settings, read_incar, summary_line, tree_settings
+from spinlabs.vasp.settings import (
+    compare_settings,
+    outcar_settings,
+    read_incar,
+    start_differences,
+    summary_line,
+    tree_settings,
+)
 from spinlabs.vasp.trees import default_phonon
 
 from spinlabs.logging_utils import get_logger
@@ -240,6 +247,7 @@ def _scan_raw(args: argparse.Namespace, defect_folder: Path, methods: list[str])
                 "ground_state": ground,
                 "trees": trees,
                 "problems": compare_settings(ground, trees),
+                "start_differences": start_differences(ground, trees),
             }
             found.append(_Scanned(defect, cell_size, calc_method, pert_scale, raw))
     return found
@@ -336,11 +344,16 @@ def _print_settings(scanned: list[_Scanned]) -> None:
             continue
         where = "" if ground is not None else " (no ground-state INCAR/OUTCAR found)"
         problems = settings.get("problems", [])
+        start = settings.get("start_differences", [])
         status = "consistent" if not problems else f"{len(problems)} difference(s)"
         print(f"  {name}: {status}; {summary_line(ground, trees)}{where}")
         for problem in problems:
             print(f"    !! {problem}")
-            LOGGER.warning(f"{name}: {problem}")
+            LOGGER.info(f"{name}: {problem}")  # kept in the run log; printed once above
+        if start:
+            print(f"    starting point only (ISTART/ICHARG, same converged result): {len(start)} difference(s)")
+            for line in start:
+                LOGGER.info(f"{name}: starting point: {line}")
 
 
 def _print_shape_flags(scanned: list[_Scanned], phonons: dict[tuple[str, int], Path]) -> None:
@@ -371,7 +384,9 @@ def _print_shape_flags(scanned: list[_Scanned], phonons: dict[tuple[str, int], P
         shown = ", ".join(folder for folder, _ in flags[:15]) + (", ..." if len(flags) > 15 else "")
         print(f"  {name}: {len(flags)} suspicious run folder(s): {shown}")
         for folder, problem in flags:
-            LOGGER.warning(f"{name}: runs/{folder}: {problem}")
+            LOGGER.info(f"{name}: runs/{folder}: {problem}")  # per-run reasons with -v
+        if len(flags) > 15:
+            print("    (every folder and its reason: rerun with -v)")
 
 
 def _save_raw(scanned: list[_Scanned], output_root: Path, mass_weighted: bool = True) -> None:

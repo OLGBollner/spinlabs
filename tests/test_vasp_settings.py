@@ -108,3 +108,34 @@ def test_package_scan_prints_and_stores_the_settings(tmp_path, monkeypatch, caps
     assert stored["ground_state"]["ISYM"] == "3"
     assert stored["trees"]["first_order"]["runs"]["ISYM"] == {"0": 2}
     assert len(stored["problems"]) == 2
+
+
+def _with(text: str, **changes) -> str:
+    lines = [l for l in text.splitlines() if l.split("=")[0].strip().upper() not in changes]  # noqa: E741
+    return "\n".join(lines + [f"{k} = {v}" for k, v in changes.items()]) + "\n"
+
+
+def test_output_relax_and_start_keys_are_kept_apart(tmp_path):
+    from spinlabs.vasp.settings import start_differences
+
+    ground = read_incar_text(tmp_path, _with(RUN, IBRION=1, NSW=0, LHYPERFINE=".TRUE.", ISTART=1))
+    trees = {"first_order": tree_settings(_tree(tmp_path, [_with(RUN, IBRION=-1)] * 2))}
+    problems = compare_settings(ground, trees)
+    assert problems == []  # IBRION without ionic steps, hyperfine output: no effect on D
+    assert start_differences(ground, trees) == ["first_order: ISTART = 0 in the runs but 1 in the ground state"]
+
+
+def test_a_relaxing_ground_state_and_non_scf_settings_are_flagged(tmp_path):
+    ground = read_incar_text(tmp_path, _with(RUN, IBRION=1, NSW=50, ALGO="None", ICHARG=11))
+    trees = {"first_order": tree_settings(_tree(tmp_path, [_with(RUN, ALGO="Normal")] * 2))}
+    problems = compare_settings(ground, trees)
+    assert any(p.startswith("ground state moves the ions (NSW = 50, IBRION = 1)") for p in problems)
+    assert any("ALGO = NORMAL in the runs but NONE" in p and "no self-consistency" in p for p in problems)
+    assert any("ICHARG = 1 in the runs but 11" in p and "fixed charge density" in p for p in problems)
+
+
+def test_mixed_runs_name_the_minority_folders(tmp_path):
+    other = RUN.replace("ISYM = 0", "ISYM = 3")
+    trees = {"first_order": tree_settings(_tree(tmp_path, [other, RUN, other, other]))}
+    problems = compare_settings(read_incar_text(tmp_path, other), trees)
+    assert any("ISYM differs between runs: 3 (3), 0 (1) -- 0: runs 2" in p for p in problems)
