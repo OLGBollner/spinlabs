@@ -50,6 +50,11 @@ def add_input_args(parser: argparse.ArgumentParser) -> argparse._ArgumentGroup:
         help="Drop second-order entries departing from the first-order expectation (kept and listed by default)",
     )
     opt.add_argument("--keep-inconsistent-pairs", action="store_true", help=argparse.SUPPRESS)
+    opt.add_argument(
+        "--degenerate-pairs-from-symmetry",
+        action="store_true",
+        help="Take the second-order coupling of each degenerate Ex-Ey pair from its Ex-Ex derivative (as for run)",
+    )
     return opt
 
 
@@ -128,7 +133,10 @@ def load_manager(args: argparse.Namespace, command: str):
         cell_size=args.cell_size,
     )
     manager = ZFSManager(
-        raw_data=raw_data, spectrum=spectrum, exclude_inconsistent_pairs=args.exclude_inconsistent_pairs
+        raw_data=raw_data,
+        spectrum=spectrum,
+        exclude_inconsistent_pairs=args.exclude_inconsistent_pairs,
+        degenerate_pairs_from_symmetry=args.degenerate_pairs_from_symmetry,
     )
     manager.calc_method = calc_method
     if not manager.zfs_tensors:

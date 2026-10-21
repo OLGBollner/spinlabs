@@ -397,6 +397,7 @@ def run_full_pipeline(
     save_plots: bool = True,
     show_plots: bool = False,
     exclude_inconsistent_pairs: bool = False,
+    degenerate_pairs_from_symmetry: bool = False,
     sigma: float = DEFAULT_SIGMA_MEV,
 ) -> dict[str, Any]:
     """
@@ -440,6 +441,7 @@ def run_full_pipeline(
             save_plots=save_plots,
             show_plots=show_plots,
             exclude_inconsistent_pairs=exclude_inconsistent_pairs,
+            degenerate_pairs_from_symmetry=degenerate_pairs_from_symmetry,
             sigma=sigma,
         )
     finally:
@@ -472,6 +474,7 @@ def _execute_pipeline(
     save_plots: bool = True,
     show_plots: bool = False,
     exclude_inconsistent_pairs: bool = False,
+    degenerate_pairs_from_symmetry: bool = False,
     sigma: float = DEFAULT_SIGMA_MEV,
 ) -> dict[str, Any]:
     """Pipeline body of :func:`run_full_pipeline` (DB logging already owned)."""
@@ -646,12 +649,16 @@ def _execute_pipeline(
     # ── 5. Calculate Spin-Phonon Couplings ───────────────────────────────────
     coupling_path = run_dir / "spin_phonon_coupling.npz"
     inconsistent_pairs: list[tuple[int, int, float, float]] = []
+    symmetry_derived_pairs: list[tuple[int, int]] = []
     if coupling_data is not None:
         coupling_data.save(coupling_path)
         LOGGER.info(f"[2/5] Using provided coupling data -> {coupling_path.name}")
     else:
         manager = ZFSManager(
-            raw_data=raw_data, spectrum=spectrum, exclude_inconsistent_pairs=exclude_inconsistent_pairs
+            raw_data=raw_data,
+            spectrum=spectrum,
+            exclude_inconsistent_pairs=exclude_inconsistent_pairs,
+            degenerate_pairs_from_symmetry=degenerate_pairs_from_symmetry,
         )
         if calc_method:
             manager.calc_method = calc_method
@@ -673,6 +680,7 @@ def _execute_pipeline(
             manager.process_first_order_perturbations(output_filename=out_base)
         coupling_data = SpinPhononCouplingData.load(coupling_path)
         inconsistent_pairs = manager.inconsistent_pairs
+        symmetry_derived_pairs = manager.symmetry_derived_pairs
         LOGGER.info(f"[2/5] Computed and saved spin-phonon coupling -> {coupling_path.name}")
 
     # ── 6. Transition Rates Calculation ──────────────────────────────────────
@@ -776,6 +784,11 @@ def _execute_pipeline(
                 {"pair": f"{i + 1}_{j + 1}", "alpha": round(a, 3), "remainder_mhz": round(r, 3)}
                 for i, j, a, r in inconsistent_pairs
             ],
+        },
+        # Degenerate (Ex, Ey) pairs (1-based modes) whose couplings came from the Ex-Ex curvature.
+        "degenerate_pairs_from_symmetry": {
+            "enabled": degenerate_pairs_from_symmetry,
+            "pairs": [f"{x + 1}_{y + 1}" for x, y in symmetry_derived_pairs],
         },
     }
 

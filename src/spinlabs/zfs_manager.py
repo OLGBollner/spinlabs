@@ -34,6 +34,7 @@ class ZFSManager:
         spectrum: Optional[PhononSpectrum] = None,
         raw_data: Optional[RawZFSData] = None,
         exclude_inconsistent_pairs: bool = False,
+        degenerate_pairs_from_symmetry: bool = False,
     ):
         # spectrum is the primary dataclass
         if spectrum is not None:
@@ -111,6 +112,11 @@ class ZFSManager:
         # Second-order entries failing the linear-response check, as
         # (i, j, alpha, |remainder| in MHz) with 0-based modes; see calculate_second_order_derivatives.
         self.inconsistent_pairs: list[tuple[int, int, float, float]] = []
+        # Replace each degenerate Ex-Ey second-order coupling by its symmetry value
+        # from the Ex-Ex curvature; see _degenerate_pairs_from_symmetry.
+        self.degenerate_pairs_from_symmetry = degenerate_pairs_from_symmetry
+        # (Ex, Ey) pairs, 0-based, whose couplings were replaced that way.
+        self.symmetry_derived_pairs: list[tuple[int, int]] = []
         if not self.mass_weighted:
             if spectrum is None:
                 raise ValueError(
@@ -533,6 +539,9 @@ class ZFSManager:
                     V_p_m_2nd[i, j] / CONSTANTS["MHz2J"],
                 )
 
+        if self.degenerate_pairs_from_symmetry:
+            self._degenerate_pairs_from_symmetry(zfs_2nd_derivs, V_0_0_2nd, V_p_m_2nd, V_0_pm_2nd)
+
         if self.inconsistent_pairs:
             if self.exclude_inconsistent_pairs:
                 action, hint = "Excluded (--exclude-inconsistent-pairs)", ""
@@ -553,6 +562,54 @@ class ZFSManager:
         LOGGER.info(f"V_0pm: {np.sum(V_0_pm_2nd > 0)}")
 
         return zfs_2nd_derivs, V_0_0_2nd, V_p_m_2nd, V_0_pm_2nd
+
+    def _degenerate_pairs_from_symmetry(
+        self, zfs_2nd_derivs: np.ndarray, V_0_0_2nd: np.ndarray, V_p_m_2nd: np.ndarray, V_0_pm_2nd: np.ndarray
+    ) -> None:
+        """Replace the coupling of each degenerate Ex-Ey pair by its C3v value from the Ex-Ex curvature.
+
+        Within one E pair the quadratic terms Qx^2, Qy^2, QxQy span A1 + E, so the
+        second-order response has one constant per irrep of D (A1, and the two E
+        parts), all of them present in d2D/dQx^2. For any orientation of the pair
+        in its degenerate subspace this gives |w_xy| = |w_xx| and |p_xy| = |p_xx|,
+        with w = (D_xx - D_yy) + 2i D_xy and p = D_xz + i D_yz, while the A1 part of
+        d2D/dQxdQy vanishes. The Ex-Ey V-coefficients therefore follow from the
+        Ex-Ex derivative alone, so the Ex-Ey runs are not needed. Only the
+        V-coefficients are replaced; zfs_2nd_derivs keeps the computed tensors.
+        Pairs without an Ex-Ex derivative (not run, or excluded) keep their values.
+        """
+        spectrum = self.spectrum
+        if spectrum is None or spectrum.deg_groups is None or spectrum.symmetries is None:
+            LOGGER.warning("Degenerate Ex-Ey pairs from symmetry need the phonon spectrum; skipped.")
+            return
+
+        syms = list(spectrum.symmetries)
+        n_pairs = 0
+        self.symmetry_derived_pairs = []
+        for group in spectrum.deg_groups:
+            if len(group) != 2 or {syms[k] for k in group} != {"Ex", "Ey"}:
+                continue
+            n_pairs += 1
+            x, y = group if syms[group[0]] == "Ex" else group[::-1]
+            d2D_xx = zfs_2nd_derivs[x, x]
+            if not np.any(d2D_xx):
+                continue
+
+            diff_in_plane = d2D_xx[0, 0] - d2D_xx[1, 1]
+            off_diag_in_plane = d2D_xx[0, 1]
+            # The Ex-Ey formulas of calculate_second_order_derivatives, with |w| and |p| of the Ex-Ex derivative.
+            V_0_0_2nd[x, y] = V_0_0_2nd[y, x] = 0.0
+            V_p_m_2nd[x, y] = V_p_m_2nd[y, x] = 0.5 * np.sqrt(diff_in_plane**2 + 4.0 * off_diag_in_plane**2)
+            V_0_pm_2nd[x, y] = V_0_pm_2nd[y, x] = np.sqrt(d2D_xx[0, 2] ** 2 + d2D_xx[1, 2] ** 2) / (
+                2.0 * np.sqrt(2)
+            )
+            self.symmetry_derived_pairs.append((int(x), int(y)))
+
+        n_kept = n_pairs - len(self.symmetry_derived_pairs)
+        LOGGER.info(
+            f"Degenerate Ex-Ey couplings from symmetry: {len(self.symmetry_derived_pairs)} of {n_pairs} pairs"
+            + (f" ({n_kept} without an Ex-Ex derivative keep their computed values)" if n_kept else "")
+        )
 
     def process_first_order_perturbations(self, output_filename: Optional[str] = None) -> list[str]:
         if not self.zfs_tensors:

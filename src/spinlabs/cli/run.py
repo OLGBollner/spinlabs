@@ -110,6 +110,12 @@ def build_run_parser(parser: argparse.ArgumentParser) -> None:
     )
     # the old default; kept so existing commands still parse
     opt.add_argument("--keep-inconsistent-pairs", action="store_true", help=argparse.SUPPRESS)
+    opt.add_argument(
+        "--degenerate-pairs-from-symmetry",
+        action="store_true",
+        help="Take the second-order coupling of each degenerate Ex-Ey pair from its Ex-Ex derivative (C3v "
+        "symmetry) instead of the computed Ex-Ey entry, so those runs are not needed",
+    )
     add_verbosity_args(opt)
 
     parser.set_defaults(func=_run)
@@ -233,6 +239,7 @@ def _run(args: argparse.Namespace) -> None:
         save_plots=args.plot,
         show_plots=False,
         exclude_inconsistent_pairs=args.exclude_inconsistent_pairs,
+        degenerate_pairs_from_symmetry=args.degenerate_pairs_from_symmetry,
         sigma=args.sigma,
     )
 
@@ -335,5 +342,6 @@ def _run_one_query_dataset(
         save_plots=args.plot,
         show_plots=False,
         exclude_inconsistent_pairs=args.exclude_inconsistent_pairs,
+        degenerate_pairs_from_symmetry=args.degenerate_pairs_from_symmetry,
         sigma=args.sigma,
     )

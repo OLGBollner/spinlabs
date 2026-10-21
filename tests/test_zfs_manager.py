@@ -92,6 +92,65 @@ class TestZFSManager:
         assert V_00_2nd[0, 0] > 0
         assert np.isclose(V_00_2nd[0, 0], V_00_2nd[0, 0])
 
+    PERT_SI = 0.01 * CONSTANTS["ang_amu2SI"]
+    # Curvature unit: a ZFS change of 1 MHz at the displacement (q, q).
+    D2_UNIT = CONSTANTS["MHz2J"] / PERT_SI**2
+
+    @classmethod
+    def _second_order_entry(cls, manager, dD_mhz, sym):
+        # With zero first-order derivatives the entry's curvature is (D - D0) / q^2.
+        manager.zfs_relaxed = np.diag([-2870.0 / 3, -2870.0 / 3, 2 * 2870.0 / 3]) * CONSTANTS["MHz2J"]
+        tensor = manager.zfs_relaxed + dD_mhz * CONSTANTS["MHz2J"]
+        return {"tensor": tensor, "pert": (cls.PERT_SI, cls.PERT_SI), "symmetry": sym, "ipr": (0.5, 0.5)}
+
+    def test_degenerate_pairs_from_symmetry_replaces_ex_ey_coupling(self, setup_system):
+        manager, spectrum, gs_zfs = setup_system
+        # Ex-Ex change (MHz): E parts |w| = sqrt(6^2 + 4*4^2) = 10, |p| = sqrt(3^2 + 4^2) = 5.
+        dD_xx = np.array([[2.0, 4.0, 3.0], [4.0, -4.0, 4.0], [3.0, 4.0, 2.0]])
+        # A computed Ex-Ey entry that disagrees with symmetry (noisy run).
+        dD_xy = np.array([[1.0, 0.5, 0.2], [0.5, -1.0, 0.1], [0.2, 0.1, 7.0]])
+        manager.zfs_tensors_2d = {
+            (1, 1): self._second_order_entry(manager, dD_xx, ("Ex", "Ex")),
+            (1, 2): self._second_order_entry(manager, dD_xy, ("Ex", "Ey")),
+        }
+        manager.treated_modes = {1, 2}
+        zfs_1d_derivs = np.zeros((4, 3, 3))
+
+        _, V_00_comp, V_pm_comp, V_0pm_comp = manager.calculate_second_order_derivatives(zfs_1d_derivs)
+        assert manager.symmetry_derived_pairs == []
+        assert not np.isclose(V_pm_comp[1, 2] / self.D2_UNIT, 5.0)
+
+        manager.degenerate_pairs_from_symmetry = True
+        _, V_00, V_pm, V_0pm = manager.calculate_second_order_derivatives(zfs_1d_derivs)
+
+        assert manager.symmetry_derived_pairs == [(1, 2)]
+        for V in (V_pm, V_0pm, V_00):
+            assert V[1, 2] == V[2, 1]
+        # V_+- = 0.5 |w_xx| (twice the Ex-Ex value), V_0+- = |p_xx| / (2 sqrt 2), V_00 = 0.
+        assert np.isclose(V_pm[1, 2] / self.D2_UNIT, 5.0)
+        assert np.isclose(V_pm[1, 2], 2.0 * V_pm[1, 1])
+        assert np.isclose(V_0pm[1, 2] / self.D2_UNIT, 5.0 / (2.0 * np.sqrt(2)))
+        assert np.isclose(V_0pm[1, 2], V_0pm[1, 1])
+        assert V_00[1, 2] == 0.0
+        # Everything but the Ex-Ey pair is unchanged.
+        mask = np.ones((4, 4), dtype=bool)
+        mask[1, 2] = mask[2, 1] = False
+        for V, V_comp in ((V_00, V_00_comp), (V_pm, V_pm_comp), (V_0pm, V_0pm_comp)):
+            assert np.array_equal(V[mask], V_comp[mask])
+
+    def test_degenerate_pairs_from_symmetry_keeps_pairs_without_ex_ex(self, setup_system):
+        manager, spectrum, gs_zfs = setup_system
+        dD_xy = np.array([[1.0, 0.5, 0.2], [0.5, -1.0, 0.1], [0.2, 0.1, 7.0]])
+        manager.zfs_tensors_2d = {(1, 2): self._second_order_entry(manager, dD_xy, ("Ex", "Ey"))}
+        manager.treated_modes = {1, 2}
+        manager.degenerate_pairs_from_symmetry = True
+
+        _, _, V_pm, V_0pm = manager.calculate_second_order_derivatives(np.zeros((4, 3, 3)))
+
+        assert manager.symmetry_derived_pairs == []
+        diff, off = dD_xy[0, 0] - dD_xy[1, 1], dD_xy[0, 1]
+        assert np.isclose(V_pm[1, 2] / self.D2_UNIT, 0.5 * np.sqrt(diff**2 + 4 * off**2))
+
     def test_init_from_raw_data_with_legacy_scalar_pert_updates_to_si_displacements(self, setup_system):
         manager_base, spectrum, gs_zfs = setup_system
 
