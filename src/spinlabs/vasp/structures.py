@@ -490,11 +490,15 @@ def compare_displacement_cli(
         if spectrum is not None:
             print(_expected_report(path, stats["disp"], spectrum, amplitude, mass_weighted))
         print()
-    if len(rows) > 1:
+    # Relative sizes need a displaced first entry; identical structures (e.g. a ground state
+    # checked against the tree's input) have nothing to compare.
+    if len(rows) > 1 and rows[0][1]["max"] > 0:
         print("Relative sizes (max |disp|, first entry = 1.000):")
         base = rows[0][1]["max"]
         for path, stats in rows:
             print(f"    {stats['max'] / base:8.3f}  {path}")
+    elif rows and all(stats["max"] == 0 for _, stats in rows):
+        print("All structures are identical to the reference.")
 
 
 def _expected_report(

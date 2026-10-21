@@ -77,6 +77,15 @@ def test_cli_table(ref_poscar, tmp_path, capsys):
     assert "2.000" in out  # second entry is 2x the first
 
 
+def test_cli_with_identical_structures_does_not_divide_by_zero(ref_poscar, tmp_path, capsys):
+    """Checking a ground state against the tree's input: every structure is the reference itself."""
+    ref_path, ref = ref_poscar
+    same = [_write(tmp_path / f"POSCAR_{i}", ref.copy()) for i in range(2)]
+    compare_displacement_cli(ref_path, same)
+    out = capsys.readouterr().out
+    assert "All structures are identical to the reference." in out and "Relative sizes" not in out
+
+
 def test_cli_reports_missing_gracefully(ref_poscar, tmp_path, capsys):
     ref_path, _ = ref_poscar
     compare_displacement_cli(ref_path, [tmp_path / "nope"])
