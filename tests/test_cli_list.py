@@ -69,3 +69,21 @@ def test_default_lists_packages_runs_and_plots(tmp_path, capsys, monkeypatch):
     for title in ("Packaged data", "Runs (latest", "Plots of the latest runs"):
         assert title in out
     assert "newest package" in out and "data/NV_512/pert_0.025/all_bands/20261016" in out
+
+
+def test_unregistered_package_on_disk_is_reported(tmp_path, capsys, monkeypatch):
+    from spinlabs.registry import unregistered_packages
+
+    monkeypatch.chdir(tmp_path)
+    conn = ensure_db()
+    _package(conn, tmp_path, "20261020")
+    copied = tmp_path / "data" / "NV_512" / "pert_0.025" / "all_bands" / "20261021" / "NV_512_raw_zfs_data_all_bands_12d.npz"
+    copied.parent.mkdir(parents=True)
+    copied.write_bytes(b"x")  # copied in, never registered
+    assert unregistered_packages(conn) == [copied]
+    main(["list", "--package"])
+    out = capsys.readouterr().out
+    assert "1 packaged file(s) on disk are not in the registry" in out
+    assert f"spinlabs package --register-only {tmp_path / 'data' / 'NV_512'}" in out
+    main(["list", "--package", "--defect", "ClV"])
+    assert "not in the registry" not in capsys.readouterr().out

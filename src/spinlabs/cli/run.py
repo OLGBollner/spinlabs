@@ -249,9 +249,12 @@ def _run_query(args: argparse.Namespace) -> None:
     ``--phonon-file`` is optional here -- when omitted the pipeline resolves the phonon
     from the registry; when given it takes precedence, as it does for any other input mode.
     """
-    from spinlabs.registry import find_packaged
+    from spinlabs.registry import find_packaged, unregistered_packages, unregistered_warning
 
     conn = ensure_db()
+    warning = unregistered_warning(unregistered_packages(conn))
+    if warning:
+        LOGGER.warning(warning)
     # Multi-valued filters query every combination; each dataset is run with
     # the filter values that matched it.
     files: list[tuple[Path, str | None, int | None, float | None]] = []

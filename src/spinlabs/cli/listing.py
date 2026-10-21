@@ -14,7 +14,14 @@ from datetime import datetime
 from pathlib import Path
 
 from spinlabs.cli import add_verbosity_args
-from spinlabs.registry import ensure_db, find_packaged, find_runs, stored_orders
+from spinlabs.registry import (
+    ensure_db,
+    find_packaged,
+    find_runs,
+    stored_orders,
+    unregistered_packages,
+    unregistered_warning,
+)
 
 FIGURE_SUFFIXES = (".png", ".pdf", ".svg", ".jpg", ".eps")
 
@@ -118,6 +125,8 @@ def _latest_packages(conn) -> dict[tuple, tuple]:
 
 def package_table(conn, defects=None, cells=None) -> str:
     rows = []
+    unregistered = [p for p in unregistered_packages(conn) if _wanted_path(p, defects, cells)]
+    notes = ["!! " + unregistered_warning(unregistered)] if unregistered else []
     for key, (path, orders, registered, n) in sorted(_latest_packages(conn).items(), key=lambda kv: _sort_key(*kv[0])):
         defect, cell, method, pert = key
         if not _wanted(defect, cell, defects, cells):
@@ -130,7 +139,15 @@ def package_table(conn, defects=None, cells=None) -> str:
         "Packaged data (latest per configuration)",
         ["defect", "method", "pert", "orders", "packaged", "older", "file"],
         rows,
+        notes,
     )
+
+
+def _wanted_path(path: Path, defects, cells) -> bool:
+    """Whether a package file's <defect>_<cell> folder passes the --defect/--cell-size filters."""
+    name = path.parents[3].name
+    defect, _, cell = name.rpartition("_")
+    return _wanted(defect, int(cell) if cell.isdigit() else None, defects, cells)
 
 
 def _latest_runs(conn) -> dict[tuple, tuple]:

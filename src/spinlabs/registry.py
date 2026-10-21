@@ -344,6 +344,42 @@ def finish_run(conn: sqlite3.Connection, run_id: int, status: str) -> None:
     conn.commit()
 
 
+def unregistered_packages(conn: sqlite3.Connection, data_roots: Iterable[str | Path] = ("data",)) -> list[Path]:
+    """Packaged raw ZFS files on disk that the registry does not know.
+
+    ``--query`` and ``--latest`` only see registered files, so a package copied in
+    without ``spinlabs package --register-only`` is silently ignored. Looks in
+    ``data_roots`` and in every folder that already holds registered packages
+    (``<root>/<defect>_<cell>/pert_<x>/<method>/<date>/*raw_zfs_data*.npz``).
+    """
+    known = set()
+    roots = {Path(r).resolve() for r in data_roots if Path(r).is_dir()}
+    for (path,) in conn.execute("SELECT path FROM files WHERE kind = 'packaged_zfs'"):
+        p = Path(path)
+        known.add(str(p.resolve()) if p.exists() else str(p))
+        if len(p.parents) > 4 and p.parents[4].is_dir():
+            roots.add(p.parents[4].resolve())
+    found = []
+    for root in sorted(roots):
+        for npz in sorted(root.glob("*/pert_*/*/*/*raw_zfs_data*.npz")):
+            if str(npz.resolve()) not in known:
+                found.append(npz)
+    return found
+
+
+def unregistered_warning(paths: list[Path]) -> str | None:
+    """One message naming the unregistered packages and the command that registers them."""
+    if not paths:
+        return None
+    defects = sorted({p.parents[3] for p in paths})
+    shown = ", ".join(str(p) for p in paths[:3]) + (", ..." if len(paths) > 3 else "")
+    commands = "; ".join(f"spinlabs package --register-only {d}" for d in defects)
+    return (
+        f"{len(paths)} packaged file(s) on disk are not in the registry, so --query and --latest "
+        f"ignore them: {shown}. Register them with: {commands}"
+    )
+
+
 def find_packaged(
     conn: sqlite3.Connection,
     *,
