@@ -7,8 +7,15 @@ from pathlib import Path
 
 from spinlabs.cli import add_verbosity_args
 from spinlabs.logging_utils import get_logger
-from spinlabs.registry import ensure_db, find_packaged, parse_orders
-from spinlabs.tables import collect_d_rows, collect_t1_rows, format_t1_table, merge_rows, render_defect_table
+from spinlabs.registry import ensure_db, find_packaged, more_complete, parse_orders, stored_orders
+from spinlabs.tables import (
+    collect_d_rows,
+    collect_t1_rows,
+    format_t1_table,
+    merge_rows,
+    render_defect_table,
+    run_packages,
+)
 
 LOGGER = get_logger(__name__)
 
@@ -101,20 +108,19 @@ def _run_defects(args: argparse.Namespace) -> None:
         if not path.exists():
             raise SystemExit(f"error: input not found: {path}")
     conn = ensure_db()
+    t1_rows = [] if args.no_t1 else collect_t1_rows(
+        conn, args.temperature, _filters(args), output_root=args.output_root, by_pert=False
+    )
     if args.inputs:
         sources = args.inputs
     else:
-        # D is a ground-state property: it does not depend on order or pert-scale.
-        sources = []
-        for defect, cell, method in product(args.defect or [None], args.cell_size or [None], args.method or [None]):
-            for path in find_packaged(
-                conn,
-                defect=defect,
-                cell_size=cell,
-                calc_method=_METHODS.get(method),
-            ):
-                if path not in sources:
-                    sources.append(path)
+        # D from the package each chosen T1 run analysed, so D and T1 describe the same data
+        # (an older package may hold an older ground state); configurations without a T1
+        # run take the latest, most complete package.
+        sources = run_packages(conn, t1_rows)
+        for path in _latest_package_per_method(conn, args):
+            if path not in sources:
+                sources.append(path)
     d_rows = collect_d_rows(list(sources))
     if args.inputs:
         d_rows = [
@@ -122,13 +128,29 @@ def _run_defects(args: argparse.Namespace) -> None:
             if (args.defect is None or r["defect"] in args.defect)
             and (args.cell_size is None or r["cell"] in {str(c) for c in args.cell_size})
         ]
-    t1_rows = [] if args.no_t1 else collect_t1_rows(
-        conn, args.temperature, _filters(args), output_root=args.output_root, by_pert=False
-    )
     merged = merge_rows(d_rows, t1_rows)
     if not merged:
         raise SystemExit("error: no ZFS or T1 data found")
     _write(args, render_defect_table(merged, args.temperature, include_t1=not args.no_t1, label=args.label))
+
+
+def _latest_package_per_method(conn, args: argparse.Namespace) -> list[Path]:
+    """One package per defect/cell/method: the most orders, then the newest (registry.more_complete)."""
+    best: dict[tuple, tuple[frozenset[int], Path, int]] = {}
+    for defect, cell, method in product(args.defect or [None], args.cell_size or [None], args.method or [None]):
+        for path in find_packaged(conn, defect=defect, cell_size=cell, calc_method=_METHODS.get(method), latest=True):
+            row = conn.execute(
+                "SELECT defect, cell_size, calc_method, pert_order, id FROM files WHERE path = ?", (str(path),)
+            ).fetchone()
+            if row is None:
+                continue
+            key, orders, rid = tuple(row[:3]), stored_orders(row[3]), row[4]
+            previous = best.get(key)
+            if previous is None or more_complete(orders, previous[0]) and (
+                len(orders) > len(previous[0]) or rid > previous[2]
+            ):
+                best[key] = (orders, path, rid)
+    return [path for _, path, _ in best.values()]
 
 
 def _write(args: argparse.Namespace, tex: str) -> None:

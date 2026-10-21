@@ -220,3 +220,28 @@ def test_reruns_of_one_configuration_are_not_reported(tmp_path, caplog):
 
     assert row.t1 == {"ms_0": pytest.approx(0.004)}
     assert "runs at" not in caplog.text
+
+
+def test_defect_table_takes_d_from_the_package_of_the_chosen_t1_run(tmp_path, caplog):
+    """D and T1 describe the same data: an older package with another ground state is not used."""
+    from spinlabs.models import RawZFSData, ZFSTensor
+
+    def package(date, d_mhz, pert):
+        gs = np.diag([-d_mhz / 3, -d_mhz / 3, 2 * d_mhz / 3])
+        raw = RawZFSData(defect="NV", cell_size=64, pert_scale=pert, calc_method="all_bands", order=1,
+                         ground_state_zfs=ZFSTensor(matrix=gs, unit="MHz"),
+                         first_order={0: {"tensor": gs, "unit": "MHz"}})
+        path = raw.save(tmp_path / "data" / "NV_64" / f"pert_{pert}" / "all_bands" / date / "NV_64_raw.npz")
+        registry.register_file(conn, path, "packaged_zfs", defect="NV", cell_size=64, calc_method="all_bands",
+                               pert_order=[1], pert_scale=pert)
+        return path
+
+    conn = registry.ensure_db()
+    new = package("20261021", 3000.0, 0.1)
+    package("20261016", 3100.0, -0.025)  # older ground state, registered later
+    run_dir = _add_run(conn, tmp_path, "r", t1_s=1.0, cell=64, pert=0.1)
+    conn.execute("UPDATE runs SET zfs_files = ? WHERE run_dir = ?", (f'["{new}"]', str(run_dir)))
+    conn.commit()
+    out = tmp_path / "defects.tex"
+    cli.main(["table", "defects", "-o", str(out)])
+    assert "3000$^{(a)}$" in out.read_text() and "3100" not in out.read_text()

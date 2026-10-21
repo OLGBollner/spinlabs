@@ -341,6 +341,20 @@ def collect_d_rows(paths: list[Path]) -> list[dict]:
     return rows
 
 
+def run_packages(conn, t1_rows: list["T1Row"]) -> list[Path]:
+    """The packaged ZFS file(s) each chosen T1 run analysed, so D comes from the same data as T1."""
+    paths: list[Path] = []
+    for row in t1_rows:
+        for run_dir in dict.fromkeys(row.run_dirs.values()):
+            found = conn.execute(
+                "SELECT zfs_files FROM runs WHERE run_dir = ? ORDER BY id DESC LIMIT 1", (str(run_dir),)
+            ).fetchone()
+            for p in json.loads(found[0]) if found and found[0] else []:
+                if Path(p).exists() and Path(p) not in paths:
+                    paths.append(Path(p))
+    return paths
+
+
 def collect_outcar_rows(folder: Path) -> list[dict]:
     """Read ground-state ZFS straight from relaxed-structure folders.
 
@@ -396,7 +410,8 @@ def merge_rows(d_rows: list[dict], t1_rows: list[T1Row] = ()) -> list[dict]:
     """One entry per defect+cell holding D and T1 per column.
 
     D sources disagreeing by more than :data:`CONFLICT_TOL_MHZ` are reported
-    and the first one kept (OUTCARs are collected before packaged npz files).
+    and the first one kept (OUTCARs are collected before packaged npz files; the
+    table command passes the packages of the chosen T1 runs first).
     ``entry["t1"]`` maps ``(column, init_state)`` to T1 in seconds.
     """
     merged: dict[tuple[str, str], dict] = {}
