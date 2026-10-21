@@ -25,7 +25,7 @@ done
 [ $# -gt 0 ] || { echo "usage: $0 [--no-mass-weighted] [--dry-run] <dir> ..." >&2; exit 2; }
 
 find "$@" -path '*/.spinlabs-code' -prune -o -type f -name 'run_perturbation_*_order.sh' -print | while read -r old; do
-  new="$REPO/scripts/cluster/$(basename "$old")"
+  new="$REPO/src/spinlabs/vasp/templates/$(basename "$old")"
   [ -f "$new" ] || { echo "skip $old: no $new" >&2; continue; }
   tmp="$old.new"
   awk -v repo="$REPO" -v mw="$MW" '

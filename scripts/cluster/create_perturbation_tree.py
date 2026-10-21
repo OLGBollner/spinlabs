@@ -86,7 +86,6 @@ def main() -> int:
             out,
             args.pert,
             phonon,
-            scripts_dir=Path(__file__).resolve().parent,
             pair_mode=args.pair_mode,
             array_jobs=args.array_jobs,
             max_hours=args.max_hours,

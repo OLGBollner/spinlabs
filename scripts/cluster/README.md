@@ -1,25 +1,31 @@
 # Cluster run scripts
 
-Parameterized SLURM array scripts for ZFS perturbation runs, shared across
-defects. Copy the relevant script into the defect's run folder (e.g.
-`first_order/pert_0.025/all_bands/`) with `input/` next to it.
-
-Config is set in the config block near the top or overridden per submission:
+ZFS perturbation runs on SLURM. Each tree folder (e.g. `first_order/pert_0.025/all_bands/`,
+with `input/` next to it) holds a job script made from the templates in
+`src/spinlabs/vasp/templates/` (`run_perturbation_first_order.sh` / `_second_order.sh`).
+The job script holds only the tree's `#SBATCH` header and config (`DEFECT`, `BINARY`,
+`PHONON_PATH`, `PERT`, `MASS_WEIGHTED`, `PAIR_MODE`, `SPINLABS_REPO`). Submit it with
 
 ```bash
-DEFECT=NV_512 PHONON_PATH=/cfs/klemming/.../NV_512/data/phonon_data.npz sbatch run_perturbation_first_order.sh
+sh run_perturbation_first_order.sh [sbatch options]
 ```
 
-Variables: `DEFECT`, `BINARY`, `CREATE_STRUCT`, `GET_N_MODES`, `PHONON_PATH`,
-`PERT`. Defaults currently point at the ClV_128 layout; update
-`PHONON_PATH` for each new defect.
+which snapshots `SPINLABS_REPO` at its current commit into `.spinlabs-code/<commit>/` and
+submits itself; every task then runs `perturbation_runner.sh` and the helper scripts below
+from that snapshot.
 
-- `run_perturbation_first_order.sh`: single-mode perturbations via
-  `create_phonon_struct.py`, run dirs `runs/<mode>`.
-- `run_perturbation_second_order.sh`: mode-pair perturbations via
-  `create_combined_phonon_struct.py`, run dirs `runs/<i>_<j>`.
+- `perturbation_runner.sh`: the loop. First order perturbs along single modes
+  (`create_phonon_struct.py`, run dirs `runs/<mode>`), second order along mode pairs
+  (`create_combined_phonon_struct.py`, `runs/<i>_<j>`). Run dirs whose OUTCAR already has a
+  complete spin-spin ZFS block are skipped, so restarts resume where they stopped.
+- `create_perturbation_tree.py`: build ready-to-go trees (`first_order`/`second_order` x
+  `all_bands`/`defect_band_approx` x pert scales) from `<defect>/ZFS_hyp` and
+  `<defect>/ZFS_occup`. The generated script gets `#SBATCH -J <defect>_<order>_<basis>` and
+  a time limit / array size from the reference OUTCAR's wall time x tasks / `--array-jobs`;
+  `--max-hours` caps the per-job limit. `--no-mass-weighted` makes a tree displace by Q*e.
+- `update_tree_scripts.sh`: put the current template into existing trees, keeping each
+  tree's `#SBATCH` lines and config.
+- `get_n_modes.py`: the modes a tree runs (`spinlabs.vasp.modes`).
 
-Both skip run dirs whose OUTCAR already contains a complete
-spin-spin ZFS tensor block, so restarts resume where they stopped.
-- `create_perturbation_tree.py` -- build ready-to-go perturbed run trees (`first_order`/`second_order` x `all_bands`/`defect_band_approx` x pert scales). Defect name is read from the --output folder; input files are copied verbatim from `<output>/ZFS_hyp` (all_bands) and `<output>/ZFS_occup` (defect_band_approx); both must exist or the script aborts. The reference ZFS run's OUTCAR is parsed for elapsed wall time; the generated script gets `#SBATCH -J <defect>_<order>_<basis>` and its time limit / array size computed as per_sim_time x n_tasks / --array-jobs (default 10); `--max-hours` caps the per-job limit and raises the array job count until it fits. Existing pert_<scale> folders are never overwritten unless `--force` is passed, which requires typing `APPROVE` to confirm.
-  - SLURM templates (`run_perturbation_first_order.sh` / `_second_order.sh`) ship with placeholders (`<defect>`, `<vasp_binary>`, `<path_to>/create_phonon_struct.py`, `<path_to_phonon_data.npz>`, `<pert_scale>`) so they can be copied and filled in manually. The generator fills DEFECT, PHONON_PATH and PERT always, and BINARY when `--vasp-binary` is passed; CREATE_STRUCT and GET_N_MODES are always filled with paths into the scripts/cluster directory the generator itself lives in.
+The scripts are tested in their own suite, `pytest scripts/tests` (plain `pytest` runs
+only the spinlabs package tests).

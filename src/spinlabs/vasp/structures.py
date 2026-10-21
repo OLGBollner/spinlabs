@@ -299,7 +299,7 @@ def _resolve_mode(mode_index: int, original_indices: np.ndarray | None, n_modes:
     Symmetry-filtered phonon files keep the *original* mode labels in
     ``original_indices`` while the eigs array is trimmed, so the label is
     not the array row. When original_indices is given (1-based labels,
-    same convention as get_n_modes.py), map label -> row by exact match;
+    same convention as spinlabs.vasp.modes), map label -> row by exact match;
     a missing or non-unique label is a hard error. Otherwise the label
     must simply be within [1, n_modes].
     """

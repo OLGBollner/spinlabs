@@ -8,9 +8,9 @@ import shutil
 import subprocess
 from pathlib import Path
 
-import numpy as np
 
 from spinlabs.parsers import parse_phonon_data, save_phonon_npz
+from spinlabs.vasp.modes import mode_numbers
 from spinlabs.symmetry import classify_and_pair, filter_degenerate_partners, symmetrize_degenerate_groups
 
 from spinlabs.logging_utils import get_logger
@@ -147,19 +147,26 @@ def forbid_relaxation(incar: str) -> tuple[str, str | None]:
     )
 
 
-def repo_root(scripts_dir: Path) -> Path:
-    """The git checkout holding ``scripts_dir`` (repo/scripts/cluster), resolved."""
-    scripts_dir = Path(scripts_dir).resolve()
+# job-script templates copied into every tree (package data, next to this module)
+TEMPLATES = Path(__file__).resolve().parent / "templates"
+
+
+def repo_root(path: Path = TEMPLATES) -> Path:
+    """The git checkout holding ``path`` (by default this package's templates), resolved.
+
+    Outside git, the nearest parent holding scripts/cluster/, where the job's runner lives.
+    """
+    path = Path(path).resolve()
     try:
         out = subprocess.run(
-            ["git", "-C", str(scripts_dir), "rev-parse", "--show-toplevel"],
+            ["git", "-C", str(path), "rev-parse", "--show-toplevel"],
             capture_output=True,
             text=True,
             check=True,
         )
         return Path(out.stdout.strip()).resolve()
     except (OSError, subprocess.CalledProcessError):
-        return scripts_dir.parents[1]
+        return next((d for d in path.parents if (d / "scripts" / "cluster").is_dir()), path.parents[-1])
 
 
 def replace_sbatch(text: str, directive: str, value: str) -> str:
@@ -216,11 +223,8 @@ def resolve_sym_phonon(out: Path, phonon: Path) -> Path:
 
 
 def n_modes_from_phonon(phonon: Path) -> int:
-    """Number of phonon modes to perturb along (same logic as get_n_modes)."""
-    with np.load(phonon) as data:
-        if "idx" in data:
-            return len(data["idx"])
-        return int(data["freqs"].shape[0])
+    """Number of phonon modes to perturb along (the modes the runner loops over)."""
+    return len(mode_numbers(phonon))
 
 
 def n_tasks_for(order: str, pair_mode: str | None, n_modes: int) -> int:
@@ -284,7 +288,6 @@ def prepare_basis(
     n_array_jobs: int,
     n_modes: int,
     basis: str,
-    scripts_dir: Path,
     vasp_binary: Path | None = None,
     pair_mode: str | None = None,
     max_hours: float | None = None,
@@ -292,8 +295,8 @@ def prepare_basis(
 ) -> list[str]:
     """Fill dst/input/ and write the prefilled SLURM script.
 
-    `scripts_dir` is the folder holding the .sh templates and the helper
-    scripts referenced by them.  Returns the list of failure messages.
+    The script comes from the package's templates/ folder.  Returns the list of
+    failure messages.
     """
     failures: list[str] = []
 
@@ -308,7 +311,7 @@ def prepare_basis(
         if (src / name).is_file():
             shutil.copy2(src / name, inp / name)
 
-    tmpl = scripts_dir / script_name
+    tmpl = TEMPLATES / script_name
     if not tmpl.is_file():
         fail(f"missing template script {tmpl}")
         return failures
@@ -357,7 +360,7 @@ def prepare_basis(
     text = replace_tag(text, "MASS_WEIGHTED", "${MASS_WEIGHTED:-1}" if mass_weighted else "0")
     # The loop and the structure scripts run from a snapshot of this repo taken at
     # submission (see the script header), so the script only names the checkout.
-    text = replace_tag(text, "SPINLABS_REPO", str(repo_root(scripts_dir)))
+    text = replace_tag(text, "SPINLABS_REPO", str(repo_root()))
 
     # job name reflects defect, order and basis; time limit and array size
     # only change when the reference OUTCAR gave us a timing to compute from
@@ -367,7 +370,7 @@ def prepare_basis(
         text = replace_sbatch(text, "-a", f"0-{n_array_jobs - 1}")
 
     (dst / script_name).write_text(text)
-    shutil.copy2(scripts_dir / "verify_perturbation_setup.py", dst / "verify_perturbation_setup.py")
+    shutil.copy2(TEMPLATES / "verify_perturbation_setup.py", dst / "verify_perturbation_setup.py")
 
     if per_sim is not None:
         LOGGER.info(
@@ -382,7 +385,6 @@ def build_perturbation_tree(
     out: Path,
     pert: list[float],
     phonon: Path,
-    scripts_dir: Path,
     pair_mode: str = "diag",
     array_jobs: int = 10,
     max_hours: float | None = None,
@@ -442,7 +444,6 @@ def build_perturbation_tree(
                         n_array_jobs=array_jobs,
                         n_modes=n_modes,
                         basis=dst.name,
-                        scripts_dir=scripts_dir,
                         vasp_binary=vasp_binary,
                         mass_weighted=mass_weighted,
                         pair_mode=pair_mode if order == "second_order" else None,
