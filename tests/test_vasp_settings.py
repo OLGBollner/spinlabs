@@ -139,3 +139,59 @@ def test_mixed_runs_name_the_minority_folders(tmp_path):
     trees = {"first_order": tree_settings(_tree(tmp_path, [other, RUN, other, other]))}
     problems = compare_settings(read_incar_text(tmp_path, other), trees)
     assert any("ISYM differs between runs: 3 (3), 0 (1) -- 0: runs 2" in p for p in problems)
+
+
+# ---- SCF convergence ----
+
+def _oszicar(path, n_steps: int, last_de: float):
+    lines = ["       N       E                     dE             d eps       ncg     rms          rms(c)"]
+    for n in range(1, n_steps + 1):
+        de = last_de if n == n_steps else 1e-2 / n
+        lines.append(f"DAV: {n:3d}    -0.123456789012E+04   {de: .5E}   -0.12345E-03  1234   0.123E-02")
+    lines.append("   1 F= -.12345678E+04 E0= -.12345678E+04  d E =-.123456E-07  mag=     2.0000")
+    path.write_text("\n".join(lines) + "\n")
+
+
+def _scf_run(tmp_path, name, incar_extra: str, n_steps=None, last_de=1e-8, outcar=None):
+    run = tmp_path / name
+    run.mkdir(parents=True)
+    (run / "INCAR").write_text(RUN + incar_extra)
+    if n_steps is not None:
+        _oszicar(run / "OSZICAR", n_steps, last_de)
+    if outcar is not None:
+        (run / "OUTCAR").write_text(outcar)
+    return run
+
+
+def test_scf_status_from_oszicar(tmp_path):
+    from spinlabs.vasp.settings import scf_problem, scf_status
+
+    ok = scf_status(_scf_run(tmp_path, "ok", "NELM = 60\n", n_steps=23, last_de=5e-7))
+    assert ok["converged"] and ok["steps"] == 23 and scf_problem(ok) is None
+    stuck = scf_status(_scf_run(tmp_path, "stuck", "NELM = 40\n", n_steps=40, last_de=3e-4))
+    assert stuck["converged"] is False
+    assert "stopped at NELM = 40 steps with |dE| = 3.0e-04 > EDIFF = 1e-06" in scf_problem(stuck)
+    # converging on the very last allowed step still counts as converged
+    assert scf_status(_scf_run(tmp_path, "last", "NELM = 40\n", n_steps=40, last_de=2e-7))["converged"]
+    nonscf = scf_status(_scf_run(tmp_path, "none", "ALGO = None\n", n_steps=1, last_de=1e-3))
+    assert "ALGO = None" in scf_problem(nonscf)
+
+
+def test_scf_status_from_outcar_without_oszicar(tmp_path):
+    from spinlabs.vasp.settings import scf_status
+
+    done = "Iteration    1(  12)\n aborting loop because EDIFF is reached\n General timing and accounting\n"
+    assert scf_status(_scf_run(tmp_path, "a", "NELM = 60\n", outcar=done))["converged"] is True
+    stuck = "".join(f"Iteration    1({n:4d})\n" for n in range(1, 61)) + " General timing and accounting\n"
+    assert scf_status(_scf_run(tmp_path, "b", "NELM = 60\n", outcar=stuck))["converged"] is False
+    assert scf_status(_scf_run(tmp_path, "c", "", outcar="no scf section\n"))["converged"] is None
+
+
+def test_unconverged_runs_are_named_in_the_settings_check(tmp_path):
+    basis = _tree(tmp_path, [RUN + "NELM = 40\n"] * 3)
+    for name, steps, de in (("1", 20, 1e-7), ("2", 40, 1e-3), ("3", 18, 1e-7)):
+        _oszicar(basis / "runs" / name / "OSZICAR", steps, de)
+    trees = {"second_order": tree_settings(basis)}
+    assert trees["second_order"]["unconverged"] == ["2"]
+    problems = compare_settings(read_incar_text(tmp_path, RUN + "NELM = 40\n"), trees)
+    assert "second_order: 1 of 3 runs did not converge (NELM reached with |dE| > EDIFF): runs 2" in problems

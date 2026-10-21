@@ -21,6 +21,7 @@ import numpy as np
 
 from spinlabs.models import PhononSpectrum
 from spinlabs.parsers import parse_outcar_zfs
+from spinlabs.vasp.settings import scf_problem, scf_status
 
 # Run folders sit at <defect>/<order>/pert_<x>/<basis>/runs/<modes>; the basis's
 # ground-state ZFS run is <defect>/<source>/ (as trees.BASIS_SOURCE).
@@ -197,7 +198,7 @@ def check_run(
     modes: tuple[int, ...],
     reference: str | Path | None = None,
 ) -> RunCheck:
-    """Check a finished run: completion, VASP symmetry handling and the ZFS change's shape."""
+    """Check a finished run: completion, SCF convergence, VASP symmetry handling and the ZFS change's shape."""
     run_dir = Path(run_dir)
     check = RunCheck()
     outcar = run_dir / "OUTCAR"
@@ -212,6 +213,12 @@ def check_run(
     sym = outcar_symmetry(text)
     if not sym["finished"]:
         check.problems.append("OUTCAR incomplete: the calculation did not finish")
+    scf = scf_status(run_dir)
+    problem = scf_problem(scf)
+    if problem:
+        check.problems.append(problem)
+    elif scf["steps"] is not None:
+        check.lines.append(f"SCF: converged in {scf['steps']} of NELM = {scf['nelm']} steps (EDIFF {scf['ediff']:g})")
     lines, problems = check_symmetry_ops(sym, labels)
     check.lines += lines
     check.problems += problems

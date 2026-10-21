@@ -87,6 +87,75 @@ def run_settings(run_dir: Path) -> dict[str, str] | None:
     return None
 
 
+# --------------------------------------------------------------------------- #
+# SCF convergence
+# --------------------------------------------------------------------------- #
+_OSZICAR_STEP = re.compile(r"^\s*(DAV|RMM|CG|SDA|EDD|ORT|DIA):\s+(\d+)\s+\S+\s+(\S+)", re.M)
+DEFAULT_NELM = 60
+DEFAULT_EDIFF = 1e-4
+
+
+def scf_status(run_dir: str | Path, settings: dict[str, str] | None = None) -> dict:
+    """Whether a run's first electronic minimisation reached EDIFF before NELM.
+
+    Read from the OSZICAR (one line per SCF step; small, so cheap for whole trees):
+    a run that used all NELM steps with |dE| still above EDIFF did not converge, and
+    its ZFS stays close to the starting density. Without an OSZICAR the OUTCAR
+    decides: "aborting loop because EDIFF is reached" means converged, NELM iterations
+    without it means not. ``converged`` is None when neither file says. ALGO = None runs do not iterate and are marked ``non_scf``.
+    """
+    run_dir = Path(run_dir)
+    if settings is None:
+        settings = read_incar(run_dir / "INCAR") if (run_dir / "INCAR").is_file() else {}
+    try:
+        nelm = int(float(settings.get("NELM", DEFAULT_NELM)))
+        ediff = float(settings.get("EDIFF", DEFAULT_EDIFF))
+    except ValueError:
+        nelm, ediff = DEFAULT_NELM, DEFAULT_EDIFF
+    status = {"steps": None, "nelm": nelm, "ediff": ediff, "last_de": None, "converged": None,
+              "non_scf": settings.get("ALGO") == "NONE"}
+    oszicar = run_dir / "OSZICAR"
+    if oszicar.is_file():
+        text = oszicar.read_text(errors="replace")
+        first = text.split(" F=", 1)[0]  # the first ionic step (NSW = 0: the only one)
+        steps = _OSZICAR_STEP.findall(first)
+        if steps:
+            status["steps"] = int(steps[-1][1])
+            try:
+                status["last_de"] = abs(float(steps[-1][2]))
+            except ValueError:
+                pass
+            hit_limit = status["steps"] >= nelm
+            above = status["last_de"] is None or status["last_de"] > ediff
+            status["converged"] = not (hit_limit and above)
+            return status
+    outcar = run_dir / "OUTCAR"
+    if outcar.is_file():
+        text = outcar.read_text(errors="replace")
+        # "Iteration    1(  37)": SCF step 37 of the first ionic step
+        steps = [int(n) for n in re.findall(r"Iteration\s+1\(\s*(\d+)\)", text)]
+        if steps:
+            status["steps"] = max(steps)
+        if "aborting loop because EDIFF is reached" in text:
+            status["converged"] = True
+        elif status["steps"] is not None and status["steps"] >= nelm:
+            status["converged"] = False
+    return status
+
+
+def scf_problem(status: dict) -> str | None:
+    """Readable reason a run's SCF is not to be trusted, or None."""
+    if status["non_scf"]:
+        return "not self-consistent: ALGO = None (one diagonalisation of the starting density)"
+    if status["converged"] is False:
+        if status["steps"] is not None:
+            de = f"{status['last_de']:.1e}" if status["last_de"] is not None else "?"
+            return (f"SCF did not converge: stopped at NELM = {status['nelm']} steps with |dE| = {de} "
+                    f"> EDIFF = {status['ediff']:g} (the ZFS stays near the starting density)")
+        return f"SCF did not converge: {status['nelm']} iterations (NELM) without reaching EDIFF"
+    return None
+
+
 def tree_settings(basis_dir: str | Path) -> dict:
     """Settings of a tree's input and runs.
 
@@ -97,11 +166,17 @@ def tree_settings(basis_dir: str | Path) -> dict:
     counts: dict[str, Counter] = {}
     names: dict[str, dict[str, list[str]]] = {}
     run_names = []
+    unconverged, unknown = [], 0
     for run_dir in sorted(p for p in (basis_dir / "runs").glob("*") if p.is_dir()):
         settings = run_settings(run_dir)
         if settings is None:
             continue
         run_names.append(run_dir.name)
+        scf = scf_status(run_dir, settings)
+        if scf["converged"] is False and not scf["non_scf"]:
+            unconverged.append(run_dir.name)
+        elif scf["converged"] is None and not scf["non_scf"]:
+            unknown += 1
         for key, value in settings.items():
             counts.setdefault(key, Counter())[value] += 1
             names.setdefault(key, {}).setdefault(value, []).append(run_dir.name)
@@ -117,6 +192,8 @@ def tree_settings(basis_dir: str | Path) -> dict:
         "runs": {key: dict(counter) for key, counter in counts.items()},
         "n_runs": len(run_names),
         "folders": folders,
+        "unconverged": unconverged,
+        "scf_unknown": unknown,
     }
 
 
@@ -189,6 +266,12 @@ def _compare(ground, trees, *, start: bool) -> list[str]:
         )
     for label, tree in trees.items():
         n_runs = tree["n_runs"]
+        bad = tree.get("unconverged", [])
+        if not start and bad:
+            shown = ", ".join(sorted(bad, key=_run_key)[:MAX_LISTED]) + (", ..." if len(bad) > MAX_LISTED else "")
+            problems.append(
+                f"{label}: {len(bad)} of {n_runs} runs did not converge (NELM reached with |dE| > EDIFF): runs {shown}"
+            )
         runs = {k: v for k, v in tree["runs"].items() if k not in IGNORED_KEYS and k not in RELAX_KEYS}
         if not start and any(moves_ions({"NSW": nsw, "IBRION": ib}) for nsw in tree["runs"].get("NSW", {})
                              for ib in tree["runs"].get("IBRION", {"0": 1})):

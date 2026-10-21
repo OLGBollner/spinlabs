@@ -242,3 +242,15 @@ def test_d0_offset_shows_in_the_error_budget():
     assert np.isclose(r.offset, 0.01)
     # second order needs 2 c Q^2 >= 10 x offset: Q >= sqrt(0.1 / 20)
     assert np.isclose(r.q_lo2, np.sqrt(10 * r.err2 / (2 * r.c))) and r.q_lo2 > 0.07
+
+
+def test_unconverged_run_is_suspicious(tmp_path):
+    run = _tree_run(tmp_path, "1_1", _principal_change(a1=10.0), ops=6)
+    (run / "INCAR").write_text("NELM = 30\nEDIFF = 1E-8\n")
+    (run / "OSZICAR").write_text(
+        "".join(f"DAV: {n:3d}    -0.1E+04   {1e-5:.5E}   -0.1E-03  1   0.1E-02\n" for n in range(1, 31))
+        + "   1 F= -.1E+04 E0= -.1E+04  d E =-.1E-07\n"
+    )
+    check = check_run(run, _spectrum(), (1, 1))
+    assert check.status == "suspicious"
+    assert "SCF did not converge: stopped at NELM = 30 steps" in check.report()
