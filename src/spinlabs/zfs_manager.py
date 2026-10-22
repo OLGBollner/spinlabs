@@ -20,6 +20,10 @@ LOGGER = get_logger(__name__)
 # Over-displaced runs give alpha ~ 1 or more; runs whose change cancels the
 # linear response (wrong state or geometry) give alpha ~ -1. Both are excluded.
 INCONSISTENT_ALPHA = 0.5
+# alpha is the remainder relative to the expected change; below this size (Frobenius
+# norm, MHz) the expected change is too small for that ratio to mean anything, so
+# the entry is not judged.
+MIN_EXPECTED_MHZ = 0.05
 
 
 class ZFSManager:
@@ -477,7 +481,7 @@ class ZFSManager:
                     expected = dD_qi * q_i + dD_qj * q_j
                 remainder = (D_qi_qj - self.zfs_relaxed) - expected
                 norm = np.sum(expected * expected)
-                if norm > (0.05 * CONSTANTS["MHz2J"]) ** 2:
+                if norm > (MIN_EXPECTED_MHZ * CONSTANTS["MHz2J"]) ** 2:
                     alpha = float(np.sum(remainder * expected) / norm)
                     if abs(alpha) > INCONSISTENT_ALPHA:
                         self.inconsistent_pairs.append(
