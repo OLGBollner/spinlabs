@@ -636,6 +636,65 @@ def _irrep_dimension(table, name: str) -> int:
     return len(entry["sublabels"]) if isinstance(entry, dict) else 1
 
 
+def _canonical_c3v() -> list[np.ndarray]:
+    c, s = np.cos(2 * np.pi / 3), np.sin(2 * np.pi / 3)
+    c3 = np.array([[c, -s, 0.0], [s, c, 0.0], [0.0, 0.0, 1.0]])
+    mirror = np.diag([1.0, -1.0, 1.0])  # sigma_v containing x and z
+    return [np.eye(3), c3, c3 @ c3, mirror, c3 @ mirror, c3 @ c3 @ mirror]
+
+
+# Point-group operations about z, in the order of the group's per-operation characters in
+# CHARACTER_TABLES. A group listed here can be used to decompose rank-2 tensors.
+CANONICAL_OPERATIONS: dict[str, list[np.ndarray]] = {"3m": _canonical_c3v()}
+
+
+def _irrep_names(table) -> list[str]:
+    return [name for name in table if not name.startswith("_")]
+
+
+def tensor_irrep_fractions(tensor: np.ndarray, pg_symbol: str = "3m") -> dict[str, float]:
+    """Norm fraction of a 3x3 tensor in each irrep of the point group.
+
+    Character projectors P_G T = (d_G / |G|) sum_g chi_G(g) R(g) T R(g)^T, with the group's
+    canonical operations about z, so the tensor must be expressed in that frame (z = the
+    defect's principal axis). The projectors are orthogonal and complete: the squared
+    fractions add up to 1.
+    """
+    if pg_symbol not in CANONICAL_OPERATIONS:
+        raise ValueError(f"No canonical operations for point group '{pg_symbol}'.")
+    table = CHARACTER_TABLES[pg_symbol]
+    ops = CANONICAL_OPERATIONS[pg_symbol]
+    tensor = np.asarray(tensor, dtype=float)
+    norm = np.linalg.norm(tensor)
+    out = {}
+    for name in _irrep_names(table):
+        chars = _per_op_characters(table, name)
+        projected = chars[0] / len(ops) * sum(c * R @ tensor @ R.T for c, R in zip(chars, ops))
+        out[name] = float(np.linalg.norm(projected) / norm) if norm > 0 else 0.0
+    return out
+
+
+def direct_product(pg_symbol: str, sym_a: str, sym_b: str) -> list[str]:
+    """Irreps in the direct product of two irreps (sublabels such as Ex/Ey count as their parent).
+
+    By character orthogonality, n_G = (1/|G|) sum_g chi_a(g) chi_b(g) chi_G(g), over the
+    per-operation characters of CHARACTER_TABLES (real for the groups listed there).
+    """
+    table = CHARACTER_TABLES.get(pg_symbol)
+    if table is None:
+        raise ValueError(f"No character table for point group '{pg_symbol}'.")
+    a = _per_op_characters(table, _parent_label(sym_a))
+    b = _per_op_characters(table, _parent_label(sym_b))
+    out = []
+    for name in _irrep_names(table):
+        n = float(np.sum(a * b * _per_op_characters(table, name))) / len(a)
+        reps = int(round(n))
+        if abs(n - reps) > 1e-9 or reps < 0:
+            raise ValueError(f"{sym_a} x {sym_b} does not decompose into irreps of '{pg_symbol}'.")
+        out.extend([name] * reps)
+    return out
+
+
 # Sector-presence threshold: the projector applied to a vector in its own
 # irrep returns norm 1 up to numerical error (~1e-5); a genuine admixture of
 # another irrep shows up as a projection norm of order 0.1 or larger. 1e-2

@@ -151,15 +151,33 @@ class TestZFSManager:
         diff, off = dD_xy[0, 0] - dD_xy[1, 1], dD_xy[0, 1]
         assert np.isclose(V_pm[1, 2] / self.D2_UNIT, 0.5 * np.sqrt(diff**2 + 4 * off**2))
 
-    def test_symmetry_check_flags_a1_changes_outside_the_a1_form_at_any_scale(self, caplog):
-        mhz = CONSTANTS["MHz2J"]  # a first-order change in J is ~1e-26; the old 1e-4 slack hid everything
-        pure = np.diag([-10.0, -10.0, 20.0]) * mhz
-        broken = np.array([[-10.0, 8.0, 6.0], [8.0, 4.0, 0.0], [6.0, 0.0, 6.0]]) * mhz
+    def test_symmetry_check_uses_the_shared_response_check(self, setup_system, caplog):
+        manager, _, _ = setup_system
+        mhz = CONSTANTS["MHz2J"]  # changes in J are ~1e-26: the check must not depend on the unit
+        manager.zfs_relaxed = np.diag([-1000.0, -1000.0, 2000.0]) * mhz
+        assert manager.point_group == "3m"  # synthetic structure: implied by the C3v labels
+        a1_change = np.diag([-10.0, -10.0, 20.0]) * mhz
+        e_change = np.array([[8.0, 0.0, 6.0], [0.0, -8.0, 0.0], [6.0, 0.0, 0.0]]) * mhz
         with caplog.at_level("WARNING", logger="spinlabs"):
-            ZFSManager._check_symmetry(pure, "A1", 5)
+            manager._check_symmetry(a1_change, ["A1"], 5, kind="displacement")
+            manager._check_symmetry(e_change, ["A1", "Ex"], (5, 6), kind="derivative")
+            manager._check_symmetry(a1_change, ["A1", "Ex"], (5, 6), kind="derivative")  # O(q D''') terms
             assert "Symmetry mismatch" not in caplog.text
-            ZFSManager._check_symmetry(broken, "A1", 7)
-        assert "Symmetry mismatch at index 7" in caplog.text and "outside the A1 form" in caplog.text
+            manager._check_symmetry(a1_change + e_change, ["A1"], 7, kind="displacement")
+            manager._check_symmetry(e_change, ["A1", "A1"], (8, 9), kind="derivative")
+        assert "Symmetry mismatch at index 7" in caplog.text
+        assert "Symmetry mismatch at index (8, 9): modes A1/A1 allow only A1 in this derivative" in caplog.text
+
+    def test_second_order_content_outside_the_exact_product_is_summarised(self, setup_system, caplog):
+        manager, _, _ = setup_system
+        # An A1 x Ex curvature that is pure A1: outside A1 x E = E, but within the O(q D''') terms.
+        a1_only = np.diag([-1.0, -1.0, 2.0])
+        manager.zfs_tensors_2d = {(0, 1): self._second_order_entry(manager, a1_only, ("A1", "Ex"))}
+        manager.treated_modes = {0, 1}
+        with caplog.at_level("INFO", logger="spinlabs"):
+            manager.calculate_second_order_derivatives(np.zeros((4, 3, 3)))
+        assert "Symmetry mismatch" not in caplog.text
+        assert "Second-order symmetry: 1 of 1 entries hold content outside Gi x Gj" in caplog.text
 
     def test_twin_inherits_a_diagonal_coupling_only_when_it_has_none(self, setup_system):
         manager, spectrum, gs_zfs = setup_system
