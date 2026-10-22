@@ -161,8 +161,10 @@ run_one() {
   cp "$INPUT_DIR"/* "$TARGET_DIR"/
   cd "$TARGET_DIR"
   echo "$ID: starting job for $label"
-  MSG=$(python "$create_struct" -o POSCAR POSCAR "$PHONON_PATH" "$@" "$PERT" $MW_FLAG)
-  if echo "$MSG" | grep -q "Success"; then
+  # In the if-condition a failing script does not trip set -e, so the job still
+  # reports the failure and the script's output before exiting.
+  if MSG=$(python "$create_struct" -o POSCAR POSCAR "$PHONON_PATH" "$@" "$PERT" $MW_FLAG) \
+    && echo "$MSG" | grep -q "Success"; then
     echo "Successfully created perturbed structure"
   else
     echo "Failed to create structure."
