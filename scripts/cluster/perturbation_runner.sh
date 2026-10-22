@@ -114,16 +114,22 @@ acquire_lock() {
     echo "$ID: skipping $1 -- locked by running job: $owner_info"
     return 1
   fi
-  # Stale: rename it first, so two tasks finding the same stale lock cannot both take it.
-  stale="$lock.stale.$JOB_TAG.$$"
-  if mv "$lock" "$stale" 2>/dev/null && mkdir "$lock" 2>/dev/null; then
-    rm -rf "$stale"
+  # Stale. Only the task that creates $lock.takeover (mkdir is atomic) may replace it, and only
+  # after re-checking that the lock still belongs to the finished job: two tasks that both found
+  # the stale lock must not both take it, nor remove a fresh lock the other has just made.
+  if ! mkdir "$lock.takeover" 2>/dev/null; then
+    echo "$ID: skipping $1 -- another task is taking over its stale lock (remove $lock.takeover if none is)"
+    return 1
+  fi
+  now_job=$(sed -n 's/^job=//p' "$lock/owner" 2>/dev/null || true)
+  if [ "$now_job" = "$owner_job" ] && rm -rf "$lock" && mkdir "$lock" 2>/dev/null; then
     write_lock_owner "$lock"
     HELD_LOCK=$lock
+    rmdir "$lock.takeover"
     echo "$ID: took over stale lock on $1 (was: $owner_info)"
     return 0
   fi
-  rm -rf "$stale" 2>/dev/null || true
+  rmdir "$lock.takeover"
   echo "$ID: skipping $1 -- another task took over its stale lock"
   return 1
 }

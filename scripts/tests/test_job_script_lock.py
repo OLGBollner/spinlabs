@@ -89,7 +89,31 @@ def test_stale_lock_of_a_finished_job_is_taken_over(tmp_path):
     assert r.returncode == 0, r.stderr
     assert "took over stale lock on runs/12_34" in r.stdout
     assert "job=100_3" in r.stdout
-    assert not list((tmp_path / "runs" / "12_34").glob(".lock.stale.*"))
+    assert not list((tmp_path / "runs" / "12_34").glob(".lock.*"))  # no takeover or stale leftovers
+
+
+def test_a_stale_lock_retaken_meanwhile_is_left_to_its_new_owner(tmp_path):
+    """Two tasks found the same stale lock; the other one replaced it first. This task must not
+    remove the other's fresh lock (the race of the old rename-then-mkdir takeover)."""
+    _hold(tmp_path, "200_7")
+    # Just as this task starts its takeover, task 100_4 has already replaced the stale lock.
+    retaken = (
+        'mkdir() { if [ "$1" = "$HEAD_DIR/runs/12_34/.lock.takeover" ]; then '
+        "printf 'job=100_4\\n' > \"$HEAD_DIR/runs/12_34/.lock/owner\"; fi; command mkdir \"$@\"; }\n"
+    )
+    r = _sh(tmp_path, retaken + 'if acquire_lock runs/12_34; then echo GOT; else echo SKIPPED; fi\n',
+            running_jobs="300_1\n")
+    assert "SKIPPED" in r.stdout and "GOT" not in r.stdout, r.stdout + r.stderr
+    assert (tmp_path / "runs" / "12_34" / ".lock" / "owner").read_text().startswith("job=100_4")
+    assert not (tmp_path / "runs" / "12_34" / ".lock.takeover").exists()
+
+
+def test_a_takeover_in_progress_is_not_joined(tmp_path):
+    _hold(tmp_path, "200_7")
+    (tmp_path / "runs" / "12_34" / ".lock.takeover").mkdir()
+    r = _sh(tmp_path, 'if acquire_lock runs/12_34; then echo GOT; else echo SKIPPED; fi\n', running_jobs="300_1\n")
+    assert "SKIPPED" in r.stdout and "another task is taking over" in r.stdout
+    assert (tmp_path / "runs" / "12_34" / ".lock" / "owner").read_text().startswith("job=200_7")
 
 
 def test_lock_is_kept_when_squeue_cannot_be_asked(tmp_path):
