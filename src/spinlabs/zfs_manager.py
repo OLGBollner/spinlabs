@@ -175,6 +175,9 @@ class ZFSManager:
 
     def _ingest_raw_data(self, raw: RawZFSData):
         """Populates internal arrays and applies principal frame rotation from RawZFSData."""
+        # Derivatives, couplings and thresholds here are in J. RawZFSData.load already
+        # converts, but data parsed from simulation folders arrives in MHz.
+        raw = raw.to_unit("J")
         self.defect = raw.defect
         self.cell_size = raw.cell_size
         self.pert_scale = raw.pert_scale

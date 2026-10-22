@@ -151,6 +151,27 @@ class TestZFSManager:
         diff, off = dD_xy[0, 0] - dD_xy[1, 1], dD_xy[0, 1]
         assert np.isclose(V_pm[1, 2] / self.D2_UNIT, 0.5 * np.sqrt(diff**2 + 4 * off**2))
 
+    def test_raw_data_in_mhz_is_ingested_in_joules(self, setup_system):
+        """Simulation folders are parsed in MHz; the manager must work in J like for loaded npz files."""
+        from spinlabs.models import PerturbationEntry
+
+        _, spectrum, _ = setup_system
+        gs_mhz = np.diag([-1000.0, -1000.0, 2000.0])
+        d_mhz = gs_mhz + np.array([[1.0, 0.0, 2.0], [0.0, -1.0, 0.0], [2.0, 0.0, 0.0]])
+
+        def raw(unit):
+            scale = CONSTANTS["MHz2J"] if unit == "J" else 1.0
+            entry = PerturbationEntry(order=1, mode_indices=(1,), amplitude=0.01,
+                                      zfs_tensor=ZFSTensor(matrix=d_mhz * scale, unit=unit))
+            return RawZFSData(defect="NV", cell_size=64, pert_scale=0.01,
+                              ground_state_zfs=ZFSTensor(matrix=gs_mhz * scale, unit=unit), first_order={1: entry})
+
+        from_mhz = ZFSManager(spectrum=spectrum, raw_data=raw("MHz"))
+        from_j = ZFSManager(spectrum=spectrum, raw_data=raw("J"))
+        assert np.allclose(from_mhz.zfs_relaxed, gs_mhz * CONSTANTS["MHz2J"])
+        assert np.allclose(from_mhz.zfs_relaxed, from_j.zfs_relaxed)
+        assert np.allclose(from_mhz.first_order[1]["tensor"], from_j.first_order[1]["tensor"])
+
     def test_init_from_raw_data_with_legacy_scalar_pert_updates_to_si_displacements(self, setup_system):
         manager_base, spectrum, gs_zfs = setup_system
 
