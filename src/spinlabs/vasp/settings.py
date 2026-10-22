@@ -160,13 +160,14 @@ def tree_settings(basis_dir: str | Path) -> dict:
     """Settings of a tree's input and runs.
 
     ``{"input": {...}, "runs": {KEY: {value: n}}, "n_runs": n, "folders": {KEY: {value: [run]}}}``;
-    ``folders`` names the run folders behind each value of a key the runs disagree on.
+    ``folders`` names the run folders behind each value of a key the runs disagree on, and
+    ``moving_ions`` the runs whose own settings move the ions (:func:`moves_ions`).
     """
     basis_dir = Path(basis_dir)
     counts: dict[str, Counter] = {}
     names: dict[str, dict[str, list[str]]] = {}
     run_names = []
-    unconverged, unknown = [], 0
+    unconverged, unknown, moving = [], 0, []
     for run_dir in sorted(p for p in (basis_dir / "runs").glob("*") if p.is_dir()):
         settings = run_settings(run_dir)
         if settings is None:
@@ -177,6 +178,9 @@ def tree_settings(basis_dir: str | Path) -> dict:
             unconverged.append(run_dir.name)
         elif scf["converged"] is None and not scf["non_scf"]:
             unknown += 1
+        # Judged per run: NSW of one run with IBRION of another says nothing.
+        if moves_ions(settings):
+            moving.append(run_dir.name)
         for key, value in settings.items():
             counts.setdefault(key, Counter())[value] += 1
             names.setdefault(key, {}).setdefault(value, []).append(run_dir.name)
@@ -194,6 +198,7 @@ def tree_settings(basis_dir: str | Path) -> dict:
         "folders": folders,
         "unconverged": unconverged,
         "scf_unknown": unknown,
+        "moving_ions": moving,
     }
 
 
@@ -273,9 +278,12 @@ def _compare(ground, trees, *, start: bool) -> list[str]:
                 f"{label}: {len(bad)} of {n_runs} runs did not converge (NELM reached with |dE| > EDIFF): runs {shown}"
             )
         runs = {k: v for k, v in tree["runs"].items() if k not in IGNORED_KEYS and k not in RELAX_KEYS}
-        if not start and any(moves_ions({"NSW": nsw, "IBRION": ib}) for nsw in tree["runs"].get("NSW", {})
-                             for ib in tree["runs"].get("IBRION", {"0": 1})):
-            problems.append(f"{label}: some runs move the ions (NSW > 0 with IBRION != -1)")
+        moving = tree.get("moving_ions", [])
+        if not start and moving:
+            shown = ", ".join(sorted(moving, key=_run_key)[:MAX_LISTED]) + (", ..." if len(moving) > MAX_LISTED else "")
+            problems.append(
+                f"{label}: {len(moving)} of {n_runs} runs move the ions (NSW > 0 with IBRION != -1): runs {shown}"
+            )
 
         def wanted(key, values):
             return _is_start_only(key, values) == start

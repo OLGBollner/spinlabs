@@ -125,6 +125,22 @@ def test_output_relax_and_start_keys_are_kept_apart(tmp_path):
     assert start_differences(ground, trees) == ["first_order: ISTART = 0 in the runs but 1 in the ground state"]
 
 
+def test_ionic_motion_is_judged_per_run_not_across_runs(tmp_path):
+    # Neither run moves the ions; NSW of the second with IBRION of the first would.
+    static = [_with(RUN, NSW=0, IBRION=0), _with(RUN, NSW=10, IBRION=-1)]
+    trees = {"first_order": tree_settings(_tree(tmp_path, static))}
+    assert trees["first_order"]["moving_ions"] == []
+    assert not any("move the ions" in p for p in compare_settings(None, trees))
+
+
+def test_runs_that_move_the_ions_are_named(tmp_path):
+    incars = [_with(RUN, NSW=0), _with(RUN, NSW=20, IBRION=2), _with(RUN, NSW=0)]
+    trees = {"first_order": tree_settings(_tree(tmp_path, incars))}
+    assert [p for p in compare_settings(None, trees) if "move the ions" in p] == [
+        "first_order: 1 of 3 runs move the ions (NSW > 0 with IBRION != -1): runs 2"
+    ]
+
+
 def test_a_relaxing_ground_state_and_non_scf_settings_are_flagged(tmp_path):
     ground = read_incar_text(tmp_path, _with(RUN, IBRION=1, NSW=50, ALGO="None", ICHARG=11))
     trees = {"first_order": tree_settings(_tree(tmp_path, [_with(RUN, ALGO="Normal")] * 2))}
