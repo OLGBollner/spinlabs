@@ -449,6 +449,7 @@ class ZFSManager:
         V_0_pm_2nd = np.zeros((n_modes, n_modes))
 
         no_first_order = []
+        diagonal_done: set[int] = set()  # modes whose own (i, i) coupling was computed
         for (i, j), item in sorted(self.zfs_tensors_2d.items()):
             # The curvature subtracts both modes' first-order response; a mode without one
             # (derivative 0) would leave its linear change in d2D as a spurious coupling.
@@ -521,20 +522,8 @@ class ZFSManager:
                 V_0_pm_2nd[i, j] = np.sqrt(d2D_dqidqj[0, 2] ** 2 + d2D_dqidqj[1, 2] ** 2) / (2.0 * np.sqrt(2))
                 V_p_m_2nd[i, j] = 0.5 * np.sqrt(diff_in_plane**2 + 4.0 * off_diag_in_plane**2)
 
-            if len(self.treated_modes) < n_modes and len(phonon_energies) == n_modes and i == j:
-                # Inherit V-coefficients for the degenerate twin via pair_id.
-                # The spectrum owns the pairing (strict involution); no frequency guessing.
-                spectrum = self.spectrum
-                if spectrum is not None and (twin := twin_of(spectrum.deg_groups, i)) is not None:
-                    if twin != j:  # avoid overwriting an (i,j) cross-coupling with the pair copy
-                        V_0_0_2nd[twin, twin] = V_0_0_2nd[i, j]
-                        V_0_pm_2nd[twin, twin] = V_0_pm_2nd[i, j]
-                        V_p_m_2nd[twin, twin] = V_p_m_2nd[i, j]
-                    else:
-                        # Twin IS j: copy the (i,i) pair coefficients to (j,j)
-                        V_0_0_2nd[j, j] = V_0_0_2nd[i, j]
-                        V_0_pm_2nd[j, j] = V_0_pm_2nd[i, j]
-                        V_p_m_2nd[j, j] = V_p_m_2nd[i, j]
+            if i == j:
+                diagonal_done.add(i)
 
             V_0_0_2nd[j, i] = V_0_0_2nd[i, j]
             V_p_m_2nd[j, i] = V_p_m_2nd[i, j]
@@ -550,6 +539,16 @@ class ZFSManager:
                     V_0_pm_2nd[i, j] / CONSTANTS["MHz2J"],
                     V_p_m_2nd[i, j] / CONSTANTS["MHz2J"],
                 )
+
+        # A degenerate twin without its own diagonal run inherits its partner's diagonal
+        # coupling (the spectrum owns the pairing). Fill-only, as for first order: a twin
+        # with its own computed (i, i) keeps it, whatever order the entries came in.
+        if len(self.treated_modes) < n_modes and len(phonon_energies) == n_modes and self.spectrum is not None:
+            for i in sorted(diagonal_done):
+                twin = twin_of(self.spectrum.deg_groups, i)
+                if twin is not None and twin not in diagonal_done:
+                    for V in (V_0_0_2nd, V_0_pm_2nd, V_p_m_2nd):
+                        V[twin, twin] = V[i, i]
 
         if self.degenerate_pairs_from_symmetry:
             self._degenerate_pairs_from_symmetry(zfs_2nd_derivs, V_0_0_2nd, V_p_m_2nd, V_0_pm_2nd)

@@ -151,6 +151,25 @@ class TestZFSManager:
         diff, off = dD_xy[0, 0] - dD_xy[1, 1], dD_xy[0, 1]
         assert np.isclose(V_pm[1, 2] / self.D2_UNIT, 0.5 * np.sqrt(diff**2 + 4 * off**2))
 
+    def test_twin_inherits_a_diagonal_coupling_only_when_it_has_none(self, setup_system):
+        manager, spectrum, gs_zfs = setup_system
+        manager.treated_modes = {1, 2}  # fewer than the 4 modes: inheritance is on
+        dD_x = np.array([[2.0, 0.0, 1.0], [0.0, -2.0, 0.0], [1.0, 0.0, 0.0]])
+        dD_y = np.array([[6.0, 0.0, 3.0], [0.0, -6.0, 0.0], [3.0, 0.0, 0.0]])
+
+        # Both twins ran their own diagonal: each keeps its own coupling.
+        manager.zfs_tensors_2d = {
+            (1, 1): self._second_order_entry(manager, dD_x, ("Ex", "Ex")),
+            (2, 2): self._second_order_entry(manager, dD_y, ("Ey", "Ey")),
+        }
+        _, _, V_pm, V_0pm = manager.calculate_second_order_derivatives(np.zeros((4, 3, 3)))
+        assert np.isclose(V_pm[2, 2], 3 * V_pm[1, 1]) and np.isclose(V_0pm[2, 2], 3 * V_0pm[1, 1])
+
+        # Only Ex ran: Ey inherits it.
+        manager.zfs_tensors_2d = {(1, 1): self._second_order_entry(manager, dD_x, ("Ex", "Ex"))}
+        _, _, V_pm, V_0pm = manager.calculate_second_order_derivatives(np.zeros((4, 3, 3)))
+        assert V_pm[1, 1] > 0 and V_pm[2, 2] == V_pm[1, 1] and V_0pm[2, 2] == V_0pm[1, 1]
+
     def test_pair_with_a_mode_without_first_order_data_is_skipped(self, setup_system, caplog):
         manager, spectrum, gs_zfs = setup_system
         dD = np.array([[3.0, 0.0, 1.0], [0.0, -3.0, 0.0], [1.0, 0.0, 0.0]])
