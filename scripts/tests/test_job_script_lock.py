@@ -59,6 +59,15 @@ def test_runner_takes_the_lock_before_touching_a_run_directory():
     assert "mkdir -p $TARGET_DIR" not in run_one  # the lock creates the directory
 
 
+def test_a_failing_vasp_run_does_not_end_the_task():
+    """Under set -e a bare srun would stop the task and skip its other directories."""
+    text = RUNNER.read_text()
+    run_one = text[text.index("run_one() {"):text.index("mkdir -p runs")]
+    assert "if srun $binary; then" in run_one
+    assert not re.search(r"^\s*srun ", run_one, re.M)  # no bare srun line
+    assert text.rstrip().endswith('exit 1\nfi')  # failures still fail the task at the end
+
+
 @pytest.mark.parametrize("name", WRAPPERS)
 def test_wrappers_hold_no_loop_logic(name):
     """Per-tree scripts only configure and start the runner, so a fix reaches every tree."""

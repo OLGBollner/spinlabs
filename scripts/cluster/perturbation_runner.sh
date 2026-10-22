@@ -188,8 +188,15 @@ run_one() {
     return 0
   fi
   echo "$ID: $CHECK_MSG"
-  srun $binary
-  echo "$ID: Done! $label"
+  # A failing VASP run (crash, SCF abort, node error) must not end the task under set -e and
+  # leave its other directories unattempted; the task exits nonzero at the end instead.
+  if srun $binary; then
+    echo "$ID: Done! $label"
+  else
+    status=$?
+    echo "$ID: VASP exited with $status for $label"
+    VASP_FAILED=$((VASP_FAILED + 1))
+  fi
   # Only drop the restart files once this directory really is complete -- the same test
   # the skip-guard above uses. VASP can exit 0 without writing a ZFS block; such a
   # directory is not skipped on relaunch, so it restarts from scratch and needs
@@ -210,6 +217,7 @@ run_one() {
 
 mkdir -p runs
 
+VASP_FAILED=0
 PAIR_ID=0
 for i in $MODES; do
   if [ "$ORDER" = "first_order" ]; then
@@ -234,3 +242,8 @@ for i in $MODES; do
     PAIR_ID=$((PAIR_ID + 1))
   done
 done
+
+if [ "$VASP_FAILED" -gt 0 ]; then
+  echo "$ID: VASP failed in $VASP_FAILED run(s); the task still attempted all its others"
+  exit 1
+fi
