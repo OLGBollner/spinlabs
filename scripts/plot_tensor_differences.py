@@ -39,6 +39,8 @@ COUPLINGS = {
     "V_0pm": (r"$V_{0\pm}$", "s", ":"),
 }
 SPECTRAL_RES = 1.0  # meV grid of the spectral functions
+# Marker per mode symmetry in the ratio panel; Ex and Ey share one
+SYMMETRY_MARKERS = {"A1": "o", "A2": "^", "E": "s"}
 
 
 def find_package(defect, cell, method, pert):
@@ -155,14 +157,17 @@ if __name__ == "__main__":
         )
         ax.tick_params(labelbottom=order == 2)
 
-    # Second- over first-order change of the diagonal pairs, per scale
+    # Second- over first-order change of the diagonal pairs, colour per scale, marker per symmetry
     ax = ratio_ax
+    symmetry = [str(sym).rstrip("xy") for sym in spectrum.symmetries]  # Ex, Ey -> E
     for color, pert in zip(COLORS, perts):
         first = diffs[pert][1]
         keys = sorted(k for k in diffs[pert][2] if k[0] == k[1] and k[0] in first and first[k[0]] > 0)
-        ratio = [diffs[pert][2][k] / first[k[0]] for k in keys]
-        ax.scatter([freqs[i] for i, _ in keys], ratio, s=10, marker="o", color=color, alpha=0.7, linewidths=0,
-                   label=f"pert {pert} ({len(keys)})")
+        for sym, marker in SYMMETRY_MARKERS.items():
+            sym_keys = [k for k in keys if symmetry[k[0]] == sym]
+            ratio = [diffs[pert][2][k] / first[k[0]] for k in sym_keys]
+            ax.scatter([freqs[i] for i, _ in sym_keys], ratio, s=28, marker=marker, color=color, alpha=0.6,
+                       linewidths=0)
     # The two lines sit close on the log axis: label linear below its line, quadratic above
     for value, style, name, dy, va in ((2.0, "--", "linear", -3, "top"), (4.0, ":", "quadratic", 3, "bottom")):
         ax.axhline(value, color="0.35", linestyle=style, linewidth=1)
@@ -172,7 +177,14 @@ if __name__ == "__main__":
     ax.set_ylabel(r"$\|D_{q_i q_i} - D_0\| \,/\, \|D_{q_i} - D_0\|$")
     ax.set_title("Second- against first-order change (pair displaced 2$q_i$)", fontsize=12)
     ax.grid(True, which="major", color="0.9", linewidth=0.6)
-    ax.legend(loc="lower right", markerscale=2)
+    # Colour is the scale, marker the symmetry: one legend each
+    scales = ax.legend(handles=scale_handles, loc="upper left", fontsize=10)
+    ax.add_artist(scales)
+    ax.legend(
+        handles=[Line2D([], [], marker=m, linestyle="", color="0.35", markersize=7, label=sym)
+                 for sym, m in SYMMETRY_MARKERS.items()],
+        loc="upper right", ncol=3, fontsize=10,
+    )
     ax.set_xlabel("Phonon energy of mode $i$ (meV)")
 
     fig.tight_layout()
