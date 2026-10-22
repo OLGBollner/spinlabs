@@ -151,6 +151,16 @@ class TestZFSManager:
         diff, off = dD_xy[0, 0] - dD_xy[1, 1], dD_xy[0, 1]
         assert np.isclose(V_pm[1, 2] / self.D2_UNIT, 0.5 * np.sqrt(diff**2 + 4 * off**2))
 
+    def test_symmetry_check_flags_a1_changes_outside_the_a1_form_at_any_scale(self, caplog):
+        mhz = CONSTANTS["MHz2J"]  # a first-order change in J is ~1e-26; the old 1e-4 slack hid everything
+        pure = np.diag([-10.0, -10.0, 20.0]) * mhz
+        broken = np.array([[-10.0, 8.0, 6.0], [8.0, 4.0, 0.0], [6.0, 0.0, 6.0]]) * mhz
+        with caplog.at_level("WARNING", logger="spinlabs"):
+            ZFSManager._check_symmetry(pure, "A1", 5)
+            assert "Symmetry mismatch" not in caplog.text
+            ZFSManager._check_symmetry(broken, "A1", 7)
+        assert "Symmetry mismatch at index 7" in caplog.text and "outside the A1 form" in caplog.text
+
     def test_twin_inherits_a_diagonal_coupling_only_when_it_has_none(self, setup_system):
         manager, spectrum, gs_zfs = setup_system
         manager.treated_modes = {1, 2}  # fewer than the 4 modes: inheritance is on

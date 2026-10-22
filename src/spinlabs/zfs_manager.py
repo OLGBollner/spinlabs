@@ -24,6 +24,9 @@ INCONSISTENT_ALPHA = 0.5
 # norm, MHz) the expected change is too small for that ratio to mean anything, so
 # the entry is not judged.
 MIN_EXPECTED_MHZ = 0.05
+# Largest share (norm ratio) of an A1-labelled ZFS change allowed outside the A1 form
+# diag(a, a, b) before _check_symmetry warns; mislabelled or wrongly rotated tensors are ~1.
+A1_LEAK_TOL = 0.2
 
 
 class ZFSManager:
@@ -842,20 +845,18 @@ class ZFSManager:
     def _check_symmetry(d_tensor: np.ndarray, symmetry: Union[str, tuple[str, str]], idx: Any) -> None:
         sym_prod = MathUtils.calc_symmetry(*symmetry) if isinstance(symmetry, tuple) else [symmetry]
         if sym_prod == ["A1"]:
-            diag = np.diag(d_tensor)
-            d_xx, d_yy, d_zz = diag
-            tensor_scale = np.max(np.abs(diag))
-            dyn_tol = 1.0 * tensor_scale + 1e-4
-
-            is_axial = np.abs(d_xx - d_yy) <= dyn_tol
-            is_traceless_axial = np.abs(2 * d_xx + d_zz) <= dyn_tol
-            off_diag_mask = ~np.eye(3, dtype=bool)
-            off_diags_zero = np.all(np.abs(d_tensor[off_diag_mask]) <= dyn_tol)
-
-            if not (is_axial and is_traceless_axial and off_diags_zero):
+            # An A1 change keeps the C3v form diag(a, a, b); the part outside it (off-diagonals,
+            # xx != yy) relative to the whole tensor is unit-free and ~0 for correctly labelled data
+            # (NV_64: <= 0.001 at first order, median 0.002 at second order).
+            norm = np.linalg.norm(d_tensor)
+            if norm == 0:
+                return
+            a = 0.5 * (d_tensor[0, 0] + d_tensor[1, 1])
+            outside = np.linalg.norm(d_tensor - np.diag([a, a, d_tensor[2, 2]])) / norm
+            if outside > A1_LEAK_TOL:
                 LOGGER.warning(
-                    f"Symmetry mismatch at index {idx} with symmetry {sym_prod} "
-                    f"(threshold: {dyn_tol:.2e} | scale: {tensor_scale:.2f})"
+                    f"Symmetry mismatch at index {idx} with symmetry {sym_prod}: {outside:.0%} of the tensor "
+                    f"is outside the A1 form diag(a, a, b) (tolerance {A1_LEAK_TOL:.0%})"
                 )
 
     def _debug_derivs(self, dD, q, symmetry, idx, V_0_0, V_0_pm, V_p_m):
