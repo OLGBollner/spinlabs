@@ -448,8 +448,13 @@ class ZFSManager:
         V_p_m_2nd = np.zeros((n_modes, n_modes))
         V_0_pm_2nd = np.zeros((n_modes, n_modes))
 
+        no_first_order = []
         for (i, j), item in sorted(self.zfs_tensors_2d.items()):
-            if i not in self.treated_modes and j not in self.treated_modes:
+            # The curvature subtracts both modes' first-order response; a mode without one
+            # (derivative 0) would leave its linear change in d2D as a spurious coupling.
+            if i not in self.treated_modes or j not in self.treated_modes:
+                if i in self.treated_modes or j in self.treated_modes:
+                    no_first_order.append((i, j))
                 continue
 
             if ipr_thresh is not None:
@@ -548,6 +553,14 @@ class ZFSManager:
 
         if self.degenerate_pairs_from_symmetry:
             self._degenerate_pairs_from_symmetry(zfs_2nd_derivs, V_0_0_2nd, V_p_m_2nd, V_0_pm_2nd)
+
+        if no_first_order:
+            LOGGER.warning(
+                f"Skipped {len(no_first_order)} second-order entries with a mode that has no first-order "
+                "derivative (its linear response cannot be removed). Run folders (1-based): "
+                + ", ".join(f"{i + 1}_{j + 1}" for i, j in no_first_order[:20])
+                + (", ..." if len(no_first_order) > 20 else "")
+            )
 
         if self.inconsistent_pairs:
             if self.exclude_inconsistent_pairs:

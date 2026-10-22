@@ -151,6 +151,17 @@ class TestZFSManager:
         diff, off = dD_xy[0, 0] - dD_xy[1, 1], dD_xy[0, 1]
         assert np.isclose(V_pm[1, 2] / self.D2_UNIT, 0.5 * np.sqrt(diff**2 + 4 * off**2))
 
+    def test_pair_with_a_mode_without_first_order_data_is_skipped(self, setup_system, caplog):
+        manager, spectrum, gs_zfs = setup_system
+        dD = np.array([[3.0, 0.0, 1.0], [0.0, -3.0, 0.0], [1.0, 0.0, 0.0]])
+        manager.zfs_tensors_2d = {(1, 3): self._second_order_entry(manager, dD, ("Ex", "A1"))}
+        manager.treated_modes = {1}  # mode 3 has no first-order run
+        with caplog.at_level("WARNING", logger="spinlabs"):
+            d2D, V_00, V_pm, V_0pm = manager.calculate_second_order_derivatives(np.zeros((4, 3, 3)))
+        assert not np.any(d2D[1, 3]) and V_pm[1, 3] == 0 and V_0pm[1, 3] == 0 and V_00[1, 3] == 0
+        assert "Skipped 1 second-order entries with a mode that has no first-order derivative" in caplog.text
+        assert "2_4" in caplog.text
+
     def test_raw_data_in_mhz_is_ingested_in_joules(self, setup_system):
         """Simulation folders are parsed in MHz; the manager must work in J like for loaded npz files."""
         from spinlabs.models import PerturbationEntry
