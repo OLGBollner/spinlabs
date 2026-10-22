@@ -24,6 +24,7 @@ import numpy as np
 from spinlabs.constants import CONSTANTS
 from spinlabs.pipeline import load_raw_inputs
 from spinlabs.registry import ensure_db, find_packaged
+from spinlabs.symmetry import twin_of
 from spinlabs.zfs_manager import ZFSManager
 
 # One categorical slot per perturbation scale (largest first) or per derivative order
@@ -46,7 +47,7 @@ def find_package(defect, cell, method, pert):
 def derivative_norms(path, defect, cell, phonon_file=None):
     """Norms (MHz) of dD/dq per mode and of d2D/dq_i dq_j per pair, keyed by spectrum position.
 
-    Also returns the phonon energies (meV), whether the data is mass-weighted and the phonon file used.
+    Also returns the phonon spectrum, whether the data is mass-weighted and the phonon file used.
     """
     raw, spectrum, ph_path = load_raw_inputs(raw_zfs_file=path, phonon_file=phonon_file, defect=defect, cell_size=cell)
     if spectrum is None:
@@ -59,7 +60,28 @@ def derivative_norms(path, defect, cell, phonon_file=None):
     second = {
         (i, j): np.linalg.norm(d2[i, j]) / CONSTANTS["MHz2J"] for i, j in manager.zfs_tensors_2d if np.any(d2[i, j])
     }
-    return first, second, spectrum.frequencies_mev, manager.mass_weighted, ph_path
+    return first, second, spectrum, manager.mass_weighted, ph_path
+
+
+def match_with_twins(big, small, deg_groups, order):
+    """Keys of ``big`` paired with the same key in ``small``, else with its degenerate twin's.
+
+    The scales may have run different partners of a degenerate E pair (Ex at one,
+    Ey at the other). Their derivative norms are equal by symmetry: |dD/dEx| = |dD/dEy|,
+    and d2D/dEx2, d2D/dEy2 share their A1 part and have opposite E parts.
+    """
+    def twin(i):
+        t = twin_of(deg_groups, i)
+        return i if t is None else t
+
+    matched = []
+    for key in sorted(big):
+        partner = key
+        if key not in small:
+            partner = twin(key) if order == 1 else (twin(key[0]), twin(key[1]))
+        if partner in small:
+            matched.append((key, partner))
+    return matched
 
 
 if __name__ == "__main__":
@@ -78,7 +100,8 @@ if __name__ == "__main__":
     norms = {}
     for pert in perts:
         path = find_package(args.defect, args.cell, args.method, pert)
-        first, second, freqs, weighted, ph_path = derivative_norms(path, args.defect, args.cell, args.phonon_file)
+        first, second, spectrum, weighted, ph_path = derivative_norms(path, args.defect, args.cell, args.phonon_file)
+        freqs = spectrum.frequencies_mev
         norms[pert] = {1: first, 2: second}
         print(f"pert {pert}: {path}")
         print(f"  phonons {ph_path}, {'mass-weighted' if weighted else 'not mass-weighted'}, "
@@ -101,15 +124,17 @@ if __name__ == "__main__":
         ax.grid(True, which="major", color="0.9", linewidth=0.6)
         ax.legend(loc="lower right", markerscale=2)
 
-    # Ratio between the largest and smallest perturbation scale on the shared modes/pairs
+    # Ratio between the largest and smallest perturbation scale on the shared modes/pairs,
+    # a degenerate partner standing in for a mode the other scale did not run
     big, small = perts[0], perts[-1]
     ax = axes[-1]
     for color, order in zip(COLORS, (1, 2)):
-        shared = sorted(set(norms[big][order]) & set(norms[small][order]))
-        x = [freqs[k if order == 1 else k[0]] for k in shared]
-        ratio = [norms[big][order][k] / norms[small][order][k] for k in shared]
+        shared = match_with_twins(norms[big][order], norms[small][order], spectrum.deg_groups, order)
+        x = [freqs[k if order == 1 else k[0]] for k, _ in shared]
+        ratio = [norms[big][order][k] / norms[small][order][p] for k, p in shared]
+        n_twins = sum(k != p for k, p in shared)
         ax.scatter(x, ratio, s=10, marker=MARKERS[order], color=color, alpha=0.7, linewidths=0,
-                   label=f"{LABELS[order]} ({len(shared)})")
+                   label=f"{LABELS[order]} ({len(shared)}, {n_twins} via twin)")
     ax.axhline(1.0, color="0.35", linestyle="--", linewidth=1)
     ax.set_yscale("log")
     ax.set_ylabel(f"Ratio pert {big} / {small}")
