@@ -6,7 +6,7 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 
 from spinlabs.cli import add_verbosity_args
-from spinlabs.convergence import plot_pert_convergence, read_conv_metadata
+from spinlabs.convergence import SNR_TARGET, TRUNC_TOL, plot_pert_convergence, read_conv_metadata
 from spinlabs.plotter import plot_run_coupling, plot_run_rates, plot_t1
 from spinlabs.registry import ensure_db, find_runs, parse_orders
 from spinlabs.relaxation_dynamics import INIT_STATES, find_t1_files, normalize_init_state
@@ -47,6 +47,12 @@ def build_plot_parser(subparsers: argparse._SubParsersAction) -> None:  # noqa: 
         metavar="STATE",
         help="Only plot these initial spin state(s): ms_1 ms_0 ms_-1, or 1 0 -1 (default: every state found)",
     )
+    t1.add_argument(
+        "--rate", action="store_true", help="Plot the relaxation rate 1/T1 (s^-1) instead of T1 (saved as t1_rate)"
+    )
+    t1.add_argument(
+        "--log-temperature", action="store_true", help="Log temperature axis (power laws such as T^5 become lines)"
+    )
     t1.add_argument("--plain-name", action="store_true", help="Do not append metadata to the output filename")
     _add_output_args(t1)
     t1.set_defaults(func=_run_t1)
@@ -71,6 +77,13 @@ def build_plot_parser(subparsers: argparse._SubParsersAction) -> None:  # noqa: 
         "--drop-anchor",
         action="store_true",
         help="exclude the Q=0 anchor from fits and residuals (curves still extrapolate to Q=0)",
+    )
+    conv.add_argument(
+        "--noise", type=float, help="noise sigma per tensor element in MHz (default: cubic-fit scatter of all modes)"
+    )
+    conv.add_argument("--snr-target", type=float, default=SNR_TARGET, help=f"required SNR (default {SNR_TARGET:g})")
+    conv.add_argument(
+        "--trunc-tol", type=float, default=TRUNC_TOL, help=f"allowed relative truncation error (default {TRUNC_TOL:g})"
     )
     _add_output_args(conv)
     conv.set_defaults(func=_run_convergence)
@@ -99,6 +112,9 @@ def _run_convergence(args: argparse.Namespace) -> None:
         csv_path=args.csv,
         show=args.show,
         drop_anchor=args.drop_anchor,
+        noise=args.noise,
+        snr_target=args.snr_target,
+        trunc_tol=args.trunc_tol,
     )
 
 
@@ -298,9 +314,18 @@ def _run_t1(args: argparse.Namespace) -> None:
         out = args.output
     else:
         run_dirs = dirs if args.query else [Path(p) if Path(p).is_dir() else Path(p).parent for p in inputs]
-        out = _figures_dir("t1") / _combined_figure_subdir(run_dirs) / f"t1.{args.fmt}"
+        name = "t1_rate" if args.rate else "t1"
+        out = _figures_dir("t1") / _combined_figure_subdir(run_dirs) / f"{name}.{args.fmt}"
         out.parent.mkdir(parents=True, exist_ok=True)
-    plot_t1(inputs, output_path=out, show=args.show, plain_name=args.plain_name, init_states=args.init_state)
+    plot_t1(
+        inputs,
+        output_path=out,
+        show=args.show,
+        plain_name=args.plain_name,
+        init_states=args.init_state,
+        rate=args.rate,
+        log_temperature=args.log_temperature,
+    )
 
 
 

@@ -12,6 +12,7 @@ import re
 from pathlib import Path
 
 PLACEHOLDER = re.compile(r"<[^<>\s]+>")
+RUNNER = "scripts/cluster/perturbation_runner.sh"  # the loop the run scripts start
 
 
 def _read(path: Path) -> str:
@@ -56,15 +57,21 @@ def verify_setup(folder: Path, script_name: str) -> list[str]:
             m = re.match(r"^\s*([A-Za-z_][A-Za-z0-9_]*)=(.*)$", line)
             if m:
                 assigns[m.group(1).upper()] = m.group(2).strip()
-        for key in ("BINARY", "PHONON_PATH", "CREATE_STRUCT", "GET_N_MODES"):
+        # The structure scripts come from the code snapshot of SPINLABS_REPO; older
+        # self-contained scripts name them directly (checked only when present).
+        required = ("BINARY", "PHONON_PATH", "SPINLABS_REPO")
+        for key in (*required, "CREATE_STRUCT", "GET_N_MODES"):
             if key not in assigns:
-                problems.append(f"FAIL: {script_name}: {key} not set")
+                if key in required:
+                    problems.append(f"FAIL: {script_name}: {key} not set")
                 continue
             val = assigns[key].strip("'\"")
             if not val or PLACEHOLDER.search(val):
                 continue  # placeholder already reported above
             if not Path(val).exists():
                 problems.append(f"FAIL: {script_name}: {key} path missing: {val}")
+            elif key == "SPINLABS_REPO" and not (Path(val) / RUNNER).is_file():
+                problems.append(f"FAIL: {script_name}: SPINLABS_REPO has no {RUNNER}: {val}")
 
     # --- INCAR: policy checks ---------------------------------------------
     incar = folder / "input" / "INCAR"

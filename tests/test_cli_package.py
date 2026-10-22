@@ -458,3 +458,50 @@ def test_register_only_registers_packaged_phonon(tmp_path, monkeypatch):
     _register_only(tmp_path / "data")
     row = sqlite3.connect(db).execute("SELECT kind, defect, cell_size FROM files").fetchone()
     assert row == ("phonon", "ClV", 128)
+
+
+@pytest.mark.parametrize("no_mass_weighted", [False, True])
+def test_no_mass_weighted_flag_is_stored(tmp_path, monkeypatch, no_mass_weighted):
+    _tree(tmp_path)
+    _registry(monkeypatch, tmp_path)
+    args = _make_args(tmp_path)
+    args.no_mass_weighted = no_mass_weighted
+    with _patch(lambda **kw: _raw(order=kw["order"])):
+        _run(args)
+    (path,) = (tmp_path / "data").rglob("*.npz")
+    assert RawZFSData.load(path).mass_weighted is (not no_mass_weighted)
+
+
+def test_empty_datasets_are_not_saved(tmp_path, monkeypatch):
+    """A pert folder without OUTCARs parses to no tensors; it is skipped, not saved empty."""
+    _tree(tmp_path)
+    _registry(monkeypatch, tmp_path)
+    empty = RawZFSData(defect="NV", cell_size=512, pert_scale=0.025, calc_method="all_bands", order=1)
+    with _patch(lambda **kw: empty), pytest.warns(UserWarning, match="No data parsed"):
+        _run(_make_args(tmp_path))
+    assert not list((tmp_path / "data").rglob("*.npz"))
+
+
+def test_scan_flags_entries_with_the_wrong_zfs_shape(tmp_path, monkeypatch, capsys):
+    """The scan summary runs the D-tensor shape check against the defect's phonon labels."""
+    from spinlabs.models import PhononSpectrum
+
+    _tree(tmp_path)
+    _registry(monkeypatch, tmp_path)
+    PhononSpectrum(
+        frequencies_mev=np.array([20.0, 40.0, 40.0]), symmetries=["A1", "Ex", "Ey"],
+        eigenvectors=np.ones((3, 1, 3)) / np.sqrt(3), atom_frac_coords=np.zeros((1, 3)), atom_symbols=["C"],
+        atomic_masses=np.array([12.011]), lattice=np.eye(3) * 3.57,
+    ).save(tmp_path / "NV_512" / "phonon_data.npz")
+    gs = np.diag([-1000.0, -1000.0, 2000.0])
+    raw = RawZFSData(
+        defect="NV", cell_size=512, pert_scale=0.025, calc_method="all_bands", order=1,
+        ground_state_zfs=ZFSTensor(matrix=gs, unit="MHz"),
+        first_order={0: {"tensor": gs + np.diag([5.0, -15.0, 10.0]), "unit": "MHz"}},  # A1 mode, D_xx != D_yy
+    )
+    with _patch(lambda **kw: raw):
+        args = _make_args(tmp_path, orders="first", scan=True)
+        _run(args)
+    out = capsys.readouterr().out
+    assert "D-tensor shape check" in out
+    assert "NV_512 all_bands pert 0.025: 1 suspicious run folder(s): 1" in out

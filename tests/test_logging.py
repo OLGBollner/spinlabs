@@ -263,21 +263,3 @@ def test_every_subcommand_accepts_verbosity_flags(argv):
 
     args = build_parser().parse_args(argv)
     assert hasattr(args, "verbose") and hasattr(args, "quiet")
-
-
-def test_debug_flag_enables_debug_console(monkeypatch):
-    """``run -d`` emits DEBUG records, so main must open the console to DEBUG."""
-    import spinlabs.cli as cli
-
-    seen = {}
-    monkeypatch.setattr(cli, "configure_logging", lambda verbosity, quiet: seen.update(v=verbosity, q=quiet))
-    monkeypatch.setattr(cli, "build_parser", lambda: _StubParser())
-    cli.main([])
-    assert seen == {"v": 2, "q": False}
-
-
-class _StubParser:
-    def parse_args(self, argv):
-        import argparse
-
-        return argparse.Namespace(verbose=0, quiet=False, debug=True, func=lambda a: None)

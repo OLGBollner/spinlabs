@@ -1,9 +1,9 @@
+import warnings
 from pathlib import Path
 
 import numpy as np
 import scipy.constants as Cn
-from scipy.integrate import odeint
-from scipy.optimize import curve_fit
+from scipy.optimize import OptimizeWarning, curve_fit
 from spinlabs.logging_utils import get_logger
 
 LOGGER = get_logger(__name__)
@@ -11,6 +11,10 @@ LOGGER = get_logger(__name__)
 # Initial spin states in table/column order, and their initial populations
 # over (ms=+1, ms=0, ms=-1).
 INIT_STATES = ("ms_1", "ms_0", "ms_-1")
+# Decays slower than this (T1 above 1e9 s, about 30 years) count as no relaxation: T1 = inf,
+# which plots leave out. Such rates are also built from underflowing low-temperature terms.
+MIN_DECAY_RATE = 1e-9  # s^-1
+
 INIT_POPULATIONS = {
     "ms_1": [1.0, 0.0, 0.0],
     "ms_0": [0.0, 1.0, 0.0],
@@ -73,8 +77,20 @@ class RelaxationDynamics:
 
         return np.array(rate_matrices), temperatures
 
-    def _population_derivative(self, P, t, A):
-        return np.dot(A, P)
+    @staticmethod
+    def _decay_modes(A: np.ndarray) -> tuple[np.ndarray, np.ndarray, int]:
+        """Eigenvalues and eigenvectors of the rate matrix, and the index of its steady state.
+
+        Every column of a rate matrix sums to zero, so one eigenvalue is exactly 0 (the
+        steady state). Round-off leaves it at about 1e-16 x the largest rate, which for
+        GHz rates is far above any fixed threshold, so it is taken as the eigenvalue
+        closest to zero and set to 0.
+        """
+        eigenvalues, eigenvectors = np.linalg.eig(A)
+        steady = int(np.argmin(np.abs(eigenvalues)))
+        eigenvalues = eigenvalues.copy()
+        eigenvalues[steady] = 0.0
+        return eigenvalues, eigenvectors, steady
 
     def _get_temp_index(self, T):
         if T:
@@ -91,7 +107,11 @@ class RelaxationDynamics:
         initial_guess = [T1_eigenval, steady_state, a_init]
 
         try:
-            popt, _ = curve_fit(exp_func, time_points, population, p0=initial_guess, maxfev=5000)
+            with warnings.catch_warnings(), np.errstate(over="ignore"):
+                # Only the fitted T1 is used, not its covariance; trial parameters
+                # may overflow exp, and the result is checked below.
+                warnings.simplefilter("ignore", OptimizeWarning)
+                popt, _ = curve_fit(exp_func, time_points, population, p0=initial_guess, maxfev=5000)
             extracted_T1 = float(popt[0])
             if not np.isfinite(extracted_T1) or extracted_T1 <= 0:
                 return T1_eigenval
@@ -104,7 +124,12 @@ class RelaxationDynamics:
             temp_index = self._get_temp_index(T)
         A = self.rate_matrices[temp_index]
 
-        population_evolution = odeint(func=self._population_derivative, y0=self.population, t=time_points, args=(A,))
+        # dP/dt = A P with constant A: P(t) = V exp(L t) V^-1 P0, exact and free of the
+        # step limits of an ODE integrator on this stiff system (rates spanning many decades).
+        eigenvalues, eigenvectors, _ = self._decay_modes(A)
+        coeffs = np.linalg.solve(eigenvectors, self.population.astype(complex))
+        t = np.asarray(time_points, dtype=float)[:, None]
+        population_evolution = np.real((np.exp(eigenvalues[None, :] * t) * coeffs[None, :]) @ eigenvectors.T)
 
         return population_evolution
 
@@ -113,14 +138,13 @@ class RelaxationDynamics:
             temp_index = self._get_temp_index(T)
         A = self.rate_matrices[temp_index]
 
-        eigenvalues, eigenvectors = np.linalg.eig(A)
+        eigenvalues, eigenvectors, steady = self._decay_modes(A)
+        decays = np.real(np.delete(eigenvalues, steady))
+        decays = decays[decays < 0]
 
-        non_zero_eigenvalues = np.real(eigenvalues[np.abs(eigenvalues) > 1e-9])
-
-        if len(non_zero_eigenvalues) > 0:
-            relaxation_time = float(-1.0 / np.max(non_zero_eigenvalues))
-        else:
-            relaxation_time = np.inf
+        # T1 = the slowest decay; none faster than MIN_DECAY_RATE = no relaxation (T1 = inf)
+        slowest = -np.max(decays) if len(decays) else 0.0
+        relaxation_time = float(1.0 / slowest) if slowest >= MIN_DECAY_RATE else np.inf
 
         return relaxation_time, eigenvalues, eigenvectors
 
@@ -129,9 +153,7 @@ class RelaxationDynamics:
             temp_index = self._get_temp_index(T)
         A = self.rate_matrices[temp_index]
 
-        eigenvalues, eigenvectors = np.linalg.eig(A)
-
-        zero_idx = np.argmin(np.abs(eigenvalues))
+        _, eigenvectors, zero_idx = self._decay_modes(A)
         steady_state = np.real(eigenvectors[:, zero_idx])
         sum_s = np.sum(steady_state)
         if np.abs(sum_s) > 1e-12:
@@ -152,7 +174,7 @@ class RelaxationDynamics:
     def get_time_estimate(self, T=None, temp_index=None):
         T1_eigenval, _, _ = self.get_T1_eigenval(T=T, temp_index=temp_index)
         T = T if T else self.temperatures[temp_index]
-        if not np.isfinite(1 / T):
+        if T == 0 or not np.isfinite(T):  # no 1/T time scale at 0 K
             return None
 
         t_end = float(np.real(10 * T1_eigenval + 1 / T))
@@ -165,7 +187,7 @@ class RelaxationDynamics:
         T1_eigenval, _, _ = self.get_T1_eigenval(T=T, temp_index=temp_index)
         steady_state = self.get_steady_state(T=T, temp_index=temp_index)[self.population.argmax()]
 
-        if T1_eigenval > 1e9:
+        if T1_eigenval > 1.0 / MIN_DECAY_RATE:
             return T1_eigenval
 
         time_points = self.get_time_estimate(T, temp_index)

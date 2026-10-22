@@ -127,7 +127,11 @@ def find_default_phonon_file(sim_folder: Path | None) -> Path | None:
 
 
 def find_default_phonon_file_for_raw(raw_zfs_file: str | Path | Sequence[str | Path]) -> Path | None:
-    """Search next to the raw ZFS .npz file(s) for phonon_data.npz / phonopy.yaml."""
+    """Search next to the raw ZFS .npz file(s) for phonon_data.npz / phonopy.yaml.
+
+    Looks from the file's folder up to the defect folder of the packaged layout
+    ``data/<defect>/pert_<x>/<method>/<date>/<file>.npz``, nearest first.
+    """
     if raw_zfs_file is None:
         return None
     if isinstance(raw_zfs_file, (list, tuple)):
@@ -142,12 +146,26 @@ def find_default_phonon_file_for_raw(raw_zfs_file: str | Path | Sequence[str | P
         anchor_dir / "phonopy.yaml",
         anchor_dir.parent / "phonon_data.npz",
         anchor_dir.parent / "phonopy.yaml",
+        anchor_dir.parent.parent / "phonon_data.npz",
         anchor_dir.parent.parent / "data" / "phonon_data.npz",
+        anchor_dir.parent.parent.parent / "phonon_data.npz",
     ]
     for cand in candidates:
         if cand.exists():
             return cand
     return None
+
+
+def raw_mode_count(raw: RawZFSData) -> int:
+    """Number of modes a spectrum must have to hold every mode index of the raw data."""
+    indices = list(raw.first_order) + [i for pair in raw.second_order for i in pair]
+    return max(indices) + 1 if indices else 0
+
+
+def _covers(spectrum: PhononSpectrum, n_needed: int) -> bool:
+    """A spectrum fits the raw data when its full mode count reaches the highest raw mode index."""
+    n_full = getattr(spectrum, "n_full", None) or spectrum.n_modes
+    return n_full >= n_needed
 
 
 def _check_requested_orders(user_orders: Sequence[int], *, has_1d: bool | None, has_2d: bool) -> None:
@@ -162,6 +180,196 @@ def _check_requested_orders(user_orders: Sequence[int], *, has_1d: bool | None, 
                 f"{label} tensors. Rerun without --order {req} or with input that "
                 f"includes {label.split(' ')[0]} perturbation data."
             )
+
+
+def load_raw_inputs(
+    *,
+    sim_folder: str | Path | Sequence[str | Path] | None = None,
+    raw_zfs_file: str | Path | Sequence[str | Path] | None = None,
+    raw_zfs_file_1d: str | Path | None = None,
+    raw_zfs_file_2d: str | Path | None = None,
+    phonon_file: str | Path | None = None,
+    calc_method: str = "all_bands",
+    zfs_folder: str | None = None,
+    order: int | None = None,
+    pert_scale: float | None = None,
+    defect: str | None = None,
+    cell_size: int | None = None,
+) -> tuple[RawZFSData, PhononSpectrum | None, Path | None]:
+    """Raw ZFS data and phonon spectrum for an analysis, loaded as ``spinlabs run`` does.
+
+    Exactly one ZFS source is used: simulation folder(s), one raw .npz, or a
+    1d + 2d pair. The phonon file is ``phonon_file``, else one found next to
+    the inputs, else the registry's match for the defect and cell. Returns
+    ``(raw_data, spectrum, phonon_path)``; the spectrum is None without phonons.
+    """
+    combine_orders = raw_zfs_file_1d is not None and raw_zfs_file_2d is not None
+    spectrum: PhononSpectrum | None = None
+    # Load phonons
+    sim_p = sim_folder[0] if isinstance(sim_folder, (list, tuple)) else sim_folder
+    ph_from_sim = find_default_phonon_file(Path(sim_p)) if sim_p else None
+    ph_from_raw = find_default_phonon_file_for_raw(raw_zfs_file) if raw_zfs_file is not None else None
+    ph_path = Path(phonon_file) if phonon_file else (ph_from_sim or ph_from_raw)
+    if ph_path is not None and ph_path.exists():
+        spectrum = parse_phonon_data(ph_path)
+    elif phonon_file is not None:
+        raise FileNotFoundError(f"Phonon file not found: {phonon_file}")
+    elif ph_path is not None and not ph_path.exists():
+        LOGGER.warning(f"Phonon file {ph_path} not found, running without phonon data.")
+
+    # Load raw ZFS
+    if sim_folder is not None:
+        if isinstance(sim_folder, (list, tuple)) and len(sim_folder) > 1:
+            datasets = []
+            for sf in sim_folder:
+                ds = parse_zfs_simulation_dataset(
+                    sim_folder=sf,
+                    calc_method=calc_method,
+                    zfs_folder=zfs_folder,
+                    pert_scale=pert_scale,
+                    defect=defect,
+                    cell_size=cell_size,
+                )
+                datasets.append(ds)
+
+            raw_data = datasets[0]
+            for other_ds in datasets[1:]:
+                raw_data = raw_data.combine(other_ds)
+        else:
+            sf = sim_folder[0] if isinstance(sim_folder, (list, tuple)) else sim_folder
+            raw_data = parse_zfs_simulation_dataset(
+                sim_folder=sf,
+                calc_method=calc_method,
+                zfs_folder=zfs_folder,
+                order=order,
+                pert_scale=pert_scale,
+                defect=defect,
+                cell_size=cell_size,
+            )
+    elif combine_orders:
+        # Combine 1d + 2d raw datasets into one RawZFSData with both
+        # first_order and second_order perturbation sets.
+        raw_data = RawZFSData.load([str(raw_zfs_file_1d), str(raw_zfs_file_2d)])
+    elif raw_zfs_file is not None:
+        raw_data = parse_zfs_dataset_npz(raw_zfs_file)
+    else:
+        raise ValueError("Must provide either sim_folder, raw_zfs_file, raw_zfs_file_1d+2d, or coupling_file.")
+
+    defect = raw_data.defect or defect or "defect"
+    cell_size = raw_data.cell_size or cell_size or 0
+    n_needed = raw_mode_count(raw_data)
+
+    # A phonon file found by searching (not passed explicitly) must hold the raw data's modes;
+    # otherwise it belongs to another cell and the registry is asked instead.
+    if spectrum is not None and phonon_file is None and not _covers(spectrum, n_needed):
+        LOGGER.warning(
+            f"Phonon file {ph_path} has {spectrum.n_modes} modes but the raw data uses mode indices up to "
+            f"{n_needed}; it belongs to another cell. Looking for a matching one in the registry."
+        )
+        spectrum, ph_path = None, None
+
+    # Registry fallback: resolve phonon by defect/cell when no file found next to the inputs
+    if spectrum is None:
+        reg = ensure_db()
+        reg_hits = find_phonon(reg, str(defect), cell_size)
+        candidates = [(p, parse_phonon_data(p)) for p in reg_hits]
+        fitting = [(p, s) for p, s in candidates if _covers(s, n_needed)]
+        for p, s in candidates:
+            if not _covers(s, n_needed):
+                LOGGER.warning(
+                    f"  Registry: {p} is registered for {defect}_{cell_size} but has {s.n_modes} modes, "
+                    f"fewer than the raw data's {n_needed}; skipped (wrong registry entry?)"
+                )
+        if fitting:
+            ph_path, spectrum = fitting[0]
+            if len(fitting) > 1:
+                LOGGER.warning(
+                    f"  Registry: {len(fitting)} phonon files fit {defect}_{cell_size}; using {ph_path} "
+                    "(pass --phonon-file to pick another)"
+                )
+            else:
+                LOGGER.info(f"  Registry: using phonon file {ph_path} for {defect}_{cell_size}")
+        elif candidates:
+            LOGGER.warning(f"  Registry: no phonon file for {defect}_{cell_size} covers the raw data's modes")
+
+    return raw_data, spectrum, ph_path
+
+
+DEFAULT_SIGMA_MEV = 7.5  # Gaussian broadening of the spectral functions (meV)
+
+
+def temperature_grid(
+    t_start: float = 0.0, t_end: float = 300.0, t_step: float = 10.0, temperatures: Sequence[float] | None = None
+) -> np.ndarray:
+    """The run's temperature grid in K: ``temperatures`` if given, else t_start..t_end (finer below 1 K)."""
+    if temperatures is not None:
+        return np.asarray(temperatures, dtype=float)
+    if t_start < 1.0:
+        low_range = np.arange(t_start, 1.0, max(0.01, t_step / 100))
+        high_range = np.arange(1.0 + t_step, t_end + t_step, t_step)
+        return np.unique(np.concatenate([low_range, high_range]))
+    return np.arange(t_start, t_end + t_step, t_step)
+
+
+def compute_rates(
+    coupling_path: str | Path,
+    temps: Sequence[float],
+    *,
+    sigma: float = DEFAULT_SIGMA_MEV,
+    two_phonon_file: str | Path | None = None,
+    has_second_order: bool = False,
+) -> tuple[np.ndarray, dict, dict]:
+    """Transition rates of a coupling file at each temperature.
+
+    ``sigma`` (meV) broadens each mode in the 1D and 2D spectral functions,
+    standing in for the continuous phonon bands of a macroscopic crystal. The
+    2D grid spacing follows it (at most sigma/4, 0.5 meV by default); the rates
+    do not depend on the spacing beyond that resolution. Returns the
+    temperatures with a result, the total rates per process and the
+    directional rates.
+    """
+    two_ph_p = Path(two_phonon_file) if two_phonon_file else None
+    calculator = TransitionRate(str(coupling_path), two_phonon_data_file=two_ph_p)
+    two_phonon = two_ph_p is not None or has_second_order
+    # For combined 1d+2d runs the coupling file itself carries the second-order
+    # coefficients (V2_*); make sure the calculator sees them as the 2-phonon source.
+    if two_ph_p is None and has_second_order:
+        calculator.data_2ph = calculator.data
+
+    omega, J_0_pm, J_p_m, J_0_0 = calculator.get_spectral_density(res=0.02, sigma=sigma)
+    if two_phonon:
+        omega_x, omega_y, J2_0_pm, J2_p_m, J2_0_0 = calculator.get_2d_spectral_density(
+            res=min(0.5, sigma / 4), sigma=sigma
+        )
+    omega_zfs = calculator.data["zfs"] / CONSTANTS["meV2J"]
+
+    rate_results = {k: {"0_1": [], "1_-1": []} for k in ("first_order", "second_order", "two_phonon")}
+    directional_results = {k: [] for k in ("0_to_1", "0_to_-1", "1_to_0", "-1_to_0", "1_to_-1", "-1_to_1")}
+    valid_temps = []
+    for T in temps:
+        calculator.compute_transition_rates(T, omega, J_0_pm, J_p_m, J_0_0, omega_zfs)
+        if two_phonon:
+            calculator.compute_two_phonon_rates(T, omega_x, omega_y, J2_0_pm, J2_p_m, J2_0_0, omega_zfs)
+        total_rates = calculator.get_total_rates()
+        dir_rates = calculator.get_directional_rates()
+        if total_rates and dir_rates:
+            for k, val in dir_rates.items():
+                directional_results[k].append(val)
+            for ord_k in rate_results:
+                for trans_k in ("0_1", "1_-1"):
+                    rate_results[ord_k][trans_k].append(total_rates[ord_k][trans_k])
+            valid_temps.append(float(T))
+    return np.asarray(valid_temps, dtype=float), rate_results, directional_results
+
+
+def solve_t1(directional_rates_path: str | Path, init_state: str) -> tuple[np.ndarray, np.ndarray]:
+    """ODE-fit and eigenvalue T1 (s) at each temperature of a directional-rates file."""
+    dynamics = RelaxationDynamics(init_state=INIT_POPULATIONS[init_state], rates_data=str(directional_rates_path))
+    t1_fit = np.asarray(dynamics.compute_T1_range(), dtype=float)
+    t1_eig = np.asarray(
+        [dynamics.get_T1_eigenval(temp_index=i)[0] for i in range(len(dynamics.temperatures))], dtype=float
+    )
+    return t1_fit, t1_eig
 
 
 def run_full_pipeline(
@@ -188,7 +396,9 @@ def run_full_pipeline(
     run_name: str | None = None,
     save_plots: bool = True,
     show_plots: bool = False,
-    debug: bool = False,
+    exclude_inconsistent_pairs: bool = False,
+    degenerate_pairs_from_symmetry: bool = False,
+    sigma: float = DEFAULT_SIGMA_MEV,
 ) -> dict[str, Any]:
     """
     Executes the entire end-to-end pipeline:
@@ -230,7 +440,9 @@ def run_full_pipeline(
             run_name=run_name,
             save_plots=save_plots,
             show_plots=show_plots,
-            debug=debug,
+            exclude_inconsistent_pairs=exclude_inconsistent_pairs,
+            degenerate_pairs_from_symmetry=degenerate_pairs_from_symmetry,
+            sigma=sigma,
         )
     finally:
         if owns_db_logging:
@@ -261,7 +473,9 @@ def _execute_pipeline(
     run_name: str | None = None,
     save_plots: bool = True,
     show_plots: bool = False,
-    debug: bool = False,
+    exclude_inconsistent_pairs: bool = False,
+    degenerate_pairs_from_symmetry: bool = False,
+    sigma: float = DEFAULT_SIGMA_MEV,
 ) -> dict[str, Any]:
     """Pipeline body of :func:`run_full_pipeline` (DB logging already owned)."""
 
@@ -319,76 +533,25 @@ def _execute_pipeline(
         else:
             analyzed = list(dims)
     else:
-        # Load phonons
-        sim_p = sim_folder[0] if isinstance(sim_folder, (list, tuple)) else sim_folder
-        ph_from_sim = find_default_phonon_file(Path(sim_p)) if sim_p else None
-        ph_from_raw = find_default_phonon_file_for_raw(raw_zfs_file) if raw_zfs_file is not None else None
-        ph_path = Path(phonon_file) if phonon_file else (ph_from_sim or ph_from_raw)
-        if ph_path is not None and ph_path.exists():
-            spectrum = parse_phonon_data(ph_path)
-        elif phonon_file is not None:
-            raise FileNotFoundError(f"Phonon file not found: {phonon_file}")
-        elif ph_path is not None and not ph_path.exists():
-            LOGGER.warning(f"Phonon file {ph_path} not found, running without phonon data.")
-
-        # Load raw ZFS
-        if sim_folder is not None:
-            if isinstance(sim_folder, (list, tuple)) and len(sim_folder) > 1:
-                datasets = []
-                for sf in sim_folder:
-                    ds = parse_zfs_simulation_dataset(
-                        sim_folder=sf,
-                        calc_method=calc_method,
-                        zfs_folder=zfs_folder,
-                        pert_scale=pert_scale,
-                        defect=defect,
-                        cell_size=cell_size,
-                    )
-                    datasets.append(ds)
-
-                raw_data = datasets[0]
-                for other_ds in datasets[1:]:
-                    raw_data = raw_data.combine(other_ds)
-            else:
-                sf = sim_folder[0] if isinstance(sim_folder, (list, tuple)) else sim_folder
-                raw_data = parse_zfs_simulation_dataset(
-                    sim_folder=sf,
-                    calc_method=calc_method,
-                    zfs_folder=zfs_folder,
-                    order=order,
-                    pert_scale=pert_scale,
-                    defect=defect,
-                    cell_size=cell_size,
-                )
-        elif combine_orders:
-            # Combine 1d + 2d raw datasets into one RawZFSData with both
-            # first_order and second_order perturbation sets.
-            raw_data = RawZFSData.load([str(raw_zfs_file_1d), str(raw_zfs_file_2d)])
+        raw_data, spectrum, ph_path = load_raw_inputs(
+            sim_folder=sim_folder,
+            raw_zfs_file=raw_zfs_file,
+            raw_zfs_file_1d=raw_zfs_file_1d,
+            raw_zfs_file_2d=raw_zfs_file_2d,
+            phonon_file=phonon_file,
+            calc_method=calc_method,
+            zfs_folder=zfs_folder,
+            order=order,
+            pert_scale=pert_scale,
+            defect=defect,
+            cell_size=cell_size,
+        )
+        if combine_orders:
             order = 2  # both orders present; run combined analysis
-        elif raw_zfs_file is not None:
-            raw_data = parse_zfs_dataset_npz(raw_zfs_file)
-        else:
-            raise ValueError("Must provide either sim_folder, raw_zfs_file, raw_zfs_file_1d+2d, or coupling_file.")
-
+        if not (raw_data.first_order or raw_data.second_order):
+            raise ValueError(f"No perturbation tensors in the input ({raw_zfs_file or sim_folder}); nothing to analyze")
         defect = raw_data.defect or defect or "defect"
         cell_size = raw_data.cell_size or cell_size or 0
-
-        # Registry fallback: resolve phonon by defect/cell when no file found next to the inputs
-        if spectrum is None:
-            reg = ensure_db()
-            reg_hits = find_phonon(reg, str(defect), cell_size)
-            if len(reg_hits) == 1:
-                ph_path = reg_hits[0]
-                spectrum = parse_phonon_data(ph_path)
-                LOGGER.info(f"  Registry: using phonon file {ph_path} for {defect}_{cell_size}")
-            elif len(reg_hits) > 1:
-                LOGGER.debug(
-                    f"  Registry: {len(reg_hits)} phonon files match {defect}_{cell_size}; "
-                    "pass --phonon-file to pick one. First match used: "
-                    f"{reg_hits[0]}"
-                )
-                ph_path = reg_hits[0]
-                spectrum = parse_phonon_data(ph_path)
 
         # Resolve calc_method (avoid string "None")
         if calc_method in (None, "None", ""):
@@ -485,11 +648,18 @@ def _execute_pipeline(
 
     # ── 5. Calculate Spin-Phonon Couplings ───────────────────────────────────
     coupling_path = run_dir / "spin_phonon_coupling.npz"
+    inconsistent_pairs: list[tuple[int, int, float, float]] = []
+    symmetry_derived_pairs: list[tuple[int, int]] = []
     if coupling_data is not None:
         coupling_data.save(coupling_path)
         LOGGER.info(f"[2/5] Using provided coupling data -> {coupling_path.name}")
     else:
-        manager = ZFSManager(raw_data=raw_data, spectrum=spectrum, debug=debug)
+        manager = ZFSManager(
+            raw_data=raw_data,
+            spectrum=spectrum,
+            exclude_inconsistent_pairs=exclude_inconsistent_pairs,
+            degenerate_pairs_from_symmetry=degenerate_pairs_from_symmetry,
+        )
         if calc_method:
             manager.calc_method = calc_method
         out_base = str(run_dir / "spin_phonon_coupling")
@@ -509,68 +679,20 @@ def _execute_pipeline(
         else:
             manager.process_first_order_perturbations(output_filename=out_base)
         coupling_data = SpinPhononCouplingData.load(coupling_path)
+        inconsistent_pairs = manager.inconsistent_pairs
+        symmetry_derived_pairs = manager.symmetry_derived_pairs
         LOGGER.info(f"[2/5] Computed and saved spin-phonon coupling -> {coupling_path.name}")
 
     # ── 6. Transition Rates Calculation ──────────────────────────────────────
-    if temperatures is None:
-        if t_start < 1.0:
-            low_range = np.arange(t_start, 1.0, max(0.01, t_step / 100))
-            high_range = np.arange(1.0 + t_step, t_end + t_step, t_step)
-            temps = np.unique(np.concatenate([low_range, high_range]))
-        else:
-            temps = np.arange(t_start, t_end + t_step, t_step)
-    else:
-        temps = np.asarray(temperatures, dtype=float)
-
-    two_ph_p = Path(two_phonon_file) if two_phonon_file else None
-    calculator = TransitionRate(str(coupling_path), two_phonon_data_file=two_ph_p)
-
-    # For combined 1d+2d runs the coupling file itself carries the second-order
-    # coefficients (V2_*); make sure the calculator sees them as the 2-phonon source.
-    if two_ph_p is None and coupling_data is not None and coupling_data.has_second_order:
-        calculator.data_2ph = calculator.data
-
-    omega, J_0_pm, J_p_m, J_0_0 = calculator.get_spectral_density(res=0.02, sigma=7.5)
-    if two_ph_p is not None or (coupling_data is not None and coupling_data.has_second_order):
-        omega_x, omega_y, J2_0_pm, J2_p_m, J2_0_0 = calculator.get_2d_spectral_density(res=0.5, sigma=7.5)
-    else:
-        omega_x = omega_y = J2_0_pm = J2_p_m = J2_0_0 = None
-
-    omega_zfs = calculator.data["zfs"] / CONSTANTS["meV2J"]
-
-    rate_results = {
-        "first_order": {"0_1": [], "1_-1": []},
-        "second_order": {"0_1": [], "1_-1": []},
-        "two_phonon": {"0_1": [], "1_-1": []},
-    }
-    directional_results = {
-        "0_to_1": [],
-        "0_to_-1": [],
-        "1_to_0": [],
-        "-1_to_0": [],
-        "1_to_-1": [],
-        "-1_to_1": [],
-    }
-    valid_temps = []
-
-    LOGGER.info(f"[3/5] Computing transition rates for {len(temps)} temperature points...")
-    for T in temps:
-        calculator.compute_transition_rates(T, omega, J_0_pm, J_p_m, J_0_0, omega_zfs)
-        if two_ph_p is not None or (coupling_data is not None and coupling_data.has_second_order):
-            calculator.compute_two_phonon_rates(T, omega_x, omega_y, J2_0_pm, J2_p_m, J2_0_0, omega_zfs)
-
-        total_rates = calculator.get_total_rates()
-        dir_rates = calculator.get_directional_rates()
-
-        if total_rates and dir_rates:
-            for k, val in dir_rates.items():
-                directional_results[k].append(val)
-            for ord_k in ["first_order", "second_order", "two_phonon"]:
-                for trans_k in ["0_1", "1_-1"]:
-                    rate_results[ord_k][trans_k].append(total_rates[ord_k][trans_k])
-            valid_temps.append(float(T))
-
-    valid_temps_arr = np.asarray(valid_temps, dtype=float)
+    temps = temperature_grid(t_start, t_end, t_step, temperatures)
+    LOGGER.info(f"[3/5] Computing transition rates for {len(temps)} temperature points (sigma {sigma:g} meV)...")
+    valid_temps_arr, rate_results, directional_results = compute_rates(
+        coupling_path,
+        temps,
+        sigma=sigma,
+        two_phonon_file=two_phonon_file,
+        has_second_order=coupling_data is not None and coupling_data.has_second_order,
+    )
 
     # Save rates
     rates_path = run_dir / "transition_rates.npz"
@@ -603,12 +725,7 @@ def _execute_pipeline(
     t1_paths: dict[str, Path] = {}
     for state in init_states:
         LOGGER.info(f"[4/5] Solving population relaxation dynamics (initial state: {state})...")
-        dynamics = RelaxationDynamics(init_state=INIT_POPULATIONS[state], rates_data=str(dir_rates_path))
-
-        t1_fit_arr = np.asarray(dynamics.compute_T1_range(), dtype=float)
-        t1_eig_arr = np.asarray(
-            [dynamics.get_T1_eigenval(temp_index=i)[0] for i in range(len(valid_temps_arr))], dtype=float
-        )
+        t1_fit_arr, t1_eig_arr = solve_t1(dir_rates_path, state)
         rates_fit = np.where(np.isfinite(t1_fit_arr) & (t1_fit_arr > 0), 1.0 / t1_fit_arr, np.nan)
         rates_eig = np.where(np.isfinite(t1_eig_arr) & (t1_eig_arr > 0), 1.0 / t1_eig_arr, np.nan)
 
@@ -620,6 +737,8 @@ def _execute_pipeline(
             calc_method=calc_method,
             order=analyzed,
             init_state=state,
+            pert_scale=pert_eff if pert_eff is not None else np.nan,
+            sigma_mev=sigma,
             temperatures=valid_temps_arr,
             t1_fit=t1_fit_arr,
             t1_eigenval=t1_eig_arr,
@@ -657,6 +776,20 @@ def _execute_pipeline(
             "points": len(valid_temps_arr),
         },
         "init_state": init_states,
+        "sigma_mev": sigma,
+        # Second-order entries departing from the first-order expectation (run folders, 1-based).
+        "inconsistent_second_order": {
+            "excluded": bool(inconsistent_pairs) and exclude_inconsistent_pairs,
+            "pairs": [
+                {"pair": f"{i + 1}_{j + 1}", "alpha": round(a, 3), "remainder_mhz": round(r, 3)}
+                for i, j, a, r in inconsistent_pairs
+            ],
+        },
+        # Degenerate (Ex, Ey) pairs (1-based modes) whose couplings came from the Ex-Ex curvature.
+        "degenerate_pairs_from_symmetry": {
+            "enabled": degenerate_pairs_from_symmetry,
+            "pairs": [f"{x + 1}_{y + 1}" for x, y in symmetry_derived_pairs],
+        },
     }
 
     info_path = run_dir / "run_info.json"

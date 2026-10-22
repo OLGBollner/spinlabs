@@ -1,7 +1,6 @@
 """Tests for phonon resolution in create_perturbation_tree."""
 
 import re
-import subprocess
 
 from pathlib import Path
 
@@ -161,7 +160,6 @@ def test_perturbation_input_incar_is_restart_ready(tmp_path):
         out=defect,
         pert=[0.0001],
         phonon=defect / "data" / "phonon_data.npz",
-        scripts_dir=Path("scripts/cluster"),
         array_jobs=1,
         force=True,
         vasp_binary=Path("/bin/true"),
@@ -214,7 +212,6 @@ def test_perturbation_input_incar_corrects_algo_none(tmp_path, caplog):
         out=defect,
         pert=[0.0001],
         phonon=defect / "data" / "phonon_data.npz",
-        scripts_dir=Path("scripts/cluster"),
         array_jobs=1,
         force=True,
         vasp_binary=Path("/bin/true"),
@@ -245,7 +242,6 @@ def test_perturbation_input_incar_corrects_isym_with_ldmatrix(tmp_path, caplog):
         out=defect,
         pert=[0.0001],
         phonon=defect / "data" / "phonon_data.npz",
-        scripts_dir=Path("scripts/cluster"),
         array_jobs=1,
         force=True,
         vasp_binary=Path("/bin/true"),
@@ -255,32 +251,6 @@ def test_perturbation_input_incar_corrects_isym_with_ldmatrix(tmp_path, caplog):
     assert re.search(r"^\s*ISYM\s*=\s*3\b", incar, re.M | re.I)
     out = caplog.text
     assert "WARN" in out and "ISYM=2" in out and "LDMATRIX" in out
-
-
-def test_cli_expands_tilde_binary(tmp_path, monkeypatch):
-    """--vasp-binary ../... must resolve to an absolute path baked into the
-    sbatch scripts, like --phonon."""
-    defect = tmp_path / "NV_512"
-    (defect / "data").mkdir(parents=True)
-    _save(_tiny([10.0, 20.0, 30.0], ["A1", "Ex", "A2"]), defect / "data" / "phonon_data.npz")
-    for stage in ("ZFS_hyp", "ZFS_occup"):
-        d = defect / stage
-        d.mkdir()
-        (d / "INCAR").write_text("ENCUT = 520\n")
-        for name in ("POSCAR", "KPOINTS", "POTCAR"):
-            (d / name).write_text(name + "\n")
-        (d / "OUTCAR").write_text("Elapsed time (sec):   100.000\n")
-    args = [str(defect), "--pert", "0.0001", "--array-jobs", "1", "--vasp-binary", "../me/vasp_std"]
-    r = subprocess.run(
-        ["python", str(Path("scripts/cluster/create_perturbation_tree.py").resolve()), *args],
-        capture_output=True,
-        text=True,
-        cwd=tmp_path,
-        env={"PYTHONPATH": str(Path("src").resolve()), "PATH": __import__("os").environ["PATH"]},
-    )
-    assert r.returncode == 0, r.stdout + r.stderr
-    sbatch = next(defect.rglob("run_perturbation_first_order.sh"))
-    assert f"binary={tmp_path.parent}/me/vasp_std" in sbatch.read_text()
 
 
 def test_forbid_relaxation_corrects_ibrion():
@@ -307,12 +277,13 @@ def test_forbid_relaxation_leaves_static_incars_alone():
 
 # ---------- verify_setup (pre-sbatch INCAR + script checks) ----------
 
+REPO = Path(__file__).resolve().parents[1]  # this checkout, which holds the runner
+
 
 def _verify_folder(
     tmp_path,
     script="DEFECT=NV_512\nBINARY={bin}\n"
-    "PHONON_PATH={phon}\nCREATE_STRUCT=/bin/true\n"
-    "GET_N_MODES=/bin/true\nPERT=0.025\n",
+    "PHONON_PATH={phon}\nSPINLABS_REPO={repo}\nPERT=0.025\n",
     incar="LDMATRIX = .TRUE.\nALGO = Normal\nIBRION = -1\n",
 ):
     from spinlabs.vasp.verify import verify_setup
@@ -321,7 +292,7 @@ def _verify_folder(
     phon.write_bytes(b"x")
     (tmp_path / "input").mkdir()
     (tmp_path / "input" / "INCAR").write_text(incar)
-    (tmp_path / "run_x.sh").write_text(script.format(bin="/bin/true", phon=str(tmp_path / "phon.npz")))
+    (tmp_path / "run_x.sh").write_text(script.format(bin="/bin/true", phon=str(tmp_path / "phon.npz"), repo=REPO))
     return verify_setup(tmp_path, "run_x.sh")
 
 
@@ -368,9 +339,8 @@ def test_verify_setup_lowercase_vars_and_preflight_lines(tmp_path):
         "# config block\n"
         "DEFECT=NV_512\n"
         "binary=/bin/true\n"
-        "create_struct=/bin/true\n"
-        "get_n_modes=/bin/true\n"
         "PHONON_PATH={phon}\n"
+        "SPINLABS_REPO={repo}\n"
         "PERT=0.025\n"
         'fail() {{ echo "FATAL: $*"; exit 1; }}\n'
         "case $DEFECT in *'<defect>'*) fail \"DEFECT placeholder\" ;; esac\n"
@@ -386,3 +356,18 @@ def test_verify_setup_flags_real_unfilled_placeholder(tmp_path):
         tmp_path, script="DEFECT=<defect>\nbinary=/bin/true\nPHONON_PATH=/tmp/phon.npz\nPERT=0.025\n"
     )
     assert any(":1 placeholder not filled: <defect>" in p for p in problems)
+
+
+def test_verify_setup_flags_repo_without_runner(tmp_path):
+    other = tmp_path / "not_spinlabs"
+    other.mkdir()
+    problems = _verify_folder(
+        tmp_path,
+        script="BINARY={bin}\nPHONON_PATH={phon}\nSPINLABS_REPO=" + str(other) + "\nPERT=0.025\n",
+    )
+    assert any(p.startswith("FAIL") and "SPINLABS_REPO has no scripts/cluster/perturbation_runner.sh" in p for p in problems)
+
+
+def test_verify_setup_requires_spinlabs_repo(tmp_path):
+    problems = _verify_folder(tmp_path, script="BINARY={bin}\nPHONON_PATH={phon}\nPERT=0.025\n")
+    assert any(p.startswith("FAIL") and "SPINLABS_REPO not set" in p for p in problems)

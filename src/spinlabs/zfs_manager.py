@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import warnings
 from pathlib import Path
 from typing import Any, Optional, Union
@@ -14,6 +15,16 @@ from spinlabs.logging_utils import get_logger
 
 LOGGER = get_logger(__name__)
 
+# Healthy second-order entries have alpha ~ 0 (|alpha| < 0.05 for NV_64): the
+# curvature is far below the linear response at the perturbation amplitude.
+# Over-displaced runs give alpha ~ 1 or more; runs whose change cancels the
+# linear response (wrong state or geometry) give alpha ~ -1. Both are excluded.
+INCONSISTENT_ALPHA = 0.5
+# alpha is the remainder relative to the expected change; below this size (Frobenius
+# norm, MHz) the expected change is too small for that ratio to mean anything, so
+# the entry is not judged.
+MIN_EXPECTED_MHZ = 0.05
+
 
 class ZFSManager:
     """
@@ -26,7 +37,8 @@ class ZFSManager:
         self,
         spectrum: Optional[PhononSpectrum] = None,
         raw_data: Optional[RawZFSData] = None,
-        debug: bool = False,
+        exclude_inconsistent_pairs: bool = False,
+        degenerate_pairs_from_symmetry: bool = False,
     ):
         # spectrum is the primary dataclass
         if spectrum is not None:
@@ -99,6 +111,23 @@ class ZFSManager:
         self.calc_method: Optional[str] = (
             raw_data.calc_method or raw_data.metadata.get("calc_method") if raw_data else None
         )
+        self.mass_weighted: bool = raw_data.mass_weighted if raw_data else True
+        self.exclude_inconsistent_pairs = exclude_inconsistent_pairs
+        # Second-order entries failing the linear-response check, as
+        # (i, j, alpha, |remainder| in MHz) with 0-based modes; see calculate_second_order_derivatives.
+        self.inconsistent_pairs: list[tuple[int, int, float, float]] = []
+        # Replace each degenerate Ex-Ey second-order coupling by its symmetry value
+        # from the Ex-Ex curvature; see _degenerate_pairs_from_symmetry.
+        self.degenerate_pairs_from_symmetry = degenerate_pairs_from_symmetry
+        # (Ex, Ey) pairs, 0-based, whose couplings were replaced that way.
+        self.symmetry_derived_pairs: list[tuple[int, int]] = []
+        if not self.mass_weighted:
+            if spectrum is None:
+                raise ValueError(
+                    "Non-mass-weighted perturbation data needs the phonon spectrum (eigenvectors and masses) "
+                    "to correct the perturbation amplitudes"
+                )
+            LOGGER.info("Perturbations are not mass-weighted: scaling q by each mode's effective sqrt(mass)")
 
         # Processed ZFS data in defect principal frame
         self.zfs_relaxed: Optional[np.ndarray] = None  # Shape (3, 3) in J
@@ -106,8 +135,6 @@ class ZFSManager:
         self.first_order: dict[int, dict[str, Any]] = {}  # 1D perturbations
         self.second_order: dict[tuple[int, int], dict[str, Any]] = {}  # 2D perturbations
         self.treated_modes: set[int] = set()
-
-        self.debug = debug
 
         if raw_data is not None:
             self._ingest_raw_data(raw_data)
@@ -143,7 +170,7 @@ class ZFSManager:
 
     def get_phonon_pert(self, pert_scale_si: float) -> Optional[dict[str, Any]]:
         if self.spectrum is not None:
-            return self.spectrum.get_phonon_pert(pert_scale_si)
+            return self.spectrum.get_phonon_pert(pert_scale_si, mass_weighted=self.mass_weighted)
         return None
 
     def _ingest_raw_data(self, raw: RawZFSData):
@@ -307,35 +334,6 @@ class ZFSManager:
 
         self.treated_modes = self._get_symmetry_factor()
 
-    def _estimate_q0(self) -> Optional[float]:
-        """Estimate the uniform q0 = amp^2 / (2*f) from modes present in both the
-        raw 1D data and the spectrum (their original indices)."""
-        if self.spectrum is None or self.spectrum.original_indices is None:
-            return None
-        freqs = np.asarray(self.spectrum.frequencies_mev)
-        oas = np.asarray(self.spectrum.original_indices, int)
-        vals = []
-        for sp, entry in self.first_order.items():
-            if sp >= len(freqs):
-                continue
-            pert = entry.get("pert")
-            if pert is None:
-                pert = (
-                    getattr(self.raw_data.first_order.get(int(oas[sp]), None), "pert", None)
-                    if hasattr(self, "raw_data")
-                    else None
-                )
-            if pert is None:
-                continue
-            amp = pert[0] if isinstance(pert, (list, tuple, np.ndarray)) else pert
-            if amp is None or amp == 0:
-                continue
-            vals.append(float(amp) ** 2 / (2.0 * freqs[sp]))
-        if not vals:
-            return None
-        vals = np.array(vals)
-        return float(np.median(vals))
-
     def _get_symmetry_factor(self) -> set[int]:
         total_modes = self.nmodes
         n_1d = len(self.zfs_tensors)
@@ -416,7 +414,7 @@ class ZFSManager:
                     V_0_pm[twin] = np.where(V_0_pm[twin] == 0, V_0_pm[i], V_0_pm[twin])
                     V_p_m[twin] = np.where(V_p_m[twin] == 0, V_p_m[i], V_p_m[twin])
 
-            if self.debug:
+            if LOGGER.isEnabledFor(logging.DEBUG):
                 self._debug_derivs(
                     dD_dq / CONSTANTS["MHz2J"],
                     q,
@@ -468,6 +466,30 @@ class ZFSManager:
             D_qi_qj = item["tensor"]
             d2D_dqidqj = (D_qi_qj - self.zfs_relaxed) / (q_i * q_j) - dD_qi / q_j - dD_qj / q_i
 
+            # The pair displaces Q_i + Q_j, so its ZFS change is expected to be the
+            # single-mode changes dD_i q_i + dD_j q_j plus a small remainder (the
+            # cross curvature). An A2 mode cannot change D linearly (C3v), so its
+            # single-mode change is pure curvature, which grows as Q^2: along 2Q
+            # (the diagonal pair) it is 4x the change at Q, not 2x. A remainder that
+            # is a sizeable multiple of the expectation (|alpha| > INCONSISTENT_ALPHA)
+            # means the response is strongly nonlinear at this Q, or the run was
+            # displaced too far or is stale; the geometry check tells these apart.
+            if i in self.treated_modes and j in self.treated_modes:
+                if i == j and sym_i == "A2":
+                    expected = 4.0 * dD_qi * q_i
+                else:
+                    expected = dD_qi * q_i + dD_qj * q_j
+                remainder = (D_qi_qj - self.zfs_relaxed) - expected
+                norm = np.sum(expected * expected)
+                if norm > (MIN_EXPECTED_MHZ * CONSTANTS["MHz2J"]) ** 2:
+                    alpha = float(np.sum(remainder * expected) / norm)
+                    if abs(alpha) > INCONSISTENT_ALPHA:
+                        self.inconsistent_pairs.append(
+                            (i, j, alpha, float(np.linalg.norm(remainder) / CONSTANTS["MHz2J"]))
+                        )
+                        if self.exclude_inconsistent_pairs:
+                            continue
+
             self._check_symmetry(d2D_dqidqj, (sym_i, sym_j), (i, j))
 
             zfs_2nd_derivs[i, j] = d2D_dqidqj
@@ -510,7 +532,7 @@ class ZFSManager:
             V_p_m_2nd[j, i] = V_p_m_2nd[i, j]
             V_0_pm_2nd[j, i] = V_0_pm_2nd[i, j]
 
-            if self.debug:
+            if LOGGER.isEnabledFor(logging.DEBUG):
                 self._debug_derivs(
                     d2D_dqidqj / CONSTANTS["MHz2J"],
                     item["pert"],
@@ -521,12 +543,77 @@ class ZFSManager:
                     V_p_m_2nd[i, j] / CONSTANTS["MHz2J"],
                 )
 
+        if self.degenerate_pairs_from_symmetry:
+            self._degenerate_pairs_from_symmetry(zfs_2nd_derivs, V_0_0_2nd, V_p_m_2nd, V_0_pm_2nd)
+
+        if self.inconsistent_pairs:
+            if self.exclude_inconsistent_pairs:
+                action, hint = "Excluded (--exclude-inconsistent-pairs)", ""
+            else:
+                action = "Kept"
+                hint = "; check the geometry with compare_displacement.py, --exclude-inconsistent-pairs drops them"
+            LOGGER.warning(
+                f"{action} {len(self.inconsistent_pairs)} of {len(self.zfs_tensors_2d)} second-order entries "
+                f"whose ZFS change departs from the one expected from the first-order runs by a multiple of it "
+                f"(|alpha| > {INCONSISTENT_ALPHA}: strongly nonlinear at this Q, or an over-displaced or stale "
+                f"run{hint}). Run folders (1-based): "
+                + ", ".join(f"{i + 1}_{j + 1} (alpha={a:.2f})" for i, j, a, _ in self.inconsistent_pairs)
+            )
+
         LOGGER.info("Symmetry adjusted coefficients (2nd order):")
         LOGGER.info(f"V_00:  {np.sum(V_0_0_2nd > 0)}")
         LOGGER.info(f"V_pm:  {np.sum(V_p_m_2nd > 0)}")
         LOGGER.info(f"V_0pm: {np.sum(V_0_pm_2nd > 0)}")
 
         return zfs_2nd_derivs, V_0_0_2nd, V_p_m_2nd, V_0_pm_2nd
+
+    def _degenerate_pairs_from_symmetry(
+        self, zfs_2nd_derivs: np.ndarray, V_0_0_2nd: np.ndarray, V_p_m_2nd: np.ndarray, V_0_pm_2nd: np.ndarray
+    ) -> None:
+        """Replace the coupling of each degenerate Ex-Ey pair by its C3v value from the Ex-Ex curvature.
+
+        Within one E pair the quadratic terms Qx^2, Qy^2, QxQy span A1 + E, so the
+        second-order response has one constant per irrep of D (A1, and the two E
+        parts), all of them present in d2D/dQx^2. For any orientation of the pair
+        in its degenerate subspace this gives |w_xy| = |w_xx| and |p_xy| = |p_xx|,
+        with w = (D_xx - D_yy) + 2i D_xy and p = D_xz + i D_yz, while the A1 part of
+        d2D/dQxdQy vanishes. The Ex-Ey V-coefficients therefore follow from the
+        Ex-Ex derivative alone, so the Ex-Ey runs are not needed. Only the
+        V-coefficients are replaced; zfs_2nd_derivs keeps the computed tensors.
+        Pairs without an Ex-Ex derivative (not run, or excluded) keep their values.
+        """
+        spectrum = self.spectrum
+        if spectrum is None or spectrum.deg_groups is None or spectrum.symmetries is None:
+            LOGGER.warning("Degenerate Ex-Ey pairs from symmetry need the phonon spectrum; skipped.")
+            return
+
+        syms = list(spectrum.symmetries)
+        n_pairs = 0
+        self.symmetry_derived_pairs = []
+        for group in spectrum.deg_groups:
+            if len(group) != 2 or {syms[k] for k in group} != {"Ex", "Ey"}:
+                continue
+            n_pairs += 1
+            x, y = group if syms[group[0]] == "Ex" else group[::-1]
+            d2D_xx = zfs_2nd_derivs[x, x]
+            if not np.any(d2D_xx):
+                continue
+
+            diff_in_plane = d2D_xx[0, 0] - d2D_xx[1, 1]
+            off_diag_in_plane = d2D_xx[0, 1]
+            # The Ex-Ey formulas of calculate_second_order_derivatives, with |w| and |p| of the Ex-Ex derivative.
+            V_0_0_2nd[x, y] = V_0_0_2nd[y, x] = 0.0
+            V_p_m_2nd[x, y] = V_p_m_2nd[y, x] = 0.5 * np.sqrt(diff_in_plane**2 + 4.0 * off_diag_in_plane**2)
+            V_0_pm_2nd[x, y] = V_0_pm_2nd[y, x] = np.sqrt(d2D_xx[0, 2] ** 2 + d2D_xx[1, 2] ** 2) / (
+                2.0 * np.sqrt(2)
+            )
+            self.symmetry_derived_pairs.append((int(x), int(y)))
+
+        n_kept = n_pairs - len(self.symmetry_derived_pairs)
+        LOGGER.info(
+            f"Degenerate Ex-Ey couplings from symmetry: {len(self.symmetry_derived_pairs)} of {n_pairs} pairs"
+            + (f" ({n_kept} without an Ex-Ex derivative keep their computed values)" if n_kept else "")
+        )
 
     def process_first_order_perturbations(self, output_filename: Optional[str] = None) -> list[str]:
         if not self.zfs_tensors:
@@ -714,6 +801,7 @@ class ZFSManager:
                 # Tensors stored on the manager were ingested via parse/load,
                 # which apply the 3/2 correction for approx data at intake.
                 spin_correction_applied=normalize_calc_method(self.calc_method) == "defect_band_approx",
+                mass_weighted=self.mass_weighted,
                 order=kwargs.get("order", 1 if first is not None else 2),
                 ground_state_zfs=gs_tensor,
                 eigen_rotation=self.eigen_rotation,

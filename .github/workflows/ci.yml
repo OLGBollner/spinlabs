@@ -30,3 +30,8 @@ jobs:
 
       - name: Run tests
         run: pytest -q
+
+      # The cluster scripts have their own suite, outside testpaths, so plain pytest skips it.
+      - name: Run cluster-script tests
+        if: success() || failure()  # also when the package tests failed
+        run: pytest -q scripts/tests

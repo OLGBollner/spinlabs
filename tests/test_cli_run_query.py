@@ -78,7 +78,9 @@ def _query_args(tmp_path, out_root, run_name="spi17"):
         two_phonon=None,
         phonon_file=None,
         output_root=str(out_root),
-        debug=False,
+        exclude_inconsistent_pairs=False,
+        degenerate_pairs_from_symmetry=False,
+        sigma=7.5,
     )
 
 
@@ -120,10 +122,11 @@ def test_run_query_run_name_per_dataset(tmp_path):
     names = ["NV_512_raw_zfs_data_all_bands_1d.npz", "NV_512_raw_zfs_data_rpa_1d.npz"]
     data_dir = tmp_path / "data"
     data_dir.mkdir()
-    for name in names:
+    # Two configurations (different pert-scales), so --query runs both.
+    for name, pert in zip(names, (0.025, 0.1)):
         data = _make_raw_zfs(data_dir, name)
         register_file(conn, data, "packaged_zfs", defect="NV", cell_size=512,
-                      calc_method="all_bands", pert_order=[1], pert_scale=0.025)
+                      calc_method="all_bands", pert_order=[1], pert_scale=pert)
     _make_phonon_alongside(data_dir / names[0])
 
     out = tmp_path / "out"

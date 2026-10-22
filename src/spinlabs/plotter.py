@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
@@ -405,10 +406,14 @@ _CALC_METHOD_LABELS = {"all_bands": "", "defect_band_approx": "decontaminated", 
 _INIT_STATE_LABELS = {"ms_0": "$m_s=0$", "ms_1": "$m_s=+1$", "ms_-1": "$m_s=-1$"}
 
 
-def _t1_label_parts(defect: str, cell_size: str, calc_method: str, init_state: str) -> tuple[str, list[str]]:
+def _t1_label_parts(
+    defect: str, cell_size: str, calc_method: str, init_state: str, pert: float | None = None
+) -> tuple[str, list[str]]:
     """Return the legend head (e.g. ``NV 512``) and readable detail strings for one T1 curve."""
     head = f"{defect} {cell_size}".strip()
     details = []
+    if pert is not None:
+        details.append(f"pert {pert:g}")
     method = _CALC_METHOD_LABELS.get(calc_method, calc_method.replace("_", " "))
     if method:
         details.append(method)
@@ -417,12 +422,25 @@ def _t1_label_parts(defect: str, cell_size: str, calc_method: str, init_state: s
     return head, details
 
 
+def _t1_pert_scale(data: np.lib.npyio.NpzFile, path: Path) -> float | None:
+    """Perturbation scale of a T1 file: its ``pert_scale`` key, else a ``pert_<x>`` folder in its path."""
+    if "pert_scale" in data.files and np.isfinite(float(data["pert_scale"])):
+        return float(data["pert_scale"])
+    for part in reversed(path.resolve().parts):
+        match = re.fullmatch(r"pert_(-?[0-9.]+)", part)
+        if match:
+            return float(match.group(1))
+    return None
+
+
 def plot_t1(
     inputs: Sequence[str | Path],
     output_path: str | Path | None = None,
     show: bool = False,
     plain_name: bool = False,
     init_states: Sequence[str] | None = None,
+    rate: bool = False,
+    log_temperature: bool = False,
 ) -> tuple[plt.Figure, plt.Axes]:
     """
     Plot T_1 curves from one or more npz files or run directories in a single figure.
@@ -433,7 +451,9 @@ def plot_t1(
     are built from the npz metadata: details shared by every curve are left
     out, the rest go in each label. No title is set. The output filename gets the metadata
     appended unless ``plain_name`` is set. With ``init_states`` only curves of
-    those initial states (e.g. ``["ms_0"]``) are drawn.
+    those initial states (e.g. ``["ms_0"]``) are drawn. With ``rate`` the relaxation
+    rate 1/T_1 (s^-1) is drawn instead, and ``log_temperature`` puts temperature on a log
+    axis, where Raman processes show up as power laws (T^5, T^7).
     """
     fig, ax = plt.subplots(figsize=(10, 6))
     colors = plt.cm.tab10.colors
@@ -457,6 +477,7 @@ def plot_t1(
         cell_size = str(data.get("cell_size", ""))
         calc_method = str(data.get("calc_method", ""))
         init_state = str(data.get("init_state", ""))
+        pert = _t1_pert_scale(data, path)
         if init_states is not None and init_state not in init_states:
             continue
 
@@ -467,13 +488,15 @@ def plot_t1(
                 break
 
         meta_parts.extend(x.replace(" ", "-") for x in (defect, cell_size, calc_method, init_state) if x)
+        if pert is not None:
+            meta_parts.append(f"pert-{pert:g}")
 
         if t1_fit is None:
             continue
         valid = np.isfinite(t1_fit) & (t1_fit > 0)
         if not np.any(valid):
             continue
-        head, details = _t1_label_parts(defect, cell_size, calc_method, init_state)
+        head, details = _t1_label_parts(defect, cell_size, calc_method, init_state, pert)
         curves.append((temperatures[valid], t1_fit[valid], head or path.stem, details))
 
     if not curves:
@@ -486,11 +509,14 @@ def plot_t1(
     for idx, (temps, t1, head, details) in enumerate(curves):
         own = [d for d in details if d not in shared]
         label = f"{head} ({', '.join(own)})" if own else head
-        ax.plot(temps, t1, "-", color=colors[idx % len(colors)], linewidth=2, label=label)
+        values = 1.0 / t1 if rate else t1
+        ax.plot(temps, values, "-", color=colors[idx % len(colors)], linewidth=2, label=label)
 
     ax.set_xlabel("Temperature (K)", fontsize=16)
-    ax.set_ylabel(r"$T_1$ (s)", fontsize=16)
+    ax.set_ylabel(r"$1/T_1$ (s$^{-1}$)" if rate else r"$T_1$ (s)", fontsize=16)
     ax.set_yscale("log")
+    if log_temperature:
+        ax.set_xscale("log")
     ax.grid(True, which="major", linestyle=":", alpha=0.6)
     ax.tick_params(axis="both", which="both", direction="in", labelsize=12)
     ax.legend(loc="best", frameon=True, fontsize=14)

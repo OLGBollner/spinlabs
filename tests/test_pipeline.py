@@ -99,12 +99,7 @@ def test_run_full_pipeline_from_coupling_data(tmp_path, dummy_coupling_file):
     assert (fig_dir / "coupling_spectral_2d.png").exists()
     assert (fig_dir / "t1_vs_temperature.png").exists()
 
-    # Test plot_results script functions on this run directory
-    import sys
-
-    repo_root = Path(__file__).resolve().parent.parent
-    if str(repo_root) not in sys.path:
-        sys.path.insert(0, str(repo_root))
+    # the plotter's per-run functions write to another folder too
     from spinlabs.plotter import plot_run_coupling, plot_run_rates, plot_run_t1
 
     custom_fig_dir = tmp_path / "custom_figures"
@@ -333,3 +328,26 @@ def test_pipeline_registers_one_run_for_all_init_states(tmp_path, dummy_coupling
     assert rows == [('["ms_0", "ms_-1"]', str(Path(res["run_dir"]).resolve()))]
     # The state filter matches any state the run solved.
     assert registry.find_runs(registry.ensure_db(), [("init_state", "ms_-1")]) == [Path(rows[0][1])]
+
+
+def test_input_without_perturbation_tensors_fails_before_creating_a_run(tmp_path):
+    raw = RawZFSData(defect="NV", cell_size=512, pert_scale=0.05, calc_method="all_bands", order=1,
+                     ground_state_zfs=ZFSTensor(matrix=np.diag([-1000.0, -1000.0, 2000.0]), unit="MHz"))
+    raw_file = raw.save(tmp_path / "NV_512_raw_zfs_data_all_bands_1d.npz")
+
+    with pytest.raises(ValueError, match="No perturbation tensors"):
+        run_full_pipeline(raw_zfs_file=raw_file, output_root=tmp_path / "runs", save_plots=False)
+    assert not (tmp_path / "runs").exists()
+
+
+def test_sigma_is_used_and_recorded(tmp_path, dummy_coupling_file):
+    results = {}
+    for sigma in (7.5, 1.0):
+        res = run_full_pipeline(coupling_file=dummy_coupling_file, output_root=tmp_path / f"runs_{sigma:g}",
+                                temperatures=[50.0, 150.0], sigma=sigma, save_plots=False)
+        info = json.loads((res["run_dir"] / "run_info.json").read_text())
+        assert info["sigma_mev"] == sigma
+        t1 = np.load(res["t1_paths"]["ms_0"])
+        assert float(t1["sigma_mev"]) == sigma
+        results[sigma] = np.load(res["rates_path"], allow_pickle=True)["two_phonon"].item()["0_1"]
+    assert not np.allclose(results[7.5], results[1.0])

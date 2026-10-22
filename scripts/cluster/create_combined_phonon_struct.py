@@ -9,6 +9,8 @@ from __future__ import annotations
 import argparse
 import sys
 
+import numpy as np
+
 from spinlabs.vasp import apply_combined_perturbation, load_phonon_data, load_poscar, write_perturbed_poscar
 
 
@@ -20,6 +22,12 @@ def main() -> int:
     ap.add_argument("mode_j", type=int, help="Second phonon mode index (1-based)")
     ap.add_argument("amplitude", type=float, help="Perturbation amplitude in Angstroms")
     ap.add_argument("-o", "--output", default=None, help="Output filename")
+    ap.add_argument(
+        "--no-mass-weighted",
+        dest="mass_weighted",
+        action="store_false",
+        help="displace by Q*e instead of Q*e/sqrt(m), as the earliest runs (e.g. NV_64) were",
+    )
     args = ap.parse_args()
 
     try:
@@ -30,7 +38,7 @@ def main() -> int:
             phonon_data.eigenvectors,
             args.mode_i,
             args.mode_j,
-            phonon_data.atomic_masses,
+            phonon_data.atomic_masses if args.mass_weighted else np.ones(len(phonon_data.atomic_masses)),
             args.amplitude,
             original_indices=phonon_data.original_indices,
         )

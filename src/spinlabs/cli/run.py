@@ -5,8 +5,10 @@ from itertools import product
 from pathlib import Path
 
 from spinlabs.cli import add_verbosity_args
+from spinlabs.cli.coupling import build_coupling_parser
+from spinlabs.cli.sigma_scan import build_sigma_scan_parser
 from spinlabs.models import normalize_calc_method
-from spinlabs.pipeline import run_full_pipeline
+from spinlabs.pipeline import DEFAULT_SIGMA_MEV, run_full_pipeline
 from spinlabs.registry import ensure_db, parse_orders
 from spinlabs.relaxation_dynamics import INIT_STATES, normalize_init_state
 
@@ -27,8 +29,9 @@ def build_run_parser(parser: argparse.ArgumentParser) -> None:
     inputs.add_argument(
         "--query",
         action="store_true",
-        help="Run every packaged dataset in the registry matching the filters "
-        "(--defect/--cell-size/--method/--order/--pert-scale); files already analyzed are skipped. "
+        help="Run the newest packaged dataset of every configuration in the registry matching the filters "
+        "(--defect/--cell-size/--method/--order/--pert-scale). Analyzed data is run again into a new "
+        "run folder; plot/table with --latest to use the newest. "
         "All other run options (temperatures, --init-state, --plot, ...) apply to each dataset",
     )
 
@@ -90,10 +93,47 @@ def build_run_parser(parser: argparse.ArgumentParser) -> None:
         "With --query it is rejected when the query matches more than one dataset",
     )
     opt.add_argument("--plot", action="store_true", help="Generate plots inside <run_dir>/figures/")
-    opt.add_argument("-d", "--debug", action="store_true", help="Print debug details during derivative calculations")
+    opt.add_argument(
+        "--sigma",
+        type=float,
+        default=DEFAULT_SIGMA_MEV,
+        metavar="MEV",
+        help=f"Gaussian broadening of the spectral functions in meV, standing in for the continuous phonon "
+        f"bands of a macroscopic crystal (default: {DEFAULT_SIGMA_MEV:g}; see run sigma-scan)",
+    )
+    opt.add_argument(
+        "--exclude-inconsistent-pairs",
+        action="store_true",
+        help="Drop second-order entries whose ZFS change departs from the one expected from the first-order runs "
+        "by a multiple of it (strongly nonlinear modes, or over-displaced or stale runs); by default they are kept "
+        "and listed",
+    )
+    # the old default; kept so existing commands still parse
+    opt.add_argument("--keep-inconsistent-pairs", action="store_true", help=argparse.SUPPRESS)
+    opt.add_argument(
+        "--degenerate-pairs-from-symmetry",
+        action="store_true",
+        help="Take the second-order coupling of each degenerate Ex-Ey pair from its Ex-Ex derivative (C3v "
+        "symmetry) instead of the computed Ex-Ey entry, so those runs are not needed",
+    )
     add_verbosity_args(opt)
 
     parser.set_defaults(func=_run)
+
+    # Optional stage subcommands; plain `spinlabs run ...` is the full pipeline.
+    stages = parser.add_subparsers(dest="stage", metavar="STAGE", title="stages (optional)")
+    build_coupling_parser(
+        stages.add_parser(
+            "coupling",
+            help="Only compute the spin-phonon couplings (ZFSManager) and print a summary; nothing is saved",
+        )
+    )
+    build_sigma_scan_parser(
+        stages.add_parser(
+            "sigma-scan",
+            help="T1 against the spectral broadening sigma for one dataset; nothing is saved",
+        )
+    )
 
 
 _METHOD_MAP = {"all": ("all_bands", "ZFS_hyp"), "approx": ("defect_band_approx", "ZFS_occup")}
@@ -198,13 +238,19 @@ def _run(args: argparse.Namespace) -> None:
         run_name=args.run_name,
         save_plots=args.plot,
         show_plots=False,
-        debug=args.debug,
+        exclude_inconsistent_pairs=args.exclude_inconsistent_pairs,
+        degenerate_pairs_from_symmetry=args.degenerate_pairs_from_symmetry,
+        sigma=args.sigma,
     )
 
 
 def _run_query(args: argparse.Namespace) -> None:
     """
     Resolve packaged data from the registry and run each dataset.
+
+    Each configuration runs on its newest package, even when it was analyzed
+    before: every run gets a new timestamped folder, and ``--latest`` picks
+    the newest when plotting or tabulating.
 
     Every option accepted by ``run`` is forwarded to the pipeline exactly as in the
     non-query path, so ``--query`` never silently computes something other than what
@@ -213,9 +259,12 @@ def _run_query(args: argparse.Namespace) -> None:
     ``--phonon-file`` is optional here -- when omitted the pipeline resolves the phonon
     from the registry; when given it takes precedence, as it does for any other input mode.
     """
-    from spinlabs.registry import find_packaged
+    from spinlabs.registry import find_packaged, unregistered_packages, unregistered_warning
 
     conn = ensure_db()
+    warning = unregistered_warning(unregistered_packages(conn))
+    if warning:
+        LOGGER.warning(warning)
     # Multi-valued filters query every combination; each dataset is run with
     # the filter values that matched it.
     files: list[tuple[Path, str | None, int | None, float | None]] = []
@@ -230,43 +279,69 @@ def _run_query(args: argparse.Namespace) -> None:
             calc_method=normalize_calc_method(method),
             pert_scale=pert_scale,
             pert_order=parse_orders(args.order) if args.order else None,
+            latest=True,
         )
         for path in matched:
             if path not in seen:
                 seen.add(path)
                 files.append((path, defect, cell_size, pert_scale))
     if not files:
-        LOGGER.warning("No unanalyzed packaged data matching the query.")
+        LOGGER.warning("No packaged data matching the query.")
         return
     # With multiple matched datasets, disambiguate the run-name so each
     # dataset lands in its own <run_name>_<stem> directory instead of
     # silently sharing/creating duplicate <run_name>_1, _2, ... folders.
-    for path, defect, cell_size, pert_scale in files:
-        LOGGER.info(f"Running: {path}")
+    failed: list[tuple[Path, Exception]] = []
+    for n, (path, defect, cell_size, pert_scale) in enumerate(files, start=1):
+        # Shown without -v, so warnings and errors below can be traced to their dataset.
+        print(f"[{n}/{len(files)}] {path}", flush=True)
         method = _infer_method_from_file(Path(path))
         if args.run_name and len(files) > 1:
             run_name = f"{args.run_name}_{Path(path).stem}"
         else:
             run_name = args.run_name
-        run_full_pipeline(
-            raw_zfs_file=str(path),
-            phonon_file=args.phonon_file,
-            two_phonon_file=args.two_phonon,
-            calc_method=_METHOD_MAP[method][0],
-            zfs_folder=_METHOD_MAP[method][1],
-            order=parse_orders(args.order) if args.order else None,
-            pert_scale=pert_scale,
-            defect=defect,
-            cell_size=cell_size,
-            t_start=args.t_start,
-            t_end=args.t_end,
-            t_step=args.t_step,
-            temperatures=args.temperatures,
-            init_state=args.init_state,
-            output_root=args.output_root if args.output_root else "runs",
-            run_name=run_name,
-            save_plots=args.plot,
-            show_plots=False,
-            debug=args.debug,
+        try:
+            _run_one_query_dataset(args, path, method, pert_scale, defect, cell_size, run_name)
+        except Exception as error:  # one bad dataset must not stop the rest of the query
+            LOGGER.error(f"Failed: {path}: {error}")
+            failed.append((Path(path), error))
+    print(f"Done: {len(files) - len(failed)} of {len(files)} dataset(s) analyzed.")
+    if failed:
+        raise SystemExit(
+            f"{len(failed)} dataset(s) failed:\n" + "\n".join(f"  {path}: {error}" for path, error in failed)
         )
-    LOGGER.info(f"Done: {len(files)} dataset(s).")
+
+
+def _run_one_query_dataset(
+    args: argparse.Namespace,
+    path: Path,
+    method: str,
+    pert_scale: float | None,
+    defect: str | None,
+    cell_size: int | None,
+    run_name: str | None,
+) -> None:
+    """Run the pipeline on one packaged dataset with the query's options."""
+    run_full_pipeline(
+        raw_zfs_file=str(path),
+        phonon_file=args.phonon_file,
+        two_phonon_file=args.two_phonon,
+        calc_method=_METHOD_MAP[method][0],
+        zfs_folder=_METHOD_MAP[method][1],
+        order=parse_orders(args.order) if args.order else None,
+        pert_scale=pert_scale,
+        defect=defect,
+        cell_size=cell_size,
+        t_start=args.t_start,
+        t_end=args.t_end,
+        t_step=args.t_step,
+        temperatures=args.temperatures,
+        init_state=args.init_state,
+        output_root=args.output_root if args.output_root else "runs",
+        run_name=run_name,
+        save_plots=args.plot,
+        show_plots=False,
+        exclude_inconsistent_pairs=args.exclude_inconsistent_pairs,
+        degenerate_pairs_from_symmetry=args.degenerate_pairs_from_symmetry,
+        sigma=args.sigma,
+    )

@@ -21,6 +21,7 @@ def add_verbosity_args(parser: argparse.ArgumentParser) -> None:
 
 
 def build_parser() -> argparse.ArgumentParser:
+    from spinlabs.cli.listing import build_list_parser
     from spinlabs.cli.package import build_package_parser
     from spinlabs.cli.plotting import build_plot_parser
     from spinlabs.cli.run import build_run_parser
@@ -37,6 +38,10 @@ def build_parser() -> argparse.ArgumentParser:
     table_parser = subparsers.add_parser("table", help="LaTeX table commands")
     build_table_parser(table_parser.add_subparsers(dest="command", required=True))
 
+    build_list_parser(
+        subparsers.add_parser("list", help="When the latest packaged data, runs and plots were made")
+    )
+
     build_package_parser(subparsers.add_parser("package", help="Package (or with --scan, only parse) raw ZFS simulation data into a single .npz"))
 
     return parser
@@ -48,9 +53,6 @@ def main(argv: list[str] | None = None) -> None:
     # Configure console logging once at the entry point so every subcommand
     # (including ones without their own flags, e.g. `plot`) gets sane levels.
     verbosity = getattr(args, "verbose", 0)
-    if getattr(args, "debug", False):
-        # --debug dumps go out as DEBUG records; show them on the console.
-        verbosity = max(verbosity, 2)
     quiet = getattr(args, "quiet", False)
     configure_logging(verbosity=verbosity, quiet=quiet)
     args.func(args)

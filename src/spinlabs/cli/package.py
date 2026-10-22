@@ -21,6 +21,15 @@ from spinlabs.models import RawZFSData, normalize_calc_method
 from spinlabs.registry import ensure_db, register_file
 from spinlabs.pack_convergence import pack_convergence
 from spinlabs.parsers import parse_zfs_simulation_dataset, split_defect_folder_name
+from spinlabs.vasp.run_checks import BASIS_SOURCE
+from spinlabs.vasp.settings import (
+    compare_settings,
+    outcar_settings,
+    read_incar,
+    start_differences,
+    summary_line,
+    tree_settings,
+)
 from spinlabs.vasp.trees import default_phonon
 
 from spinlabs.logging_utils import get_logger
@@ -83,6 +92,12 @@ def build_package_parser(parser: argparse.ArgumentParser) -> None:
         help="ZFS calculation method(s) to package: all or approx (default: all).",
     )
     parser.add_argument(
+        "--no-mass-weighted",
+        action="store_true",
+        help="The perturbed structures were displaced by Q*e instead of Q*e/sqrt(m) (runs made before mass "
+        "weighting was added). Stored as mass_weighted=False; the analysis then corrects the amplitudes.",
+    )
+    parser.add_argument(
         "--output-root",
         type=Path,
         default=Path("data"),
@@ -139,12 +154,13 @@ def _run(args: argparse.Namespace) -> None:
         if found and phonon is not None:
             phonons[(found[0].defect, found[0].cell_size)] = phonon
     _print_scan_summary(scanned, phonons)
+    _print_mass_weighting(scanned, cli_unweighted=getattr(args, "no_mass_weighted", False))
     if args.scan or not scanned:
         return
     if not getattr(args, "yes", False) and not _confirm("Save the perturbation data to file? (Y/n): "):
         print("Nothing saved.")
         return
-    _save_raw(scanned, args.output_root)
+    _save_raw(scanned, args.output_root, cli_unweighted=getattr(args, "no_mass_weighted", False))
     _save_phonons(phonons, args.output_root)
 
 
@@ -156,6 +172,41 @@ class _Scanned(NamedTuple):
     calc_method: str
     pert_scale: float
     raw: RawZFSData
+    # MASS_WEIGHTED of the trees' job scripts (True/False), None when they do not say
+    mass_weighted: bool | None = None
+
+
+_MASS_WEIGHTED_LINE = re.compile(r"^\s*MASS_WEIGHTED\s*=\s*(\S+)", re.M)
+
+
+def tree_mass_weighted(basis: Path) -> bool | None:
+    """MASS_WEIGHTED from a tree's run_perturbation_*.sh: True (1, the default), False (0), None if absent."""
+    for script in sorted(basis.glob("run_perturbation_*_order.sh")):
+        match = _MASS_WEIGHTED_LINE.search(script.read_text(errors="replace"))
+        if match:
+            return match.group(1).strip("'\"") != "0"
+    return None
+
+
+def _mass_weighted_of(scanned: _Scanned, cli_unweighted: bool) -> bool:
+    """The convention a dataset is saved with: its trees' setting, else the --no-mass-weighted flag."""
+    return scanned.mass_weighted if scanned.mass_weighted is not None else not cli_unweighted
+
+
+def _print_mass_weighting(scanned: list[_Scanned], cli_unweighted: bool) -> None:
+    """Which displacement convention each dataset is saved with, and any conflict with the flag."""
+    if not scanned:
+        return
+    print("Displacements:")
+    for s in scanned:
+        name = f"{s.defect}_{s.cell_size} {s.calc_method} pert {s.pert_scale:g}"
+        weighted = _mass_weighted_of(s, cli_unweighted)
+        source = "trees' MASS_WEIGHTED" if s.mass_weighted is not None else (
+            "--no-mass-weighted" if cli_unweighted else "default")
+        print(f"  {name}: {'Q*e/sqrt(m) (mass-weighted)' if weighted else 'Q*e (not mass-weighted)'}  [{source}]")
+        if s.mass_weighted is True and cli_unweighted:
+            print("    !! --no-mass-weighted ignored: the trees' job scripts say MASS_WEIGHTED=1")
+    print()
 
 
 def _confirm(prompt: str) -> bool:
@@ -209,8 +260,11 @@ def _scan_raw(args: argparse.Namespace, defect_folder: Path, methods: list[str])
         if not pert_scales:
             warnings.warn(f"No perturbation data found in {defect_folder.name} ({calc_method}); skipping")
             continue
+        ground = _ground_state_settings(defect_folder, calc_method)
         for pert_scale in pert_scales:
             raw = None
+            trees = {}
+            weighting: set[bool] = set()
             for o in orders:
                 if pert_scale not in datasets[o]:
                     continue
@@ -218,11 +272,39 @@ def _scan_raw(args: argparse.Namespace, defect_folder: Path, methods: list[str])
                     sim_folder=datasets[o][pert_scale], order=_ORDER_NUM[o], calc_method=method, verbose=True
                 )
                 raw = data if raw is None else raw.combine(data)
-            if raw is None:
+                basis = datasets[o][pert_scale] / calc_method
+                if basis.is_dir():
+                    trees[_ORDER_DIRS[o]] = tree_settings(basis)
+                    mw = tree_mass_weighted(basis)
+                    if mw is not None:
+                        weighting.add(mw)
+            if raw is None or not (raw.first_order or raw.second_order):
                 warnings.warn(f"No data parsed for {defect_folder.name} ({calc_method}, pert {pert_scale:g}); skipping")
                 continue
-            found.append(_Scanned(defect, cell_size, calc_method, pert_scale, raw))
+            raw.vasp_settings = {
+                "ground_state": ground,
+                "trees": trees,
+                "problems": compare_settings(ground, trees),
+                "start_differences": start_differences(ground, trees),
+            }
+            if len(weighting) > 1:
+                warnings.warn(
+                    f"{defect_folder.name} {calc_method} pert {pert_scale:g}: first and second order trees use "
+                    "different MASS_WEIGHTED settings; their displacements are not consistent"
+                )
+            mw = weighting.pop() if len(weighting) == 1 else None
+            found.append(_Scanned(defect, cell_size, calc_method, pert_scale, raw, mw))
     return found
+
+
+def _ground_state_settings(defect_folder: Path, calc_method: str) -> dict[str, str] | None:
+    """VASP settings of the ground-state ZFS run (<defect>/ZFS_hyp or ZFS_occup), or None if absent."""
+    folder = defect_folder / BASIS_SOURCE[calc_method]
+    if (folder / "INCAR").is_file():
+        return read_incar(folder / "INCAR")
+    if (folder / "OUTCAR").is_file():
+        return outcar_settings(folder / "OUTCAR")
+    return None
 
 
 # Full-spectrum phonon files, most preferred first. Symmetry-reduced spectra
@@ -287,13 +369,75 @@ def _print_scan_summary(scanned: list[_Scanned], phonons: dict[tuple[str, int], 
         print("\nPhonon data:")
         for (defect, cell_size), path in phonons.items():
             print(f"{f'{defect}_{cell_size}':<12} {path}")
+    _print_settings(scanned)
+    if phonons:
+        _print_shape_flags(scanned, phonons)
     print()
 
 
-def _save_raw(scanned: list[_Scanned], output_root: Path) -> None:
+def _print_settings(scanned: list[_Scanned]) -> None:
+    """Ground-state vs run VASP settings per dataset; every difference is a warning."""
+    print("\nVASP settings (ground state vs the runs differenced against it):")
+    for s in scanned:
+        settings = s.raw.vasp_settings or {}
+        name = f"{s.defect}_{s.cell_size} {s.calc_method} pert {s.pert_scale:g}"
+        ground, trees = settings.get("ground_state"), settings.get("trees", {})
+        n_runs = sum(t["n_runs"] for t in trees.values())
+        if not n_runs:
+            print(f"  {name}: no run INCAR or OUTCAR found; not checked")
+            continue
+        where = "" if ground is not None else " (no ground-state INCAR/OUTCAR found)"
+        problems = settings.get("problems", [])
+        start = settings.get("start_differences", [])
+        status = "consistent" if not problems else f"{len(problems)} difference(s)"
+        print(f"  {name}: {status}; {summary_line(ground, trees)}{where}")
+        for problem in problems:
+            print(f"    !! {problem}")
+            LOGGER.info(f"{name}: {problem}")  # kept in the run log; printed once above
+        if start:
+            print(f"    starting point only (ISTART/ICHARG, same converged result): {len(start)} difference(s)")
+            for line in start:
+                LOGGER.info(f"{name}: starting point: {line}")
+
+
+def _print_shape_flags(scanned: list[_Scanned], phonons: dict[tuple[str, int], Path]) -> None:
+    """Flag entries whose ZFS change has the wrong shape for their modes' symmetry."""
+    from spinlabs.parsers import parse_phonon_data
+    from spinlabs.vasp.run_checks import dataset_shape_flags
+
+    print("\nD-tensor shape check (A1/A2 modes may only change the A1 part, E modes mainly the E part):")
+    spectra = {}
+    for key, path in phonons.items():
+        try:
+            spectra[key] = parse_phonon_data(path)
+        except Exception as error:  # a diagnostic must never stop packaging
+            print(f"  {key[0]}_{key[1]}: cannot read {path} ({error.__class__.__name__}); shape check skipped")
+    for s in scanned:
+        spectrum = spectra.get((s.defect, s.cell_size))
+        if spectrum is None:
+            continue
+        name = f"{s.defect}_{s.cell_size} {s.calc_method} pert {s.pert_scale:g}"
+        try:
+            flags = dataset_shape_flags(s.raw, spectrum)
+        except Exception as error:
+            print(f"  {name}: shape check failed ({error.__class__.__name__}: {error}); skipped")
+            continue
+        if not flags:
+            print(f"  {name}: all entries OK")
+            continue
+        shown = ", ".join(folder for folder, _ in flags[:15]) + (", ..." if len(flags) > 15 else "")
+        print(f"  {name}: {len(flags)} suspicious run folder(s): {shown}")
+        for folder, problem in flags:
+            LOGGER.info(f"{name}: runs/{folder}: {problem}")  # per-run reasons with -v
+        if len(flags) > 15:
+            print("    (every folder and its reason: rerun with -v)")
+
+
+def _save_raw(scanned: list[_Scanned], output_root: Path, cli_unweighted: bool = False) -> None:
     """Write each scanned dataset to <output_root>/<defect>_<cell>/pert_<p>/<method>/<date>/ and register it."""
     date_dir = date.today().strftime("%Y%m%d")
     for s in scanned:
+        s.raw.mass_weighted = _mass_weighted_of(s, cli_unweighted)
         pert_folder = output_root / f"{s.defect}_{s.cell_size}" / f"pert_{s.pert_scale:g}" / s.calc_method / date_dir
         pert_folder.mkdir(parents=True, exist_ok=True)
         save_path = s.raw.save(pert_folder / s.raw._default_name())
@@ -433,6 +577,8 @@ def _run_conv(args: argparse.Namespace, defect_folder: Path) -> None:
     for opt in ("orders", "pert", "method"):
         if getattr(args, opt, defaults[opt]) != defaults[opt]:
             LOGGER.warning(f"--{opt.replace('_', '-')} is ignored with --conv")
+    if getattr(args, "no_mass_weighted", False):
+        LOGGER.warning("--no-mass-weighted is ignored with --conv")
     conv_roots = sorted(p for p in defect_folder.glob("convergence*") if p.is_dir())
     if not conv_roots:
         raise SystemExit(f"No convergence* folders found under {defect_folder}")

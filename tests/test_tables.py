@@ -9,7 +9,7 @@ from spinlabs.tables import _fmt_ms, collect_t1_rows, format_t1_table, t1_at
 
 
 def _add_run(conn, tmp_path, name, *, t1_s, init_state="ms_0", method="all_bands", defect="NV",
-             cell=512, pert=0.1, legacy=False):
+             cell=512, pert=0.1, legacy=False, order=(1, 2)):
     """Register a completed run whose T1 is ``t1_s`` seconds at every temperature."""
     run_dir = tmp_path / "runs" / f"{defect}_{cell}" / method / f"pert_{pert}" / name
     run_dir.mkdir(parents=True)
@@ -23,7 +23,7 @@ def _add_run(conn, tmp_path, name, *, t1_s, init_state="ms_0", method="all_bands
         temperatures=temps,
         t1_fit=np.full_like(temps, t1_s),
     )
-    meta = {} if legacy else {"defect": defect, "cell": cell, "pert": pert, "order": [1, 2]}
+    meta = {} if legacy else {"defect": defect, "cell": cell, "pert": pert, "order": list(order)}
     run_id = registry.register_run(conn, run_dir=run_dir, method=method, init_state=init_state, **meta)
     registry.finish_run(conn, run_id, "done")
     return run_dir
@@ -187,3 +187,61 @@ def test_t1_file_without_state_is_skipped_when_run_solved_several(tmp_path):
     _add_stateless_run(conn, tmp_path, "run", ["ms_1", "ms_0"])
 
     assert collect_t1_rows(conn) == []
+
+
+def test_merged_rows_prefer_runs_with_second_order_and_report_the_choice(tmp_path, caplog):
+    conn = registry.ensure_db()
+    _add_run(conn, tmp_path, "full", t1_s=0.005, pert=0.1)
+    _add_run(conn, tmp_path, "first_only", t1_s=5000.0, pert=0.025, order=(1,))  # newer, but no 2nd order
+
+    (row,) = collect_t1_rows(conn, by_pert=False)
+
+    assert row.t1 == {"ms_0": pytest.approx(0.005)}
+    assert "runs at pert 0.025 orders [1], pert 0.1 orders [1, 2]; using pert 0.1 orders [1, 2]" in caplog.text
+
+
+def test_newer_complete_run_still_wins(tmp_path, caplog):
+    conn = registry.ensure_db()
+    _add_run(conn, tmp_path, "old", t1_s=0.005, pert=0.1)
+    _add_run(conn, tmp_path, "new", t1_s=0.002, pert=0.025)
+
+    (row,) = collect_t1_rows(conn, by_pert=False)
+
+    assert row.t1 == {"ms_0": pytest.approx(0.002)}
+    assert "using pert 0.025 orders [1, 2]" in caplog.text
+
+
+def test_reruns_of_one_configuration_are_not_reported(tmp_path, caplog):
+    conn = registry.ensure_db()
+    _add_run(conn, tmp_path, "a", t1_s=0.005)
+    _add_run(conn, tmp_path, "b", t1_s=0.004)
+
+    (row,) = collect_t1_rows(conn, by_pert=False)
+
+    assert row.t1 == {"ms_0": pytest.approx(0.004)}
+    assert "runs at" not in caplog.text
+
+
+def test_defect_table_takes_d_from_the_package_of_the_chosen_t1_run(tmp_path, caplog):
+    """D and T1 describe the same data: an older package with another ground state is not used."""
+    from spinlabs.models import RawZFSData, ZFSTensor
+
+    def package(date, d_mhz, pert):
+        gs = np.diag([-d_mhz / 3, -d_mhz / 3, 2 * d_mhz / 3])
+        raw = RawZFSData(defect="NV", cell_size=64, pert_scale=pert, calc_method="all_bands", order=1,
+                         ground_state_zfs=ZFSTensor(matrix=gs, unit="MHz"),
+                         first_order={0: {"tensor": gs, "unit": "MHz"}})
+        path = raw.save(tmp_path / "data" / "NV_64" / f"pert_{pert}" / "all_bands" / date / "NV_64_raw.npz")
+        registry.register_file(conn, path, "packaged_zfs", defect="NV", cell_size=64, calc_method="all_bands",
+                               pert_order=[1], pert_scale=pert)
+        return path
+
+    conn = registry.ensure_db()
+    new = package("20261021", 3000.0, 0.1)
+    package("20261016", 3100.0, -0.025)  # older ground state, registered later
+    run_dir = _add_run(conn, tmp_path, "r", t1_s=1.0, cell=64, pert=0.1)
+    conn.execute("UPDATE runs SET zfs_files = ? WHERE run_dir = ?", (f'["{new}"]', str(run_dir)))
+    conn.commit()
+    out = tmp_path / "defects.tex"
+    cli.main(["table", "defects", "-o", str(out)])
+    assert "3000$^{(a)}$" in out.read_text() and "3100" not in out.read_text()

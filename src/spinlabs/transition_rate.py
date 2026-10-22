@@ -119,7 +119,7 @@ class TransitionRate:
         res = omega[1] - omega[0]
         n = Phonons.bose_einstein(omega, T)
         mask = omega > 0.1
-        delta = MathUtils.broad_delta(omega, omega_zfs, 1)
+        delta = MathUtils.gaussian_density(omega, omega_zfs, 1.0)
 
         f1_factor = (2 * np.pi / (Cn.hbar / CONSTANTS["meV2J"])) * res
         self.transition_rate["first_order"]["0_to_1"] = f1_factor * np.sum(J_0_pm[mask] * n[mask] * delta[mask])
@@ -221,7 +221,10 @@ class TransitionRate:
                 total = 0.0
 
                 for proc, (s, sp) in PHONON_PROCESSES.items():
-                    delta = MathUtils.broad_delta(s * omega_x + sp * omega_y, omega_zfs, res)
+                    # Energy conservation is a line delta(s*w_x + s'*w_y - w_zfs); its width
+                    # only needs to resolve the line on the grid, the physical broadening
+                    # (sigma) is already in J.
+                    delta = MathUtils.gaussian_density(s * omega_x + sp * omega_y, omega_zfs, res)
                     integrand = np.sum(J * bose[proc] * delta)
                     total += integrand
 

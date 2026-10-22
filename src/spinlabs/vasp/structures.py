@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import itertools
+import re
 
 import numpy as np
 from pymatgen.core.structure import Structure
@@ -18,6 +19,54 @@ from spinlabs.parsers import parse_phonon_data
 def load_poscar(poscar_file: str | Path) -> Structure:
     """Load a VASP POSCAR file into a pymatgen Structure."""
     return Poscar.from_file(poscar_file).structure
+
+
+def load_structure(path: str | Path) -> tuple[Structure, Path]:
+    """The structure for ``path`` and the file it was read from.
+
+    An OUTCAR (or a run directory containing one) gives the geometry VASP
+    actually computed: the lattice and ion positions printed in the OUTCAR,
+    with the species from the POSCAR next to it. This is the geometry behind
+    that run's ZFS result, even when POSCAR/CONTCAR were rewritten by a later
+    attempt. A run directory without an OUTCAR, or any other file, is read as
+    POSCAR-format (POSCAR, CONTCAR, ...).
+    """
+    path = Path(path)
+    if path.is_dir():
+        path = path / "OUTCAR" if (path / "OUTCAR").is_file() else path / "POSCAR"
+    if not path.is_file():
+        raise FileNotFoundError(f"Structure file not found: {path}")
+    if path.name.startswith("OUTCAR"):
+        return _outcar_structure(path), path
+    return load_poscar(path), path
+
+
+def _outcar_structure(outcar: Path) -> Structure:
+    """Initial lattice and Cartesian positions from an OUTCAR; species from the run's POSCAR."""
+    species_file = next((outcar.with_name(n) for n in ("POSCAR", "CONTCAR") if outcar.with_name(n).is_file()), None)
+    if species_file is None:
+        raise FileNotFoundError(f"No POSCAR/CONTCAR next to {outcar} to take the species from")
+    species = [site.specie for site in load_poscar(species_file)]
+    markers = {"direct lattice vectors": 3, "position of ions in cartesian coordinates": len(species)}
+    blocks: dict[str, np.ndarray] = {}
+    # Both blocks are in the OUTCAR header: stop reading once they are found.
+    with open(outcar, errors="replace") as f:
+        for line in f:
+            marker = next((m for m in markers if m in line and m not in blocks), None)
+            if marker is None:
+                continue
+            rows = [next(f, "").split() for _ in range(markers[marker])]
+            try:
+                blocks[marker] = np.array([[float(x) for x in row[:3]] for row in rows])
+            except (ValueError, IndexError):
+                break
+            if len(blocks) == len(markers):
+                break
+    missing = [m for m in markers if m not in blocks]
+    if missing:
+        raise ValueError(f"{outcar}: no complete '{missing[0]}' block (unfinished run?)")
+    lattice, positions = blocks["direct lattice vectors"], blocks["position of ions in cartesian coordinates"]
+    return Structure(lattice, species, positions, coords_are_cartesian=True)
 
 
 @dataclass(frozen=True)
@@ -250,7 +299,7 @@ def _resolve_mode(mode_index: int, original_indices: np.ndarray | None, n_modes:
     Symmetry-filtered phonon files keep the *original* mode labels in
     ``original_indices`` while the eigs array is trimmed, so the label is
     not the array row. When original_indices is given (1-based labels,
-    same convention as get_n_modes.py), map label -> row by exact match;
+    same convention as spinlabs.vasp.modes), map label -> row by exact match;
     a missing or non-unique label is a hard error. Otherwise the label
     must simply be within [1, n_modes].
     """
@@ -346,9 +395,12 @@ def compare_displacement(reference: str | Path, perturbed: str | Path) -> dict:
     same phonon/defect tree, so the atom order is identical. Fractional
     differences are wrapped to the nearest periodic image, so a structure
     written into a neighbouring cell by VASP compares as identical.
+
+    Each argument may be a POSCAR/CONTCAR, a run directory, or an OUTCAR;
+    see :func:`load_structure`. ``source`` in the result is the file read.
     """
-    ref = load_poscar(reference)
-    pert = load_poscar(perturbed)
+    ref, _ = load_structure(reference)
+    pert, source = load_structure(perturbed)
     if len(ref) != len(pert):
         raise ValueError(f"Atom count mismatch: {len(ref)} vs {len(pert)}")
     if ref.composition.reduced_formula != pert.composition.reduced_formula:
@@ -368,11 +420,59 @@ def compare_displacement(reference: str | Path, perturbed: str | Path) -> dict:
         "rms": float(np.sqrt((norms**2).mean())),
         "max_index": int(norms.argmax()),
         "n_atoms": len(ref),
+        "source": source,
     }
 
 
-def compare_displacement_cli(reference: str | Path, perturbed: list[str | Path]) -> None:
-    """Print a table of displacement statistics for one or more structures."""
+def run_modes(path: str | Path) -> tuple[int, ...] | None:
+    """1-based modes of a perturbation run folder: ``runs/<i>`` (first order) or ``runs/<i>_<j>`` (pair)."""
+    path = Path(path)
+    folder = path if path.is_dir() else path.parent
+    match = re.fullmatch(r"(\d+)(?:_(\d+))?", folder.name)
+    return tuple(int(g) for g in match.groups() if g) if match else None
+
+
+def run_pert_scale(path: str | Path) -> float | None:
+    """Perturbation scale from a ``pert_<x>`` component of the path, or None."""
+    for part in reversed(Path(path).resolve().parts):
+        match = re.fullmatch(r"pert_(-?[0-9.]+)", part)
+        if match:
+            return float(match.group(1))
+    return None
+
+
+def expected_displacement(
+    spectrum: PhononSpectrum, modes: tuple[int, ...], amplitude: float, *, mass_weighted: bool = True
+) -> np.ndarray:
+    """Per-atom displacement (n_atoms, 3) in Å for ``amplitude`` along each 1-based mode, summed.
+
+    This is what the generator applies: a pair folder i_j displaces along both
+    modes and i_i twice along one. Without mass weighting each mode is displaced
+    by Q * e instead of Q * e / sqrt(m), as the earliest perturbation runs were.
+    """
+    eigs = np.real(np.asarray(spectrum.eigenvectors))
+    masses = np.asarray(spectrum.atomic_masses, dtype=float) if mass_weighted else np.ones(eigs.shape[1])
+    total = np.zeros(eigs.shape[1:])
+    for mode in modes:
+        total += _displacement(eigs, masses, _resolve_mode(mode, spectrum.original_indices, eigs.shape[0]), amplitude)
+    return total
+
+
+def compare_displacement_cli(
+    reference: str | Path,
+    perturbed: list[str | Path],
+    *,
+    spectrum: PhononSpectrum | None = None,
+    amplitude: float | None = None,
+    mass_weighted: bool = True,
+) -> None:
+    """Print a table of displacement statistics for one or more structures.
+
+    With ``spectrum`` each run folder's modes (``runs/<i>`` or ``runs/<i>_<j>``)
+    are compared with the expected displacement at ``amplitude`` (default: the
+    path's ``pert_<x>``): the fitted scale is actual/expected along the expected
+    direction, and the residual is the part of the displacement it leaves out.
+    """
     rows = []
     for path in perturbed:
         try:
@@ -382,16 +482,47 @@ def compare_displacement_cli(reference: str | Path, perturbed: list[str | Path])
             continue
         rows.append((path, stats))
         print(
-            f"{path}\n    max |disp| = {stats['max']:.6f} Å "
+            f"{path}  (geometry from {stats['source'].name})\n    max |disp| = {stats['max']:.6f} Å "
             f"(atom {stats['max_index'] + 1})"
             f"\n    rms        = {stats['rms']:.6f} Å"
-            f"\n    n_atoms    = {stats['n_atoms']}\n"
+            f"\n    n_atoms    = {stats['n_atoms']}"
         )
-    if len(rows) > 1:
+        if spectrum is not None:
+            print(_expected_report(path, stats["disp"], spectrum, amplitude, mass_weighted))
+        print()
+    # Relative sizes need a displaced first entry; identical structures (e.g. a ground state
+    # checked against the tree's input) have nothing to compare.
+    if len(rows) > 1 and rows[0][1]["max"] > 0:
         print("Relative sizes (max |disp|, first entry = 1.000):")
         base = rows[0][1]["max"]
         for path, stats in rows:
             print(f"    {stats['max'] / base:8.3f}  {path}")
+    elif rows and all(stats["max"] == 0 for _, stats in rows):
+        print("All structures are identical to the reference.")
+
+
+def _expected_report(
+    path: str | Path, disp: np.ndarray, spectrum: PhononSpectrum, amplitude: float | None, mass_weighted: bool
+) -> str:
+    modes = run_modes(path)
+    amplitude = amplitude if amplitude is not None else run_pert_scale(path)
+    if modes is None or amplitude is None:
+        return "    expected   = ? (modes need a runs/<i> or runs/<i>_<j> folder, amplitude --pert or pert_<x>)"
+    try:
+        expected = expected_displacement(spectrum, modes, amplitude, mass_weighted=mass_weighted)
+    except ValueError as e:
+        return f"    expected   = ? ({e})"
+    if expected.shape != disp.shape:
+        return f"    expected   = ? (phonon file has {len(expected)} atoms, structure {len(disp)})"
+    norms = np.linalg.norm(expected, axis=1)
+    scale = float(np.sum(disp * expected) / np.sum(expected * expected))
+    residual = float(np.linalg.norm(disp - scale * expected) / np.linalg.norm(disp)) if np.any(disp) else 0.0
+    weighting = "mass-weighted" if mass_weighted else "not mass-weighted"
+    return (
+        f"    expected   = max {norms.max():.6f} Å, rms {np.sqrt((norms**2).mean()):.6f} Å "
+        f"(modes {'+'.join(map(str, modes))}, Q={amplitude:g}, {weighting})"
+        f"\n    scale      = {scale:.3f} x expected (residual {residual:.1%})"
+    )
 
 
 def write_perturbed_poscar(
