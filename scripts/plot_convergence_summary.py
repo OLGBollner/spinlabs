@@ -88,7 +88,9 @@ def analyse(path):
 def plot_defect(defect, packs, output):
     methods = [m for m in METHODS if m in packs]
     fig, axes = plt.subplots(2, len(methods), figsize=(7.5 * len(methods), 9), squeeze=False, sharex=True)
-    q = np.geomspace(1e-3, 0.3, 200)
+    # linear |Q| just past the largest run; the curves start above 0, where log y would dive
+    q_max = 0.12
+    q = np.linspace(0.005, q_max, 200)
     for col, method in enumerate(methods):
         modes, sigma, offset = analyse(packs[method])
         diff_ax, snr_ax = axes[0, col], axes[1, col]
@@ -116,7 +118,7 @@ def plot_defect(defect, packs, output):
         snr_ax.annotate(f"SNR ≥ {SNR_TARGET:g}", (0.0, SNR_TARGET), xycoords=("axes fraction", "data"),
                         xytext=(4, 4), textcoords="offset points", fontsize=10, color="0.35")
         for ax in (diff_ax, snr_ax):
-            ax.set_xscale("log")
+            ax.set_xlim(0, q_max)
             ax.set_yscale("log")
             ax.grid(True, which="major", color="0.9", linewidth=0.6)
         # shade SNR >= target behind the curves, keeping the limits the curves set
