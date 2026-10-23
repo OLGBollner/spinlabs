@@ -290,6 +290,28 @@ def test_pipeline_with_multiple_sim_folders(tmp_path):
     assert (0, 1) in raw_saved.second_order
 
 
+def test_multiple_sim_folders_take_their_order_from_the_name_else_from_order(tmp_path):
+    from spinlabs.pipeline import load_raw_inputs
+
+    root = tmp_path / "NV_512"
+    _write_mock_outcar(root / "ZFS_hyp" / "OUTCAR", d_diag=(-1000.0, -1000.0, 2000.0))
+    first = root / "first_order" / "pert_0.1"
+    _write_mock_outcar(first / "all_bands" / "runs" / "1" / "OUTCAR", d_diag=(-980.0, -980.0, 1960.0))
+    unnamed = []
+    for name, run in (("set_a", "1_1"), ("set_b", "1_2")):
+        sim = root / name / "pert_0.1"
+        _write_mock_outcar(sim / "all_bands" / "runs" / run / "OUTCAR", d_diag=(-990.0, -990.0, 1980.0))
+        unnamed.append(sim)
+
+    # Folder names that do not say the order: `order` applies to each of them.
+    raw, _, _ = load_raw_inputs(sim_folder=unnamed, calc_method="all_bands", order=2)
+    assert set(raw.second_order) == {(0, 0), (0, 1)} and not raw.first_order
+
+    # A named first_order folder stays first order even when the hint says 2.
+    raw, _, _ = load_raw_inputs(sim_folder=[first, unnamed[0]], calc_method="all_bands", order=2)
+    assert set(raw.first_order) == {0} and set(raw.second_order) == {(0, 0)}
+
+
 def test_pipeline_with_mismatched_sim_folders_raises(tmp_path):
     """Tests that passing sim_folders with mismatched defect metadata raises ValueError."""
     root_nv = tmp_path / "NV_512"

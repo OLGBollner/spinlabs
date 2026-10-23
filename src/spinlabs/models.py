@@ -314,7 +314,7 @@ class PhononSpectrum:
 
         for i in range(n):
             sym_i = self.symmetries[i]
-            if sym_i not in ("Ex", "Ey"):
+            if sym_i not in ("Ex", "Ey") or i in matched:  # a paired mode must not pair again
                 continue
 
             target_sym = "Ey" if sym_i == "Ex" else "Ex"

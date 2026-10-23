@@ -151,6 +151,85 @@ class TestZFSManager:
         diff, off = dD_xy[0, 0] - dD_xy[1, 1], dD_xy[0, 1]
         assert np.isclose(V_pm[1, 2] / self.D2_UNIT, 0.5 * np.sqrt(diff**2 + 4 * off**2))
 
+    def test_symmetry_check_uses_the_shared_response_check(self, setup_system, caplog):
+        manager, _, _ = setup_system
+        mhz = CONSTANTS["MHz2J"]  # changes in J are ~1e-26: the check must not depend on the unit
+        manager.zfs_relaxed = np.diag([-1000.0, -1000.0, 2000.0]) * mhz
+        assert manager.point_group == "3m"  # synthetic structure: implied by the C3v labels
+        a1_change = np.diag([-10.0, -10.0, 20.0]) * mhz
+        e_change = np.array([[8.0, 0.0, 6.0], [0.0, -8.0, 0.0], [6.0, 0.0, 0.0]]) * mhz
+        with caplog.at_level("WARNING", logger="spinlabs"):
+            manager._check_symmetry(a1_change, ["A1"], 5, kind="displacement")
+            manager._check_symmetry(e_change, ["A1", "Ex"], (5, 6), kind="derivative")
+            manager._check_symmetry(a1_change, ["A1", "Ex"], (5, 6), kind="derivative")  # O(q D''') terms
+            assert "Symmetry mismatch" not in caplog.text
+            manager._check_symmetry(a1_change + e_change, ["A1"], 7, kind="displacement")
+            manager._check_symmetry(e_change, ["A1", "A1"], (8, 9), kind="derivative")
+        assert "Symmetry mismatch at index 7" in caplog.text
+        assert "Symmetry mismatch at index (8, 9): modes A1/A1 allow only A1 in this derivative" in caplog.text
+
+    def test_second_order_content_outside_the_exact_product_is_summarised(self, setup_system, caplog):
+        manager, _, _ = setup_system
+        # An A1 x Ex curvature that is pure A1: outside A1 x E = E, but within the O(q D''') terms.
+        a1_only = np.diag([-1.0, -1.0, 2.0])
+        manager.zfs_tensors_2d = {(0, 1): self._second_order_entry(manager, a1_only, ("A1", "Ex"))}
+        manager.treated_modes = {0, 1}
+        with caplog.at_level("INFO", logger="spinlabs"):
+            manager.calculate_second_order_derivatives(np.zeros((4, 3, 3)))
+        assert "Symmetry mismatch" not in caplog.text
+        assert "Second-order symmetry: 1 of 1 entries hold content outside Gi x Gj" in caplog.text
+
+    def test_twin_inherits_a_diagonal_coupling_only_when_it_has_none(self, setup_system):
+        manager, spectrum, gs_zfs = setup_system
+        manager.treated_modes = {1, 2}  # fewer than the 4 modes: inheritance is on
+        dD_x = np.array([[2.0, 0.0, 1.0], [0.0, -2.0, 0.0], [1.0, 0.0, 0.0]])
+        dD_y = np.array([[6.0, 0.0, 3.0], [0.0, -6.0, 0.0], [3.0, 0.0, 0.0]])
+
+        # Both twins ran their own diagonal: each keeps its own coupling.
+        manager.zfs_tensors_2d = {
+            (1, 1): self._second_order_entry(manager, dD_x, ("Ex", "Ex")),
+            (2, 2): self._second_order_entry(manager, dD_y, ("Ey", "Ey")),
+        }
+        _, _, V_pm, V_0pm = manager.calculate_second_order_derivatives(np.zeros((4, 3, 3)))
+        assert np.isclose(V_pm[2, 2], 3 * V_pm[1, 1]) and np.isclose(V_0pm[2, 2], 3 * V_0pm[1, 1])
+
+        # Only Ex ran: Ey inherits it.
+        manager.zfs_tensors_2d = {(1, 1): self._second_order_entry(manager, dD_x, ("Ex", "Ex"))}
+        _, _, V_pm, V_0pm = manager.calculate_second_order_derivatives(np.zeros((4, 3, 3)))
+        assert V_pm[1, 1] > 0 and V_pm[2, 2] == V_pm[1, 1] and V_0pm[2, 2] == V_0pm[1, 1]
+
+    def test_pair_with_a_mode_without_first_order_data_is_skipped(self, setup_system, caplog):
+        manager, spectrum, gs_zfs = setup_system
+        dD = np.array([[3.0, 0.0, 1.0], [0.0, -3.0, 0.0], [1.0, 0.0, 0.0]])
+        manager.zfs_tensors_2d = {(1, 3): self._second_order_entry(manager, dD, ("Ex", "A1"))}
+        manager.treated_modes = {1}  # mode 3 has no first-order run
+        with caplog.at_level("WARNING", logger="spinlabs"):
+            d2D, V_00, V_pm, V_0pm = manager.calculate_second_order_derivatives(np.zeros((4, 3, 3)))
+        assert not np.any(d2D[1, 3]) and V_pm[1, 3] == 0 and V_0pm[1, 3] == 0 and V_00[1, 3] == 0
+        assert "Skipped 1 second-order entries with a mode that has no first-order derivative" in caplog.text
+        assert "2_4" in caplog.text
+
+    def test_raw_data_in_mhz_is_ingested_in_joules(self, setup_system):
+        """Simulation folders are parsed in MHz; the manager must work in J like for loaded npz files."""
+        from spinlabs.models import PerturbationEntry
+
+        _, spectrum, _ = setup_system
+        gs_mhz = np.diag([-1000.0, -1000.0, 2000.0])
+        d_mhz = gs_mhz + np.array([[1.0, 0.0, 2.0], [0.0, -1.0, 0.0], [2.0, 0.0, 0.0]])
+
+        def raw(unit):
+            scale = CONSTANTS["MHz2J"] if unit == "J" else 1.0
+            entry = PerturbationEntry(order=1, mode_indices=(1,), amplitude=0.01,
+                                      zfs_tensor=ZFSTensor(matrix=d_mhz * scale, unit=unit))
+            return RawZFSData(defect="NV", cell_size=64, pert_scale=0.01,
+                              ground_state_zfs=ZFSTensor(matrix=gs_mhz * scale, unit=unit), first_order={1: entry})
+
+        from_mhz = ZFSManager(spectrum=spectrum, raw_data=raw("MHz"))
+        from_j = ZFSManager(spectrum=spectrum, raw_data=raw("J"))
+        assert np.allclose(from_mhz.zfs_relaxed, gs_mhz * CONSTANTS["MHz2J"])
+        assert np.allclose(from_mhz.zfs_relaxed, from_j.zfs_relaxed)
+        assert np.allclose(from_mhz.first_order[1]["tensor"], from_j.first_order[1]["tensor"])
+
     def test_init_from_raw_data_with_legacy_scalar_pert_updates_to_si_displacements(self, setup_system):
         manager_base, spectrum, gs_zfs = setup_system
 

@@ -552,10 +552,15 @@ def write_perturbed_poscar(
     coord_mode = lines[i].strip().lower()
     out.append(lines[i])
     direct = coord_mode.startswith("d")
-    lat = np.array(structure.lattice.matrix)
+    if not direct:
+        # VASP multiplies Cartesian positions by the scaling factor (line 2; negative means a
+        # target volume), so write coords / factor. The factor is taken from the template
+        # lattice as written against the structure's (scaled) lattice, which covers both forms.
+        written = np.array([[float(x) for x in lines[k].split()[:3]] for k in range(2, 5)])
+        factor = np.cbrt(abs(np.linalg.det(structure.lattice.matrix) / np.linalg.det(written)))
     for site in structure:
-        frac = site.frac_coords if direct else np.asarray(site.coords) @ np.linalg.inv(lat)
-        out.append("  %.16f  %.16f  %.16f" % tuple(frac))
+        xyz = site.frac_coords if direct else np.asarray(site.coords) / factor
+        out.append("  %.16f  %.16f  %.16f" % tuple(xyz))
     Path(output_file).write_text("\n".join(out) + "\n")
 
 

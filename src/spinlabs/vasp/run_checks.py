@@ -3,12 +3,8 @@ and whether the ZFS change has the shape the mode's symmetry allows.
 
 Used by the job runner (logged per run) and by packaging (flags over a whole dataset).
 
-D-tensor shape: in the ground state's principal frame a traceless change splits into an
-A1 part (D_zz, with D_xx + D_yy = -D_zz) and an E part (D_xx - D_yy, D_xy, D_xz, D_yz).
-For C3v, a displacement built only from A1/A2 modes can change D only through its A1
-part, while E modes change it mainly through the E part (checked when all modes are E;
-a pair mixing A and E modes has no fixed shape). On the NV data the E
-fraction is <= 0.1 for A-type modes and >= 0.86 for E modes, so 0.3 separates them.
+D-tensor shape: whether the ZFS change has the symmetry the run's modes allow is decided by
+spinlabs.zfs_response.verify_zfs_response, the same check packaging and ZFSManager use.
 """
 
 from __future__ import annotations
@@ -22,12 +18,11 @@ import numpy as np
 from spinlabs.models import PhononSpectrum
 from spinlabs.parsers import parse_outcar_zfs
 from spinlabs.vasp.settings import scf_problem, scf_status
+from spinlabs.zfs_response import response_point_group, verify_zfs_response
 
 # Run folders sit at <defect>/<order>/pert_<x>/<basis>/runs/<modes>; the basis's
 # ground-state ZFS run is <defect>/<source>/ (as trees.BASIS_SOURCE).
 BASIS_SOURCE = {"all_bands": "ZFS_hyp", "defect_band_approx": "ZFS_occup"}
-E_FRACTION_LIMIT = 0.3
-SHAPE_FLOOR_MHZ = 0.2  # below this |dD| the shape is numerical noise
 PERTURBATION_TOL = 0.01  # |scale - 1| and residual allowed for a correct displacement
 
 # Expected symmetry operations VASP may find (upper bounds), C3v parent:
@@ -143,39 +138,13 @@ def check_symmetry_ops(sym: dict, labels: list[str]) -> tuple[list[str], list[st
 # --------------------------------------------------------------------------- #
 # ZFS tensor shape
 # --------------------------------------------------------------------------- #
-def zfs_change_parts(tensor: np.ndarray, reference: np.ndarray) -> tuple[float, float]:
-    """|A1| and |E| (MHz) of tensor - reference in the reference's principal frame."""
-    _, rot = np.linalg.eigh(np.asarray(reference, dtype=float))
-    d = rot.T @ (np.asarray(tensor, dtype=float) - np.asarray(reference, dtype=float)) @ rot
-    d = d - np.trace(d) / 3 * np.eye(3)
-    a1 = abs(d[2, 2]) * np.sqrt(1.5)
-    e = np.sqrt(((d[0, 0] - d[1, 1]) / 2) ** 2 + d[0, 1] ** 2 + d[0, 2] ** 2 + d[1, 2] ** 2) * np.sqrt(2)
-    return float(a1), float(e)
-
-
-def check_zfs_shape(tensor: np.ndarray, reference: np.ndarray, labels: list[str]) -> tuple[str, str | None]:
-    """Log line and problem (or None) for the ZFS change of a run along modes with ``labels``."""
-    a1, e = zfs_change_parts(tensor, reference)
-    size = float(np.hypot(a1, e))
-    a_only = all(s in ("A1", "A2") for s in labels)
-    # A pair mixing A and E modes changes D by both responses together, so its shape
-    # is not fixed by symmetry alone (the pair's alpha check covers it in the analysis).
-    e_only = all(s in ("Ex", "Ey") for s in labels)
-    line = f"dD: |A1| {a1:.3f} MHz, |E| {e:.3f} MHz" + (f", E fraction {e / size:.3f}" if size else "")
-    if size < SHAPE_FLOOR_MHZ:
-        return line + " (too small to judge its shape)", None
-    frac = e / size
-    if a_only and frac > E_FRACTION_LIMIT:
-        return line, (
-            f"modes {'/'.join(labels)} can only change D through its A1 part, but the E fraction is {frac:.2f}"
-            " (wrong state or geometry, or a mislabelled mode if this repeats across runs)"
-        )
-    if e_only and frac < E_FRACTION_LIMIT:
-        return line, (
-            f"modes {'/'.join(labels)} should mainly change the E part (D_xx - D_yy, off-diagonals), "
-            f"but the E fraction is only {frac:.2f}"
-        )
-    return line, None
+def check_zfs_shape(
+    tensor: np.ndarray, reference: np.ndarray, labels: list[str], point_group: str | None = "3m"
+) -> tuple[str, str | None]:
+    """Log line and problem (or None) for the ZFS change (MHz) of a run along modes with ``labels``."""
+    change = np.asarray(tensor, dtype=float) - np.asarray(reference, dtype=float)
+    check = verify_zfs_response(change, labels, kind="displacement", point_group=point_group, reference=reference)
+    return check.line, check.problem
 
 
 # --------------------------------------------------------------------------- #
@@ -231,7 +200,9 @@ def check_run(
     elif ref is None:
         check.lines.append("dD shape: no ground-state OUTCAR found, not checked")
     else:
-        line, problem = check_zfs_shape(zfs.to_unit("MHz").matrix, ref.to_unit("MHz").matrix, labels)
+        line, problem = check_zfs_shape(
+            zfs.to_unit("MHz").matrix, ref.to_unit("MHz").matrix, labels, response_point_group(spectrum)
+        )
         check.lines.append(line)
         if problem:
             check.problems.append(problem)
@@ -256,6 +227,7 @@ def dataset_shape_flags(raw, spectrum: PhononSpectrum) -> list[tuple[str, str]]:
         from spinlabs.symmetry import classify_and_pair
 
         symmetries, _ = classify_and_pair(spectrum)
+    point_group = response_point_group(spectrum)
 
     def tensor(entry) -> np.ndarray:
         return np.asarray(entry.zfs_tensor.matrix if hasattr(entry, "zfs_tensor") else entry["tensor"], dtype=float)
@@ -265,7 +237,7 @@ def dataset_shape_flags(raw, spectrum: PhononSpectrum) -> list[tuple[str, str]]:
     for idx, entry in entries:
         if any(i >= len(symmetries) for i in idx):
             continue
-        _, problem = check_zfs_shape(tensor(entry), reference, [str(symmetries[i]) for i in idx])
+        _, problem = check_zfs_shape(tensor(entry), reference, [str(symmetries[i]) for i in idx], point_group)
         if problem:
             flags.append(("_".join(str(i + 1) for i in idx), problem))
     return flags

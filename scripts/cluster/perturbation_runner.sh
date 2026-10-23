@@ -114,16 +114,22 @@ acquire_lock() {
     echo "$ID: skipping $1 -- locked by running job: $owner_info"
     return 1
   fi
-  # Stale: rename it first, so two tasks finding the same stale lock cannot both take it.
-  stale="$lock.stale.$JOB_TAG.$$"
-  if mv "$lock" "$stale" 2>/dev/null && mkdir "$lock" 2>/dev/null; then
-    rm -rf "$stale"
+  # Stale. Only the task that creates $lock.takeover (mkdir is atomic) may replace it, and only
+  # after re-checking that the lock still belongs to the finished job: two tasks that both found
+  # the stale lock must not both take it, nor remove a fresh lock the other has just made.
+  if ! mkdir "$lock.takeover" 2>/dev/null; then
+    echo "$ID: skipping $1 -- another task is taking over its stale lock (remove $lock.takeover if none is)"
+    return 1
+  fi
+  now_job=$(sed -n 's/^job=//p' "$lock/owner" 2>/dev/null || true)
+  if [ "$now_job" = "$owner_job" ] && rm -rf "$lock" && mkdir "$lock" 2>/dev/null; then
     write_lock_owner "$lock"
     HELD_LOCK=$lock
+    rmdir "$lock.takeover"
     echo "$ID: took over stale lock on $1 (was: $owner_info)"
     return 0
   fi
-  rm -rf "$stale" 2>/dev/null || true
+  rmdir "$lock.takeover"
   echo "$ID: skipping $1 -- another task took over its stale lock"
   return 1
 }
@@ -182,8 +188,15 @@ run_one() {
     return 0
   fi
   echo "$ID: $CHECK_MSG"
-  srun $binary
-  echo "$ID: Done! $label"
+  # A failing VASP run (crash, SCF abort, node error) must not end the task under set -e and
+  # leave its other directories unattempted; the task exits nonzero at the end instead.
+  if srun $binary; then
+    echo "$ID: Done! $label"
+  else
+    status=$?
+    echo "$ID: VASP exited with $status for $label"
+    VASP_FAILED=$((VASP_FAILED + 1))
+  fi
   # Only drop the restart files once this directory really is complete -- the same test
   # the skip-guard above uses. VASP can exit 0 without writing a ZFS block; such a
   # directory is not skipped on relaunch, so it restarts from scratch and needs
@@ -204,6 +217,7 @@ run_one() {
 
 mkdir -p runs
 
+VASP_FAILED=0
 PAIR_ID=0
 for i in $MODES; do
   if [ "$ORDER" = "first_order" ]; then
@@ -228,3 +242,8 @@ for i in $MODES; do
     PAIR_ID=$((PAIR_ID + 1))
   done
 done
+
+if [ "$VASP_FAILED" -gt 0 ]; then
+  echo "$ID: VASP failed in $VASP_FAILED run(s); the task still attempted all its others"
+  exit 1
+fi
