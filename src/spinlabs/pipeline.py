@@ -23,6 +23,7 @@ from spinlabs.parsers import (
     parse_phonon_data,
     parse_zfs_dataset_npz,
     parse_zfs_simulation_dataset,
+    sim_folder_order,
 )
 from spinlabs.plotter import (
     plot_1d_spectral_functions,
@@ -222,10 +223,13 @@ def load_raw_inputs(
         if isinstance(sim_folder, (list, tuple)) and len(sim_folder) > 1:
             datasets = []
             for sf in sim_folder:
+                # Each folder's own name (first_order/..., second_order/...) gives its order;
+                # `order` is the fallback for folders whose name does not say.
                 ds = parse_zfs_simulation_dataset(
                     sim_folder=sf,
                     calc_method=calc_method,
                     zfs_folder=zfs_folder,
+                    order=sim_folder_order(sf) or order,
                     pert_scale=pert_scale,
                     defect=defect,
                     cell_size=cell_size,

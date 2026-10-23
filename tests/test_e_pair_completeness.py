@@ -28,6 +28,20 @@ def test_e_pair_completeness_flagging():
     assert spec.e_pair_complete == [False, True, True, False]
 
 
+def test_a_paired_mode_does_not_pair_again_with_a_nearby_lone_mode():
+    # Ex(0) and Ey(1) are a pair; a lone Ex(2) 0.01 meV away must stay incomplete.
+    spec = PhononSpectrum(
+        frequencies_mev=np.array([20.0, 20.0, 20.01]),
+        eigenvectors=np.zeros((3, 2, 3)),
+        atom_frac_coords=np.zeros((2, 3)),
+        atom_symbols=["C", "C"],
+        atomic_masses=np.array([12.0, 12.0]),
+        lattice=np.eye(3),
+        symmetries=["Ex", "Ey", "Ex"],
+    )
+    assert spec.e_pair_complete == [True, True, False]
+
+
 def test_zfs_manager_rejects_incomplete_spectrum():
     # The same 4-mode spectrum must be refused by ZFSManager now that the
     # silent expansion path is gone.

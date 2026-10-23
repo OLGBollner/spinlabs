@@ -3,13 +3,20 @@ from __future__ import annotations
 import logging
 import warnings
 from pathlib import Path
-from typing import Any, Optional, Union
+from typing import Any, Optional
 import numpy as np
 
 from spinlabs.constants import CONSTANTS
 from spinlabs.symmetry import twin_of, _build_groups_from_labels
 from spinlabs.models import ZFSTensor, PhononSpectrum, PerturbationEntry, RawZFSData, SpinPhononCouplingData, normalize_calc_method
 from spinlabs.utils import MathUtils
+from spinlabs.zfs_response import (
+    SHAPE_FLOOR_MHZ,
+    SYMMETRY_TOL,
+    ZFSResponseCheck,
+    response_point_group,
+    verify_zfs_response,
+)
 
 from spinlabs.logging_utils import get_logger
 
@@ -101,6 +108,8 @@ class ZFSManager:
             self.spectrum = spectrum
         else:
             self.spectrum = None
+        # Point group for the ZFS symmetry checks (None without a spectrum: not checked).
+        self.point_group = response_point_group(spectrum) if spectrum is not None else None
 
         self.raw_data = raw_data
 
@@ -175,6 +184,9 @@ class ZFSManager:
 
     def _ingest_raw_data(self, raw: RawZFSData):
         """Populates internal arrays and applies principal frame rotation from RawZFSData."""
+        # Derivatives, couplings and thresholds here are in J. RawZFSData.load already
+        # converts, but data parsed from simulation folders arrives in MHz.
+        raw = raw.to_unit("J")
         self.defect = raw.defect
         self.cell_size = raw.cell_size
         self.pert_scale = raw.pert_scale
@@ -383,7 +395,7 @@ class ZFSManager:
                 continue
 
             dD = D_i - self.zfs_relaxed
-            self._check_symmetry(dD, sym, i)
+            self._check_symmetry(dD, [sym], i, kind="displacement")
 
             dD_dq = dD / q
             zfs_deriv[i] = dD_dq
@@ -445,8 +457,17 @@ class ZFSManager:
         V_p_m_2nd = np.zeros((n_modes, n_modes))
         V_0_pm_2nd = np.zeros((n_modes, n_modes))
 
+        no_first_order = []
+        diagonal_done: set[int] = set()  # modes whose own (i, i) coupling was computed
+        # Entries with content outside the exact Gi x Gj rule (MHz of that content), for the summary.
+        outside_strict: list[float] = []
+        n_judged = 0
         for (i, j), item in sorted(self.zfs_tensors_2d.items()):
-            if i not in self.treated_modes and j not in self.treated_modes:
+            # The curvature subtracts both modes' first-order response; a mode without one
+            # (derivative 0) would leave its linear change in d2D as a spurious coupling.
+            if i not in self.treated_modes or j not in self.treated_modes:
+                if i in self.treated_modes or j in self.treated_modes:
+                    no_first_order.append((i, j))
                 continue
 
             if ipr_thresh is not None:
@@ -490,7 +511,11 @@ class ZFSManager:
                         if self.exclude_inconsistent_pairs:
                             continue
 
-            self._check_symmetry(d2D_dqidqj, (sym_i, sym_j), (i, j))
+            check = self._check_symmetry(d2D_dqidqj * q_i * q_j, [sym_i, sym_j], (i, j), kind="derivative")
+            if check is not None and check.size_mhz >= SHAPE_FLOOR_MHZ:
+                n_judged += 1
+                if check.strict_forbidden > SYMMETRY_TOL:
+                    outside_strict.append(check.strict_forbidden * check.size_mhz)
 
             zfs_2nd_derivs[i, j] = d2D_dqidqj
             zfs_2nd_derivs[j, i] = d2D_dqidqj
@@ -513,20 +538,8 @@ class ZFSManager:
                 V_0_pm_2nd[i, j] = np.sqrt(d2D_dqidqj[0, 2] ** 2 + d2D_dqidqj[1, 2] ** 2) / (2.0 * np.sqrt(2))
                 V_p_m_2nd[i, j] = 0.5 * np.sqrt(diff_in_plane**2 + 4.0 * off_diag_in_plane**2)
 
-            if len(self.treated_modes) < n_modes and len(phonon_energies) == n_modes and i == j:
-                # Inherit V-coefficients for the degenerate twin via pair_id.
-                # The spectrum owns the pairing (strict involution); no frequency guessing.
-                spectrum = self.spectrum
-                if spectrum is not None and (twin := twin_of(spectrum.deg_groups, i)) is not None:
-                    if twin != j:  # avoid overwriting an (i,j) cross-coupling with the pair copy
-                        V_0_0_2nd[twin, twin] = V_0_0_2nd[i, j]
-                        V_0_pm_2nd[twin, twin] = V_0_pm_2nd[i, j]
-                        V_p_m_2nd[twin, twin] = V_p_m_2nd[i, j]
-                    else:
-                        # Twin IS j: copy the (i,i) pair coefficients to (j,j)
-                        V_0_0_2nd[j, j] = V_0_0_2nd[i, j]
-                        V_0_pm_2nd[j, j] = V_0_pm_2nd[i, j]
-                        V_p_m_2nd[j, j] = V_p_m_2nd[i, j]
+            if i == j:
+                diagonal_done.add(i)
 
             V_0_0_2nd[j, i] = V_0_0_2nd[i, j]
             V_p_m_2nd[j, i] = V_p_m_2nd[i, j]
@@ -543,8 +556,33 @@ class ZFSManager:
                     V_p_m_2nd[i, j] / CONSTANTS["MHz2J"],
                 )
 
+        # A degenerate twin without its own diagonal run inherits its partner's diagonal
+        # coupling (the spectrum owns the pairing). Fill-only, as for first order: a twin
+        # with its own computed (i, i) keeps it, whatever order the entries came in.
+        if len(self.treated_modes) < n_modes and len(phonon_energies) == n_modes and self.spectrum is not None:
+            for i in sorted(diagonal_done):
+                twin = twin_of(self.spectrum.deg_groups, i)
+                if twin is not None and twin not in diagonal_done:
+                    for V in (V_0_0_2nd, V_0_pm_2nd, V_p_m_2nd):
+                        V[twin, twin] = V[i, i]
+
         if self.degenerate_pairs_from_symmetry:
             self._degenerate_pairs_from_symmetry(zfs_2nd_derivs, V_0_0_2nd, V_p_m_2nd, V_0_pm_2nd)
+
+        if outside_strict:
+            LOGGER.info(
+                f"Second-order symmetry: {len(outside_strict)} of {n_judged} entries hold content outside "
+                f"Gi x Gj (median {np.median(outside_strict):.2f} MHz, max {np.max(outside_strict):.2f} MHz); "
+                "expected O(q D''') finite-difference terms, warned about only beyond those"
+            )
+
+        if no_first_order:
+            LOGGER.warning(
+                f"Skipped {len(no_first_order)} second-order entries with a mode that has no first-order "
+                "derivative (its linear response cannot be removed). Run folders (1-based): "
+                + ", ".join(f"{i + 1}_{j + 1}" for i, j in no_first_order[:20])
+                + (", ..." if len(no_first_order) > 20 else "")
+            )
 
         if self.inconsistent_pairs:
             if self.exclude_inconsistent_pairs:
@@ -823,25 +861,21 @@ class ZFSManager:
         LOGGER.info(f"Saved ZFS data to: {save_name}")
         return save_name
 
-    @staticmethod
-    def _check_symmetry(d_tensor: np.ndarray, symmetry: Union[str, tuple[str, str]], idx: Any) -> None:
-        sym_prod = MathUtils.calc_symmetry(*symmetry) if isinstance(symmetry, tuple) else [symmetry]
-        if sym_prod == ["A1"]:
-            diag = np.diag(d_tensor)
-            d_xx, d_yy, d_zz = diag
-            tensor_scale = np.max(np.abs(diag))
-            dyn_tol = 1.0 * tensor_scale + 1e-4
+    def _check_symmetry(self, change: np.ndarray, labels: list[str], idx: Any, kind: str) -> Optional[ZFSResponseCheck]:
+        """Warn when a ZFS change (J, at the displacement) has symmetry its modes forbid.
 
-            is_axial = np.abs(d_xx - d_yy) <= dyn_tol
-            is_traceless_axial = np.abs(2 * d_xx + d_zz) <= dyn_tol
-            off_diag_mask = ~np.eye(3, dtype=bool)
-            off_diags_zero = np.all(np.abs(d_tensor[off_diag_mask]) <= dyn_tol)
-
-            if not (is_axial and is_traceless_axial and off_diags_zero):
-                LOGGER.warning(
-                    f"Symmetry mismatch at index {idx} with symmetry {sym_prod} "
-                    f"(threshold: {dyn_tol:.2e} | scale: {tensor_scale:.2f})"
-                )
+        The check shared with the cluster runs and packaging (zfs_response.verify_zfs_response):
+        first-order entries are raw displacement changes, second-order ones curvature terms
+        d2D/dQi dQj * qi * qj (Gi x Gj plus the finite difference's O(q D''') terms).
+        """
+        if self.zfs_relaxed is None:  # no ground state: no defect frame to check in
+            return None
+        check = verify_zfs_response(
+            change / CONSTANTS["MHz2J"], labels, kind=kind, point_group=self.point_group, reference=self.zfs_relaxed
+        )
+        if check.problem:
+            LOGGER.warning(f"Symmetry mismatch at index {idx}: {check.problem}; {check.line}")
+        return check
 
     def _debug_derivs(self, dD, q, symmetry, idx, V_0_0, V_0_pm, V_p_m):
         max_val = np.max(np.abs(dD))

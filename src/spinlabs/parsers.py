@@ -537,6 +537,12 @@ def parse_perturbation_directory(
     return results
 
 
+def sim_folder_order(sim_folder: str | Path) -> int | None:
+    """Perturbation order named by a simulation folder's parent ('first_order' -> 1, 'second_order' -> 2)."""
+    parent = Path(sim_folder).parent.name
+    return 1 if "first" in parent else 2 if "second" in parent else None
+
+
 def parse_zfs_simulation_dataset(
     sim_folder: str | Path,
     max_workers: int = 4,
@@ -590,8 +596,7 @@ def parse_zfs_simulation_dataset(
     second_order = {}
 
     if order is None:
-        # Infer from parent folder (e.g. 'first_order', 'second_order')
-        order = 1 if "first" in sim_path.parent.name else 2 if "second" in sim_path.parent.name else None
+        order = sim_folder_order(sim_path)
 
     if order == 1:
         first_order = parse_perturbation_directory(
