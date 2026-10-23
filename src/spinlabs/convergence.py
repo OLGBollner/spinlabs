@@ -443,6 +443,61 @@ def read_conv_metadata(npz_path: Path) -> dict:
         return {}
 
 
+@dataclass
+class ConvergenceData:
+    """A packed convergence npz with its Q=0 point filled in (load_convergence).
+
+    tensors is (n_modes, n_Q, 3, 3) in MHz, NaN for unfinished runs. q0 is the Q=0
+    (relaxed) tensor every mode shares, None when the pack has no Q=0 point at all.
+    """
+
+    modes: np.ndarray
+    perts: np.ndarray
+    tensors: np.ndarray
+    q0: np.ndarray | None
+    metadata: dict
+
+
+def load_convergence(npz_path: Path) -> ConvergenceData:
+    """Load a packed convergence npz, with Q=0 anchored for every mode.
+
+    Q=0 comes from the perts array if present, else from the 'd0' key written by
+    pack_perturbation_runs.py --ground-state (prepended as a Q=0 column). Q=0 is the
+    relaxed structure, so its tensor is identical for every mode: a mode without its
+    own Q=0 run (absent column or NaN) borrows it from one that has it.
+    """
+    data = np.load(npz_path)
+    modes = data["modes"]
+    perts = data["perts"]
+    tensors = np.array(data["tensors"], dtype=float)
+
+    if 0.0 not in set(perts.tolist()):
+        if "d0" in data:
+            perts = np.concatenate(([0.0], perts))
+            tensors = np.concatenate((np.broadcast_to(data["d0"], (tensors.shape[0], 1, 3, 3)), tensors), axis=1)
+        else:
+            LOGGER.warning(
+                "no Q=0 point (no 0 in perts, no 'd0' key in npz); fits use the unanchored points only",
+            )
+
+    izero = int(np.argmin(np.abs(perts)))
+    q0 = None
+    if np.isclose(perts[izero], 0.0):
+        q0 = next((tensors[i][izero] for i in range(tensors.shape[0]) if not np.isnan(tensors[i][izero]).any()), None)
+        if q0 is not None:
+            patched = 0
+            for i in range(tensors.shape[0]):
+                if np.isnan(tensors[i][izero]).any():
+                    tensors[i][izero] = q0
+                    patched += 1
+            if patched:
+                LOGGER.info(
+                    f"borrowed the Q=0 tensor for {patched} mode(s) that lack "
+                    "their own pert=0 run (identical relaxed structure)",
+                )
+    return ConvergenceData(modes=modes, perts=perts, tensors=tensors, q0=q0, metadata=read_conv_metadata(npz_path))
+
+
 PC_NAMES = ("xx", "yy", "zz")
 
 
@@ -480,44 +535,8 @@ def plot_pert_convergence(
     except ImportError:
         sys.exit("Error: matplotlib not available")
 
-    data = np.load(npz_path)
-    modes = data["modes"]
-    perts = data["perts"]
-    tensors = data["tensors"]
-
-    # Anchor the Q=0 point: take it from the perts array if present, else
-    # from the 'd0' key written by pack_perturbation_runs.py --ground-state.
-    if 0.0 not in set(perts.tolist()):
-        if "d0" in data:
-            perts = np.concatenate(([0.0], perts))
-            tensors = np.concatenate((np.broadcast_to(data["d0"], (tensors.shape[0], 1, 3, 3)), tensors), axis=1)
-        else:
-            LOGGER.warning(
-                "no Q=0 point (no 0 in perts, no 'd0' key in npz); fits use the unanchored points only",
-            )
-
-    # Q=0 is the relaxed structure, so the ZFS tensor there is identical for
-    # every mode: if a mode lacks its own Q=0 run (absent column or NaN),
-    # borrow the Q=0 tensor from whichever mode has one.
-    izero_g = int(np.argmin(np.abs(perts)))
-    q0_shared = None
-    if np.isclose(perts[izero_g], 0.0):
-        for i in range(tensors.shape[0]):
-            t0 = tensors[i][izero_g]
-            if not np.isnan(t0).any():
-                q0_shared = t0
-                break
-        if q0_shared is not None:
-            patched = 0
-            for i in range(tensors.shape[0]):
-                if np.isnan(tensors[i][izero_g]).any():
-                    tensors[i][izero_g] = q0_shared
-                    patched += 1
-            if patched:
-                LOGGER.info(
-                    f"borrowed the Q=0 tensor for {patched} mode(s) that lack "
-                    "their own pert=0 run (identical relaxed structure)",
-                )
+    conv = load_convergence(npz_path)
+    modes, perts, tensors, q0_shared = conv.modes, conv.perts, conv.tensors, conv.q0
 
     wanted = mode if mode else [int(m) for m in modes]
     missing = [m for m in wanted if m not in set(modes.tolist())]

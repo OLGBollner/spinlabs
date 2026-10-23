@@ -227,6 +227,36 @@ def test_d0_offset_shows_in_the_error_budget():
     assert np.isclose(r.q_lo2, np.sqrt(10 * r.err2 / (2 * r.c))) and r.q_lo2 > 0.07
 
 
+def test_load_convergence_prepends_d0_when_no_q0_run(tmp_path):
+    from spinlabs.convergence import load_convergence
+
+    perts = np.array([-0.1, 0.1])
+    tensors = np.stack([np.stack([GS + 1.0, GS + 2.0]), np.stack([GS + 3.0, GS + 4.0])])  # (2 modes, 2 Q)
+    path = tmp_path / "conv.npz"
+    np.savez(path, modes=np.array([5, 7]), perts=perts, tensors=tensors, d0=GS, metadata='{"defect": "NV"}')
+    conv = load_convergence(path)
+    assert np.allclose(conv.perts, [0.0, -0.1, 0.1])
+    assert conv.tensors.shape == (2, 3, 3, 3)
+    assert np.allclose(conv.tensors[:, 0], GS) and np.allclose(conv.q0, GS)
+    assert np.allclose(conv.tensors[1, 2], GS + 4.0)
+    assert conv.metadata == {"defect": "NV"}
+
+
+def test_load_convergence_borrows_q0_for_a_mode_without_it(tmp_path):
+    from spinlabs.convergence import load_convergence
+
+    perts = np.array([-0.1, 0.0, 0.1])
+    tensors = np.stack([np.stack([GS + 1.0, GS, GS + 2.0]), np.stack([GS + 3.0, np.full((3, 3), np.nan), GS + 4.0])])
+    path = tmp_path / "conv.npz"
+    np.savez(path, modes=np.array([5, 7]), perts=perts, tensors=tensors)
+    conv = load_convergence(path)
+    assert np.allclose(conv.tensors[1, 1], GS) and np.allclose(conv.q0, GS)
+    assert conv.metadata == {}
+    # a pack with neither a Q=0 run nor d0 has no anchor
+    np.savez(path, modes=np.array([5]), perts=np.array([-0.1, 0.1]), tensors=tensors[:1, [0, 2]])
+    assert load_convergence(path).q0 is None
+
+
 def test_unconverged_run_is_suspicious(tmp_path):
     run = _tree_run(tmp_path, "1_1", _principal_change(a1=10.0), ops=6)
     (run / "INCAR").write_text("NELM = 30\nEDIFF = 1E-8\n")
