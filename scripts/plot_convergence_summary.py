@@ -4,7 +4,8 @@ For each defect the newest pack per method (``data/<defect>_<date>_conv_test_<al
 written by pack_convergence) gives one column:
 
 - top, |D(Q) - D0| per mode against |Q|, filled +Q and open -Q, and its even part
-  |D(Q) + D(-Q) - 2 D0| / 2 (squares), where the linear term cancels. Lines are the cubic
+  |D(Q) + D(-Q) - 2 D0| / 2 (squares), where the linear term cancels, with noise error bars
+  (sqrt 2 sigma and sqrt 6 sigma / 2, as in the per-mode plots). Lines are the cubic
   fit's linear and quadratic terms |b| Q and |c| Q^2, and the error of a difference against
   D0 (noise of two runs and D0's offset). Every norm is over the 5 traceless parts
   (spinlabs.convergence.traceless_parts), as the fit and the SNR use them;
@@ -97,11 +98,15 @@ def plot_defect(defect, packs, output):
         modes, sigma, offset = analyse(packs[method])
         diff_ax, snr_ax = axes[0, col], axes[1, col]
         for color, (mode, p, diff, even, r) in zip(COLORS, modes):
-            # |D(Q) - D0| is nearly the same at +-Q: the -Q ring first, a smaller +Q dot inside it
+            # |D(Q) - D0| is nearly the same at +-Q: the -Q ring first, a smaller +Q dot inside it.
+            # Bars are the noise alone, as in the per-mode plots: sqrt 2 sigma for D(Q) - D0 and
+            # sqrt 6 sigma / 2 for the even part; D0's offset is the dashed line, common to all
             for side, face, ms in ((-1, "white", 9), (1, color, 5)):
                 sel = np.sign(p) == side
-                diff_ax.plot(np.abs(p[sel]), diff[sel], "o", ms=ms, color=color, mfc=face, mew=1.5)
-            diff_ax.plot(even[:, 0], even[:, 1], "s", ms=7, color=color, alpha=0.9 if r.c_resolved else 0.4)
+                diff_ax.errorbar(np.abs(p[sel]), diff[sel], yerr=np.sqrt(2) * sigma, fmt="o", ms=ms, color=color,
+                                 mfc=face, mew=1.5, capsize=3, elinewidth=1)
+            diff_ax.errorbar(even[:, 0], even[:, 1], yerr=np.sqrt(6) * sigma / 2, fmt="s", ms=7, color=color,
+                             capsize=3, elinewidth=1, alpha=0.9 if r.c_resolved else 0.4)
             first_alpha = 1.0 if r.b_resolved else 0.4
             diff_ax.plot(q, r.b * q, "-", color=color, lw=1, alpha=0.7 * first_alpha)
             diff_ax.plot(q, r.c * q**2, ":", color=color, lw=1.2, alpha=0.9 if r.c_resolved else 0.4)
