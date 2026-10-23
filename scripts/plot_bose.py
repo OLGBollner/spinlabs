@@ -1,8 +1,9 @@
 import sys
-from matplotlib import pyplot as plt
-import numpy as np
 
-from beyblade.transition_rate import Phonons
+import numpy as np
+from matplotlib import pyplot as plt
+
+from spinlabs.transition_rate import Phonons
 
 data = np.load(sys.argv[1], allow_pickle=True)
 omega = data["freqs"]

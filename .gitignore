@@ -3,3 +3,22 @@ scripts/figures/
 __pycache__/
 *.xsf
 POSCAR
+runs/
+*.yaml
+
+# Thesis drafts stay local
+Thesis/
+
+# All txt files (use git add -f to include one)
+*.txt
+
+# Personal notes
+Notes/
+
+# build artifacts and vendored clones
+build/
+httk-sym/
+
+# Packaged raw data
+/data/
+figures/

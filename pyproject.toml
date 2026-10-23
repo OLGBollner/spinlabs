@@ -3,8 +3,8 @@ requires = ["setuptools"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "beyblade"
-version = "2026.04.22"
+name = "spinlabs"
+version = "2026.09.01"
 license = "GPL-3.0-or-later"
 requires-python = ">= 3.10"
 dependencies = [
@@ -12,7 +12,32 @@ dependencies = [
     "scipy",
     "pymatgen",
     "matplotlib",
+    "pyyaml",
 ]
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+    "ruff",
+]
+
+[tool.ruff]
+line-length = 120
+target-version = "py310"
+
+[tool.ruff.lint]
+# Start focused: pyflakes (F) + genuine runtime errors (E7/E9).
+# Broader style rules (UP, I, B, ...) can be enabled incrementally.
+select = ["F", "E7", "E9"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+"spinlabs.vasp" = ["templates/*"]
+
+[project.scripts]
+spinlabs = "spinlabs.cli:main"
