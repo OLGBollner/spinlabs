@@ -1,15 +1,17 @@
 """One figure per defect from its perturbation-convergence packs: finite differences and SNR against step size.
 
-For each defect the newest pack per method (``data/<defect>_<date>_conv_test_<all|occup>.npz``,
-written by pack_convergence) gives one column of three rows, as the per-mode plots of
-``spinlabs plot convergence`` show the finite differences:
+It shows how the finite differences spinlabs takes from the ZFS tensor behave as the step
+size changes. For each defect the newest pack per method
+(``data/<defect>_<date>_conv_test_<all|occup>.npz``, written by pack_convergence) gives one
+column of three rows:
 
 - first order, |D(Q) - D0| / Q per mode against |Q| (filled +Q, open -Q), with noise error
   bars sqrt 2 sigma / Q and the cubic fit's Q -> 0 value b as a line;
-- second order, the central (D(Q) + D(-Q) - 2 D0) / Q^2 (squares) and the i = i pair's
-  (D(2Q) - 2 D(Q) + D0) / Q^2 (diamonds, filled +Q, open -Q), with noise error bars
-  sqrt 6 sigma / Q^2 and the fit's 2c as a line;
-- the signal-to-noise of those finite differences: first order b Q / err1 and the pair's
+- second order, the forward difference (D(2Q) - 2 D(Q) + D0) / Q^2 that
+  ZFSManager.calculate_second_order_derivatives takes from the i = i pair run (D(2Q)) and the
+  first-order run (D(Q)), for every Q whose 2Q was run on the same side (filled +Q, open -Q),
+  with noise error bars sqrt 6 sigma / Q^2 and the fit's 2c as a line;
+- the signal-to-noise of those finite differences: first order b Q / err1 and the forward
   second order 2 c Q^2 / err2, against the SNR target (SNR above it shaded), with markers
   at the amplitudes that were run.
 
@@ -61,10 +63,10 @@ def find_packs(data_dir):
 
 
 def quotients(p, parts, p0):
-    """The measured finite differences of one mode, as (Q, norm) arrays; Q is signed where the sign matters.
+    """The measured finite differences of one mode, as (signed Q, norm) arrays.
 
-    first: |D(Q) - D0| / |Q| per run; central: |D(Q) + D(-Q) - 2 D0| / Q^2 per |Q| run at
-    both signs; pair: |D(2Q) - 2 D(Q) + D0| / Q^2 per Q whose 2Q was run on the same side.
+    first: |D(Q) - D0| / |Q| per run; second: the forward difference |D(2Q) - 2 D(Q) + D0| / Q^2
+    per Q whose 2Q was run on the same side.
     """
     def at(q):
         i = np.flatnonzero(np.isclose(p, q))
@@ -72,18 +74,12 @@ def quotients(p, parts, p0):
 
     nonzero = p[~np.isclose(p, 0.0)]
     first = [(q, np.linalg.norm(at(q) - p0) / abs(q)) for q in nonzero]
-    central, pair = [], []
-    for q in sorted({abs(float(x)) for x in nonzero}):
-        if at(q) is not None and at(-q) is not None:
-            central.append((q, np.linalg.norm(at(q) + at(-q) - 2 * p0) / q**2))
-    for q in nonzero:
-        if at(2 * q) is not None:
-            pair.append((q, np.linalg.norm(at(2 * q) - 2 * at(q) + p0) / q**2))
-    return tuple(np.array(rows, dtype=float).reshape(-1, 2) for rows in (first, central, pair))
+    second = [(q, np.linalg.norm(at(2 * q) - 2 * at(q) + p0) / q**2) for q in nonzero if at(2 * q) is not None]
+    return tuple(np.array(rows, dtype=float).reshape(-1, 2) for rows in (first, second))
 
 
 def analyse(path):
-    """Per mode of one pack: (mode, perts, first, central, pair quotients, SNR report); plus noise and D0 offset."""
+    """Per mode of one pack: (mode, perts, first, second quotients, SNR report); plus noise and D0 offset."""
     conv = load_convergence(path)
     if conv.q0 is None:
         raise SystemExit(f"{path} has no Q=0 point (no 0 in perts, no d0 key); cannot measure differences")
@@ -122,14 +118,12 @@ def plot_defect(defect, packs, output):
     for col, method in enumerate(methods):
         modes, sigma, offset = analyse(packs[method])
         first_ax, second_ax, snr_ax = axes[:, col]
-        for color, (mode, p, first, central, pair, r) in zip(COLORS, modes):
+        for color, (mode, p, first, second, r) in zip(COLORS, modes):
             a1 = 1.0 if r.b_resolved else FAINT
             a2 = 1.0 if r.c_resolved else FAINT
             plot_signed(first_ax, first, "o", color, lambda x: np.sqrt(2) * sigma / x, a1)
             first_ax.axhline(r.b, color=color, lw=1, alpha=0.7 * a1)
-            second_ax.errorbar(central[:, 0], central[:, 1], yerr=np.sqrt(6) * sigma / central[:, 0] ** 2, fmt="s",
-                               ms=7, color=color, capsize=3, elinewidth=1, alpha=a2)
-            plot_signed(second_ax, pair, "D", color, lambda x: np.sqrt(6) * sigma / x**2, a2, big=8, small=4)
+            plot_signed(second_ax, second, "s", color, lambda x: np.sqrt(6) * sigma / x**2, a2)
             second_ax.axhline(2 * r.c, color=color, lw=1, alpha=0.7 * a2)
             # SNR = 1 / relative noise-and-offset error of each finite difference
             snr_ax.plot(q, 1 / r.first_order(q)[0], "-", color=color, lw=1.5, alpha=a1)
@@ -155,7 +149,7 @@ def plot_defect(defect, packs, output):
         snr_ax.set_ylim(ylo, yhi)
         first_ax.set_title(f"{defect} {METHODS[method]}: σ = {sigma:.2g} MHz, D0 offset {offset:.2g} MHz", fontsize=12)
         first_ax.set_ylabel(r"first order $\|D(Q) - D_0\| / Q$ (MHz/Q)")
-        second_ax.set_ylabel(r"second order, $\|\ldots\| / Q^2$ (MHz/Q²)")
+        second_ax.set_ylabel(r"second order $\|D(2Q) - 2D(Q) + D_0\| / Q^2$ (MHz/Q²)")
         snr_ax.set_ylabel("SNR of the finite difference")
         snr_ax.set_xlabel("|Q| (step size)")
         mode_handles = [Line2D([], [], marker="o", ls="", color=c, ms=7, label=f"mode {m}") for c, (m, *_) in
@@ -170,8 +164,8 @@ def plot_defect(defect, packs, output):
             error_handle,
         ], loc="lower left", fontsize=10)
         second_ax.legend(handles=[
-            Line2D([], [], marker="s", ls="", color="0.35", label="central (D(Q) + D(−Q) − 2D0)/Q²"),
-            Line2D([], [], marker="D", ls="", color="0.35", label="pair (D(2Q) − 2D(Q) + D0)/Q², ±Q"),
+            Line2D([], [], marker="s", ls="", color="0.35", mfc="0.35", label="+Q"),
+            Line2D([], [], marker="s", ls="", color="0.35", mfc="white", label="−Q"),
             Line2D([], [], ls="-", color="0.35", label="2c (fit, Q → 0)"),
             error_handle,
         ], loc="lower left", fontsize=10)
