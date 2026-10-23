@@ -10,7 +10,7 @@ written by pack_convergence) gives one column:
   (spinlabs.convergence.traceless_parts), as the fit and the SNR use them;
 - bottom, the signal-to-noise of the finite differences the coupling calculation uses:
   first order b Q / err1 and the i = i pair's second order 2 c Q^2 / err2, against the
-  SNR target, with markers at the amplitudes that were run. A second-order line drawn faint
+  SNR target (SNR above it shaded), with markers at the amplitudes that were run. A second-order line drawn faint
   has c unresolved: the fitted curvature is within noise of zero, so second order is not
   measurable at these amplitudes and the line is no estimate of its SNR.
 
@@ -113,12 +113,16 @@ def plot_defect(defect, packs, output):
         diff_ax.annotate(f"error of D(Q) − D0: {err1:.2g} MHz", (0.0, err1), xycoords=("axes fraction", "data"),
                          xytext=(4, -4), textcoords="offset points", va="top", fontsize=10, color="0.35")
         snr_ax.axhline(SNR_TARGET, color="0.35", ls="--", lw=1)
-        snr_ax.annotate(f"SNR {SNR_TARGET:g}", (0.0, SNR_TARGET), xycoords=("axes fraction", "data"),
+        snr_ax.annotate(f"SNR ≥ {SNR_TARGET:g}", (0.0, SNR_TARGET), xycoords=("axes fraction", "data"),
                         xytext=(4, 4), textcoords="offset points", fontsize=10, color="0.35")
         for ax in (diff_ax, snr_ax):
             ax.set_xscale("log")
             ax.set_yscale("log")
             ax.grid(True, which="major", color="0.9", linewidth=0.6)
+        # shade SNR >= target behind the curves, keeping the limits the curves set
+        ylo, yhi = snr_ax.get_ylim()
+        snr_ax.axhspan(SNR_TARGET, yhi, color="#e5f4e4", zorder=0, lw=0)
+        snr_ax.set_ylim(ylo, yhi)
         diff_ax.set_title(f"{defect} {METHODS[method]}: σ = {sigma:.2g} MHz, D0 offset {offset:.2g} MHz", fontsize=12)
         diff_ax.set_ylabel(r"$\|D(Q) - D_0\|$, traceless parts (MHz)")
         snr_ax.set_ylabel("SNR of the finite difference")
