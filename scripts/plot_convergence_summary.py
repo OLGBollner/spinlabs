@@ -112,7 +112,7 @@ def plot_signed(ax, rows, marker, color, yerr, alpha, big=9, small=5):
 def plot_defect(defect, packs, output):
     methods = [m for m in METHODS if m in packs]
     fig, axes = plt.subplots(3, len(methods), figsize=(7.5 * len(methods), 13), squeeze=False, sharex=True)
-    q = np.geomspace(1e-3, 0.3, 200)
+    q = np.geomspace(1e-2, 0.3, 200)
     for col, method in enumerate(methods):
         modes, sigma, offset = analyse(packs[method])
         first_ax, second_ax, snr_ax = axes[:, col]
