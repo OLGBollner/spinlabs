@@ -10,9 +10,11 @@ written by pack_convergence) gives one column:
   (spinlabs.convergence.traceless_parts), as the fit and the SNR use them;
 - bottom, the signal-to-noise of the finite differences the coupling calculation uses:
   first order b Q / err1 and the i = i pair's second order 2 c Q^2 / err2, against the
-  SNR target (SNR above it shaded), with markers at the amplitudes that were run. A second-order line drawn faint
-  has c unresolved: the fitted curvature is within noise of zero, so second order is not
-  measurable at these amplitudes and the line is no estimate of its SNR.
+  SNR target (SNR above it shaded), with markers at the amplitudes that were run.
+
+A line drawn faint, in either row, has its coefficient unresolved (b for first order, c for
+second order): the fitted value is within noise of zero, so that order is not measurable at
+these amplitudes and the line is no estimate of its size or SNR.
 
 Noise sigma and D0's offset are pooled over all modes of a pack and the coefficients come
 from spinlabs.convergence.snr_report, as ``spinlabs plot convergence`` reports them.
@@ -100,13 +102,14 @@ def plot_defect(defect, packs, output):
                 sel = np.sign(p) == side
                 diff_ax.plot(np.abs(p[sel]), diff[sel], "o", ms=ms, color=color, mfc=face, mew=1.5)
             diff_ax.plot(even[:, 0], even[:, 1], "s", ms=7, color=color, alpha=0.9 if r.c_resolved else 0.4)
-            diff_ax.plot(q, r.b * q, "-", color=color, lw=1, alpha=0.7)
+            first_alpha = 1.0 if r.b_resolved else 0.4
+            diff_ax.plot(q, r.b * q, "-", color=color, lw=1, alpha=0.7 * first_alpha)
             diff_ax.plot(q, r.c * q**2, ":", color=color, lw=1.2, alpha=0.9 if r.c_resolved else 0.4)
             # SNR = 1 / relative noise-and-offset error of each finite difference
-            snr_ax.plot(q, 1 / r.first_order(q)[0], "-", color=color, lw=1.5)
+            snr_ax.plot(q, 1 / r.first_order(q)[0], "-", color=color, lw=1.5, alpha=first_alpha)
             snr_ax.plot(q, 1 / r.second_order(q)[0], "--", color=color, lw=1.5, alpha=1.0 if r.c_resolved else 0.4)
             measured = np.unique(np.abs(p[~np.isclose(p, 0.0)]))
-            snr_ax.plot(measured, 1 / r.first_order(measured)[0], "o", ms=6, color=color)
+            snr_ax.plot(measured, 1 / r.first_order(measured)[0], "o", ms=6, color=color, alpha=first_alpha)
             snr_ax.plot(measured, 1 / r.second_order(measured)[0], "s", ms=6, color=color,
                         alpha=1.0 if r.c_resolved else 0.4)
         err1 = float(np.hypot(np.sqrt(2) * sigma, offset))
@@ -144,6 +147,7 @@ def plot_defect(defect, packs, output):
         snr_ax.legend(handles=[
             Line2D([], [], ls="-", marker="o", color="0.35", label="first order (D(Q) − D0)/Q"),
             Line2D([], [], ls="--", marker="s", color="0.35", label="second order (D(2Q) − 2D(Q) + D0)/Q²"),
+            Line2D([], [], ls="-", color="0.35", alpha=0.4, label="first order, b unresolved"),
             Line2D([], [], ls="--", color="0.35", alpha=0.4, label="second order, c unresolved"),
         ], loc="lower right", fontsize=10)
         print(f"{defect} {method}: {packs[method]}, {len(modes)} modes, sigma {sigma:.3g} MHz, offset {offset:.3g} MHz")
