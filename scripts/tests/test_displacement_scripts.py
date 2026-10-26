@@ -149,12 +149,12 @@ def _convergence_folder(tmp_path: Path) -> Path:
     return defect / "convergence_test_all"
 
 
-def _run_convergence(tmp_path: Path, folder: Path, perts: str, task: int = 0, tasks: int = 1):
+def _run_convergence(tmp_path: Path, folder: Path, perts: str, task: int = 0, tasks: int = 1, **extra_env):
     """Run the convergence loop as array task `task` of `tasks` (array job 99), with fake srun/squeue."""
     env = {**ENV, "PATH": f"{_fake_slurm(tmp_path)}:{ENV['PATH']}", "SPINLABS_CODE": str(REPO), "DEFECT": "SiV_3",
            "binary": "/bin/true", "PHONON_PATH": str(folder.parent / "data" / "phonon_data.npz"), "MODES": "2 7",
            "PERTS": perts, "DISPLACEMENT": "normalized", "SLURM_ARRAY_TASK_ID": str(task),
-           "SLURM_ARRAY_TASK_COUNT": str(tasks), "SLURM_ARRAY_JOB_ID": "99"}
+           "SLURM_ARRAY_TASK_COUNT": str(tasks), "SLURM_ARRAY_JOB_ID": "99", **extra_env}
     return subprocess.run(["sh", str(SCRIPTS / "perturbation_runner.sh"), "convergence"], cwd=folder, env=env,
                           capture_output=True, text=True)
 
@@ -171,6 +171,20 @@ def test_convergence_runner_runs_each_step_size_at_both_signs(tmp_path, perts):
     assert r.returncode == 0, r.stdout + r.stderr
     assert "steps -0.025 0.025 -0.05 0.05" in r.stdout
     assert _finished(folder) == CONV_RUNS
+
+
+def _has_locale(name: str) -> bool:
+    out = subprocess.run(["locale", "-a"], capture_output=True, text=True).stdout.lower().split()
+    return name.lower() in out
+
+
+@pytest.mark.skipif(not _has_locale("sv_SE.utf8"), reason="sv_SE.utf8 locale not installed")
+def test_convergence_runner_reads_every_step_size_in_a_comma_decimal_locale(tmp_path):
+    """Dardel sessions run sv_SE, where sort -g read 0.05 as 0 and only 0.025 was run."""
+    folder = _convergence_folder(tmp_path)
+    r = _run_convergence(tmp_path, folder, "0.025 0.05 0.1 0.2", MODES="2", LC_ALL="sv_SE.utf8")
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "steps -0.025 0.025 -0.05 0.05 -0.1 0.1 -0.2 0.2" in r.stdout
 
 
 def test_a_task_done_with_its_share_takes_the_others_free_runs(tmp_path):

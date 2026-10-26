@@ -44,7 +44,10 @@ if [ "$ORDER" = "convergence" ]; then
   # steps), and so are repeated sizes and zero, which is the unperturbed reference ZFS_hyp/ZFS_occup.
   bad=$(echo "$PERTS" | tr ' ' '\n' | awk 'NF && $1 !~ /^[-+]?([0-9]+\.?[0-9]*|\.[0-9]+)([eE][-+]?[0-9]+)?$/ { print $1; exit }')
   [ -z "$bad" ] || fail "PERTS must be numbers, got: '$bad'"
-  SIZES=$(echo "$PERTS" | tr ' ' '\n' | awk 'NF { v = $1 + 0; if (v < 0) v = -v; if (v > 0) printf "%g\n", v }' | sort -g -u)
+  # LC_ALL=C: in a comma-decimal locale (sv_SE on Dardel) sort -g reads 0.05 as 0, and -u then
+  # keeps only the first size.
+  SIZES=$(echo "$PERTS" | tr ' ' '\n' \
+    | LC_ALL=C awk 'NF { v = $1 + 0; if (v < 0) v = -v; if (v > 0) printf "%g\n", v }' | LC_ALL=C sort -g -u)
   [ -n "$SIZES" ] || fail "PERTS has no nonzero step size: '$PERTS'"
   STEPS=""
   for s in $SIZES; do STEPS="$STEPS${STEPS:+ }-$s $s"; done
