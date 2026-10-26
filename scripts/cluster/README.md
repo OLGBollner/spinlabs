@@ -28,8 +28,11 @@ from that snapshot.
   (`create_phonon_struct.py`, run dirs `runs/<mode>`), second order along mode pairs
   (`create_combined_phonon_struct.py`, `runs/<i>_<j>`), convergence each of `MODES` at -p and
   +p for each size p in `PERTS` (`runs/<mode>_pert_<step>`; a sign, a repeat or 0 in `PERTS`
-  is dropped, so older signed lists run the same steps). Run dirs whose OUTCAR already has a complete
-  spin-spin ZFS block are skipped, so restarts resume where they stopped. Each array task
+  is dropped, so older signed lists run the same steps). A run dir is finished when it has
+  `.done`, written by the task that finished it once its OUTCAR has the spin-spin ZFS block
+  (that task alone reads the OUTCAR, and checks it with `check_run.py`); finished dirs are
+  skipped, so restarts resume where they stopped. Run dirs from before `.done` (no `.done`, no
+  `.attempted`) have their OUTCAR checked once and get `.done` if complete. Each array task
   first runs its own share (run index mod array size), then takes the other tasks' runs that
   are still free, so no task idles while others have work left; a run directory's `.lock`
   keeps two tasks out of it, and its `.attempted` (the array job id) stops the other tasks of

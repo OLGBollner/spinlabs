@@ -182,12 +182,26 @@ attempted_by_this_array() {
   [ "$(cat "$1/.attempted" 2>/dev/null || true)" = "$ARRAY_TAG" ]
 }
 
+# A run directory is finished when it has .done, which the task that finished it writes after
+# finding the ZFS block in its OUTCAR; nobody else reads that OUTCAR for it. A directory with
+# neither .done nor .attempted predates both: its OUTCAR is checked once and, if complete,
+# gets its .done then. (One with .attempted but no .done did not finish and can be retried.)
+is_done() {
+  [ -f "$1/.done" ] && return 0
+  [ -f "$1/.attempted" ] && return 1
+  if [ -f "$1/OUTCAR" ] && grep -qzP "$ZFS_REGEX_PATTERN" "$1/OUTCAR"; then
+    : > "$1/.done"
+    return 0
+  fi
+  return 1
+}
+
 # run_one LABEL DIR STRUCT_ARGS...: perturb input/POSCAR along the modes and run VASP in DIR.
 run_one() {
   label=$1
   TARGET_DIR=$2
   shift 2
-  if [ -f "$TARGET_DIR"/OUTCAR ] && grep -qzP "$ZFS_REGEX_PATTERN" "$TARGET_DIR"/OUTCAR; then
+  if is_done "$TARGET_DIR"; then
     echo "$ID: skipping $label"
     return 0
   fi
@@ -197,7 +211,7 @@ run_one() {
   fi
   acquire_lock "$TARGET_DIR" || return 0
   # Another job may have finished this directory before the lock was ours.
-  if [ -f "$TARGET_DIR"/OUTCAR ] && grep -qzP "$ZFS_REGEX_PATTERN" "$TARGET_DIR"/OUTCAR; then
+  if is_done "$TARGET_DIR"; then
     echo "$ID: skipping $label (finished by another job)"
     release_lock
     return 0
@@ -208,7 +222,7 @@ run_one() {
     return 0
   fi
   printf '%s\n' "$ARRAY_TAG" > "$TARGET_DIR/.attempted"
-  rm -f "$TARGET_DIR"/CHECK  # from an earlier attempt
+  rm -f "$TARGET_DIR"/CHECK "$TARGET_DIR"/.done  # from an earlier attempt
   cp "$INPUT_DIR"/* "$TARGET_DIR"/
   cd "$TARGET_DIR"
   echo "$ID: starting job for $label"
@@ -242,11 +256,11 @@ run_one() {
     echo "$ID: VASP exited with $status for $label"
     VASP_FAILED=$((VASP_FAILED + 1))
   fi
-  # Only drop the restart files once this directory really is complete -- the same test
-  # the skip-guard above uses. VASP can exit 0 without writing a ZFS block; such a
-  # directory is not skipped on relaunch, so it restarts from scratch and needs
-  # CHGCAR/CHG to resume. (A cancelled job never reaches this line at all.)
+  # The one read of this OUTCAR's ZFS block: only a complete run gets .done and loses its
+  # restart files. VASP can exit 0 without writing a ZFS block; such a directory gets no .done,
+  # so it is retried and needs CHGCAR/CHG to resume. (A cancelled job never reaches this line.)
   if [ -f OUTCAR ] && grep -qzP "$ZFS_REGEX_PATTERN" OUTCAR; then
+    : > .done
     echo "$ID: removing excess VASP results (WAVECAR, CHGCAR, CHG)"
     rm -f WAVECAR CHGCAR CHG
     # Completion, VASP's symmetry handling and the ZFS change's shape; a suspicious run

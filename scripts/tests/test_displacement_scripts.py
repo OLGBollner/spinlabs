@@ -160,7 +160,7 @@ def _run_convergence(tmp_path: Path, folder: Path, perts: str, task: int = 0, ta
 
 
 def _finished(folder: Path) -> list[str]:
-    return sorted(p.name for p in (folder / "runs").iterdir() if (p / "OUTCAR").is_file())
+    return sorted(p.name for p in (folder / "runs").iterdir() if (p / ".done").is_file())
 
 
 @pytest.mark.parametrize("perts", ["0.025 0.05", "-0.05 -0.025 0.0 0.025 0.05 0.05"])
@@ -239,3 +239,29 @@ def test_add_convergence_to_an_existing_defect_takes_its_trees_displacement(tmp_
     assert _config(script, "DISPLACEMENT") == "mass_weighted"
     assert _config(script, "binary") == "/opt/vasp_std"
     assert _config(script, "PERTS") == '"0.05 0.1 0.2"'
+
+
+def test_finished_runs_are_known_by_done_and_older_ones_get_it_once(tmp_path):
+    folder = _convergence_folder(tmp_path)
+    complete = (" Spin-spin contribution to zero-field splitting tensor (MHz)\n ---\n"
+                "      D_xx      D_yy      D_zz      D_xy      D_xz      D_yz\n ---\n"
+                "  -1.0  -1.0  2.0  0.0  0.0  0.0\n ---\n")
+    # from before .done: a complete OUTCAR and no markers -> finished, gets .done without a rerun
+    legacy = folder / "runs" / "2_pert_0.025"
+    legacy.mkdir(parents=True)
+    (legacy / "OUTCAR").write_text(complete)
+    # started by an earlier submission that did not finish it: .attempted, no .done -> rerun,
+    # its OUTCAR is not read (it is complete here only to show that it is not trusted)
+    unfinished = folder / "runs" / "7_pert_0.025"
+    unfinished.mkdir(parents=True)
+    (unfinished / ".attempted").write_text("98\n")
+    (unfinished / "OUTCAR").write_text(complete)
+    r = _run_convergence(tmp_path, folder, "0.025 0.05")
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert _finished(folder) == CONV_RUNS
+    assert "skipping mode 2 step 0.025\n" in r.stdout and "starting job for mode 2 step 0.025" not in r.stdout
+    assert "starting job for mode 7 step 0.025" in r.stdout
+    # a second submission only looks at .done
+    r = _run_convergence(tmp_path, folder, "0.025 0.05")
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "starting job" not in r.stdout
