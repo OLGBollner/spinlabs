@@ -54,7 +54,11 @@ find "$@" -path '*/.spinlabs-code' -prune -o -type f \( -name 'run_perturbation_
       # the convention the runs so far used
       if ("DISPLACEMENT=" in old) { conv = old["DISPLACEMENT="]; sub(/^DISPLACEMENT=/, "", conv); sub(/[ \t]*#.*/, "", conv)
                                    gsub(/["\047]/, "", conv); sub(/^\$\{DISPLACEMENT:-/, "", conv); sub(/\}$/, "", conv) }
-      else if ("MASS_WEIGHTED=" in old) { mw = old["MASS_WEIGHTED="]; conv = (mw ~ /^MASS_WEIGHTED=["\047]?0/) ? "unweighted" : "mass_weighted" }
+      else if ("MASS_WEIGHTED=" in old) {  # 0 or its ${MASS_WEIGHTED:-0} default: unweighted
+        mw = old["MASS_WEIGHTED="]; sub(/^MASS_WEIGHTED=/, "", mw); sub(/[ \t]*#.*/, "", mw); gsub(/["\047]/, "", mw)
+        sub(/^\$\{MASS_WEIGHTED:?-/, "", mw); sub(/\}$/, "", mw)
+        conv = (mw == "0") ? "unweighted" : "mass_weighted"
+      }
       else conv = (disp != "") ? disp : "mass_weighted"
     }
     {

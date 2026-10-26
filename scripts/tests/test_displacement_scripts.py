@@ -63,6 +63,8 @@ def test_old_convergence_script_becomes_run_convergence_keeping_its_runs(tmp_pat
 @pytest.mark.parametrize("config, flag, expected", [
     ("MASS_WEIGHTED=0\n", [], "unweighted"),
     ("MASS_WEIGHTED=${MASS_WEIGHTED:-1}\n", [], "mass_weighted"),
+    # the default form as NV_64's first-order scripts have it: its value, 0, counts
+    ("MASS_WEIGHTED=${MASS_WEIGHTED:-0}  # 1: displace by Q*e/sqrt(m); 0: by Q*e\n", [], "unweighted"),
     ("", [], "mass_weighted"),  # from before both settings
     ("", ["--no-mass-weighted"], "unweighted"),
     ("DISPLACEMENT=normalized\n", ["--no-mass-weighted"], "normalized"),  # the script's own setting wins

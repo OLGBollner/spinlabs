@@ -45,7 +45,7 @@ def tree_displacement(folder: Path) -> str | None:
     """A tree's displacement convention (spinlabs.models.DISPLACEMENTS) from its job script in ``folder``.
 
     DISPLACEMENT if the script sets it (a ${DISPLACEMENT:-x} default counts as x), else the
-    older MASS_WEIGHTED (0: unweighted, 1 or its ${MASS_WEIGHTED:-1} default: mass_weighted);
+    older MASS_WEIGHTED (0 or ${MASS_WEIGHTED:-0}: unweighted, 1 or ${MASS_WEIGHTED:-1}: mass_weighted);
     None when the script says neither (trees from before both were mass-weighted).
     """
     from spinlabs.models import displacement_convention
@@ -57,8 +57,9 @@ def tree_displacement(folder: Path) -> str | None:
             value = re.sub(r"^\$\{DISPLACEMENT:-(.*)\}$", r"\1", match.group(1).strip("'\""))
             return displacement_convention(value)
         match = _MASS_WEIGHTED_LINE.search(text)
-        if match:
-            return "unweighted" if match.group(1).strip("'\"") == "0" else "mass_weighted"
+        if match:  # a ${MASS_WEIGHTED:-0} default counts as its value, 0
+            value = re.sub(r"^\$\{MASS_WEIGHTED:?-(.*)\}$", r"\1", match.group(1).strip("'\""))
+            return "unweighted" if value.strip("'\"") == "0" else "mass_weighted"
     return None
 
 

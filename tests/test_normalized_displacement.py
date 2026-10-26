@@ -154,6 +154,20 @@ def test_new_tree_is_normalized_and_gets_convergence_folders(tmp_path):
         assert "<" not in "".join(ln for ln in script.read_text().splitlines() if re.match(r"^[A-Za-z_]+=", ln))
 
 
+@pytest.mark.parametrize("line, expected", [
+    ("MASS_WEIGHTED=0", "unweighted"),
+    ("MASS_WEIGHTED=${MASS_WEIGHTED:-0}  # 1: displace by Q*e/sqrt(m); 0: by Q*e", "unweighted"),
+    ("MASS_WEIGHTED=${MASS_WEIGHTED:-1}", "mass_weighted"),
+    ("DISPLACEMENT=${DISPLACEMENT:-normalized}", "normalized"),
+    ("PERT=0.1", None),
+])
+def test_tree_displacement_reads_set_and_default_forms(tmp_path, line, expected):
+    from spinlabs.vasp.trees import tree_displacement
+
+    (tmp_path / "run_perturbation_first_order.sh").write_text(f"DEFECT=NV_64\n{line}\n")
+    assert tree_displacement(tmp_path) == expected
+
+
 def test_tree_needs_a_step(tmp_path):
     from spinlabs.vasp.trees import build_perturbation_tree
 
