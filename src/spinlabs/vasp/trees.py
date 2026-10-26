@@ -112,18 +112,20 @@ def patch_restart_incar(incar: str) -> str:
 def forbid_algo_none(incar: str) -> tuple[str, str | None]:
     """Guard against ALGO=None in a perturbation INCAR.
 
-    ALGO=None runs a single diagonalization on whatever CHGCAR is present,
-    so a perturbed structure would be evaluated on the relaxed structure's
-    (stale) charge density -- silently invalid ZFS.  If ALGO=None is found,
-    correct it to ALGO=Normal and return a warning message.
+    ALGO=None does no electronic minimization at all: the orbitals stay as
+    they start, and the density is never updated. Without a WAVECAR
+    (ISTART=0) the orbitals start random and the ZFS is noise; with one,
+    they are the WAVECAR's orbitals of another structure. Either way the
+    D tensor is silently invalid.  If ALGO=None is found, correct it to
+    ALGO=Normal and return a warning message.
     """
     if not re.search(r"^\s*ALGO\s*=\s*None\b", incar, re.M | re.I):
         return incar, None
     out = replace_tag(incar, "ALGO", "Normal")
     warning = (
-        "INCAR had ALGO=None (non-self-consistent single "
-        "diagonalization on the CHGCAR); corrected to ALGO=Normal "
-        "so the perturbed structure gets its own SCF density"
+        "INCAR had ALGO=None (no orbital or density update, so the ZFS "
+        "would come from the starting orbitals); corrected to ALGO=Normal "
+        "so the perturbed structure gets its own SCF solution"
     )
     return out, warning
 
