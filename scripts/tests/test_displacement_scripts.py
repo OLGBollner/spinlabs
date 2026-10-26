@@ -126,7 +126,7 @@ def test_tree_creation_requires_a_step_and_convergence_modes(tmp_path):
 def _fake_slurm(tmp_path: Path) -> Path:
     """srun that writes a complete ZFS block, squeue that reports no jobs."""
     bin_dir = tmp_path / "bin"
-    bin_dir.mkdir()
+    bin_dir.mkdir(exist_ok=True)
     zfs = (" Spin-spin contribution to zero-field splitting tensor (MHz)\n ---\n"
            "      D_xx      D_yy      D_zz      D_xy      D_xz      D_yz\n ---\n"
            "  -1.0  -1.0  2.0  0.0  0.0  0.0\n ---\n")
@@ -137,26 +137,68 @@ def _fake_slurm(tmp_path: Path) -> Path:
     return bin_dir
 
 
-@pytest.mark.parametrize("perts", ["0.025 0.05", "-0.05 -0.025 0.0 0.025 0.05 0.05"])
-def test_convergence_runner_runs_each_step_size_at_both_signs(tmp_path, perts):
-    """A list of sizes and an older signed list (with 0 and a repeat) give the same runs."""
+CONV_RUNS = sorted(f"{m}_pert_{s}" for m in (2, 7) for s in ("-0.025", "0.025", "-0.05", "0.05"))
+
+
+def _convergence_folder(tmp_path: Path) -> Path:
     from spinlabs.vasp.trees import build_convergence_tree
 
     defect = _defect(tmp_path)
-    phonon = defect / "data" / "phonon_data.npz"
-    assert build_convergence_tree(defect, phonon, [2, 7], [STEP], displacement="normalized",
-                                  vasp_binary=Path("/bin/true")) == []
-    folder = defect / "convergence_test_all"
+    assert build_convergence_tree(defect, defect / "data" / "phonon_data.npz", [2, 7], [STEP],
+                                  displacement="normalized", vasp_binary=Path("/bin/true")) == []
+    return defect / "convergence_test_all"
+
+
+def _run_convergence(tmp_path: Path, folder: Path, perts: str, task: int = 0, tasks: int = 1):
+    """Run the convergence loop as array task `task` of `tasks` (array job 99), with fake srun/squeue."""
     env = {**ENV, "PATH": f"{_fake_slurm(tmp_path)}:{ENV['PATH']}", "SPINLABS_CODE": str(REPO), "DEFECT": "SiV_3",
-           "binary": "/bin/true", "PHONON_PATH": str(phonon), "MODES": "2 7", "PERTS": perts,
-           "DISPLACEMENT": "normalized", "SLURM_ARRAY_TASK_ID": "0", "SLURM_ARRAY_TASK_COUNT": "1",
-           "SLURM_ARRAY_JOB_ID": "99"}
-    r = subprocess.run(["sh", str(SCRIPTS / "perturbation_runner.sh"), "convergence"], cwd=folder, env=env,
-                       capture_output=True, text=True)
+           "binary": "/bin/true", "PHONON_PATH": str(folder.parent / "data" / "phonon_data.npz"), "MODES": "2 7",
+           "PERTS": perts, "DISPLACEMENT": "normalized", "SLURM_ARRAY_TASK_ID": str(task),
+           "SLURM_ARRAY_TASK_COUNT": str(tasks), "SLURM_ARRAY_JOB_ID": "99"}
+    return subprocess.run(["sh", str(SCRIPTS / "perturbation_runner.sh"), "convergence"], cwd=folder, env=env,
+                          capture_output=True, text=True)
+
+
+def _finished(folder: Path) -> list[str]:
+    return sorted(p.name for p in (folder / "runs").iterdir() if (p / "OUTCAR").is_file())
+
+
+@pytest.mark.parametrize("perts", ["0.025 0.05", "-0.05 -0.025 0.0 0.025 0.05 0.05"])
+def test_convergence_runner_runs_each_step_size_at_both_signs(tmp_path, perts):
+    """A list of sizes and an older signed list (with 0 and a repeat) give the same runs."""
+    folder = _convergence_folder(tmp_path)
+    r = _run_convergence(tmp_path, folder, perts)
     assert r.returncode == 0, r.stdout + r.stderr
     assert "steps -0.025 0.025 -0.05 0.05" in r.stdout
-    assert sorted(p.name for p in (folder / "runs").iterdir()) == sorted(
-        f"{m}_pert_{s}" for m in (2, 7) for s in ("-0.025", "0.025", "-0.05", "0.05"))
+    assert _finished(folder) == CONV_RUNS
+
+
+def test_a_task_done_with_its_share_takes_the_others_free_runs(tmp_path):
+    """Task 0 of 2 runs its own half first, then the other half nobody has started."""
+    folder = _convergence_folder(tmp_path)
+    r = _run_convergence(tmp_path, folder, "0.025 0.05", task=0, tasks=2)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert _finished(folder) == CONV_RUNS
+    started = [line.split("starting job for ")[1] for line in r.stdout.splitlines() if "starting job for" in line]
+    # items in order: (step, mode) = (-0.025,2) (-0.025,7) (0.025,2) (0.025,7) ...; task 0 owns the even ones
+    assert started[:4] == ["mode 2 step -0.025", "mode 2 step 0.025", "mode 2 step -0.05", "mode 2 step 0.05"]
+    assert sorted(started[4:]) == sorted(f"mode 7 step {s}" for s in ("-0.025", "0.025", "-0.05", "0.05"))
+    assert "own share done" in r.stdout
+
+
+def test_a_run_attempted_by_this_array_is_not_retried_by_its_other_tasks(tmp_path):
+    folder = _convergence_folder(tmp_path)
+    tried = folder / "runs" / "7_pert_0.05"
+    tried.mkdir(parents=True)
+    (tried / ".attempted").write_text("99\n")  # another task of array 99 started it and it failed
+    r = _run_convergence(tmp_path, folder, "0.025 0.05", task=0, tasks=2)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "skipping mode 7 step 0.05 -- already attempted" in r.stdout
+    assert _finished(folder) == [n for n in CONV_RUNS if n != "7_pert_0.05"]
+    (tried / ".attempted").write_text("98\n")  # a run of an earlier submission is retried
+    r = _run_convergence(tmp_path, folder, "0.025 0.05", task=0, tasks=2)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert _finished(folder) == CONV_RUNS
 
 
 def test_convergence_runner_refuses_a_non_numeric_step(tmp_path):

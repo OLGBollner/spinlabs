@@ -95,8 +95,8 @@ esac
 echo "spinlabs code: $(basename "$SPINLABS_CODE") ($SPINLABS_CODE)"
 # ------------------------------------------------------------------------
 
-ID=$SLURM_ARRAY_TASK_ID
-NJOBS=$SLURM_ARRAY_TASK_COUNT
+ID=${SLURM_ARRAY_TASK_ID:-0}
+NJOBS=${SLURM_ARRAY_TASK_COUNT:-1}
 ZFS_REGEX_PATTERN='Spin-spin contribution to zero-field splitting tensor \(MHz\)\s*-+\s*D_xx\s+D_yy\s+D_zz\s+D_xy\s+D_xz\s+D_yz\s*-+\s*([\s\d\.\-]+?)(?=\s*-{3,})'
 
 echo $ID
@@ -175,6 +175,13 @@ trap 'release_lock; exit 143' TERM
 trap 'release_lock; exit 130' INT
 # ---- end lock ----
 
+# The submission this task belongs to: a run directory's .attempted names the last one that
+# started it. A failed run is retried by the next submission, not by the other tasks of this one.
+ARRAY_TAG=${SLURM_ARRAY_JOB_ID:-${SLURM_JOB_ID:-local-$$}}
+attempted_by_this_array() {
+  [ "$(cat "$1/.attempted" 2>/dev/null || true)" = "$ARRAY_TAG" ]
+}
+
 # run_one LABEL DIR STRUCT_ARGS...: perturb input/POSCAR along the modes and run VASP in DIR.
 run_one() {
   label=$1
@@ -184,6 +191,10 @@ run_one() {
     echo "$ID: skipping $label"
     return 0
   fi
+  if attempted_by_this_array "$TARGET_DIR"; then
+    echo "$ID: skipping $label -- already attempted by another task of this array"
+    return 0
+  fi
   acquire_lock "$TARGET_DIR" || return 0
   # Another job may have finished this directory before the lock was ours.
   if [ -f "$TARGET_DIR"/OUTCAR ] && grep -qzP "$ZFS_REGEX_PATTERN" "$TARGET_DIR"/OUTCAR; then
@@ -191,6 +202,12 @@ run_one() {
     release_lock
     return 0
   fi
+  if attempted_by_this_array "$TARGET_DIR"; then
+    echo "$ID: skipping $label -- already attempted by another task of this array"
+    release_lock
+    return 0
+  fi
+  printf '%s\n' "$ARRAY_TAG" > "$TARGET_DIR/.attempted"
   rm -f "$TARGET_DIR"/CHECK  # from an earlier attempt
   cp "$INPUT_DIR"/* "$TARGET_DIR"/
   cd "$TARGET_DIR"
@@ -246,44 +263,57 @@ run_one() {
 mkdir -p runs
 
 VASP_FAILED=0
-PAIR_ID=0
-if [ "$ORDER" = "convergence" ]; then
-  # Every (step, mode) run is one item, dealt round-robin over the array tasks.
-  for p in $STEPS; do
-    for i in $MODES; do
-      if [ $((PAIR_ID % NJOBS)) -eq $ID ]; then
-        echo "$ID: processing mode $i step $p"
+
+# Two passes over the run list. First a task runs its own share (item index mod array size).
+# Then it walks the list again and takes the others' runs that are still free (the lock above),
+# so a task that finishes its share early keeps working instead of idling while the others
+# still have theirs left. A run another task of this array has already attempted (.attempted)
+# is skipped in both passes, so one that failed is not retried by every task.
+visit() {
+  mine=no
+  [ $((ITEM % NJOBS)) -eq "$ID" ] && mine=yes
+  ITEM=$((ITEM + 1))
+  case $PASS:$mine in
+    own:yes|rest:no) run_one "$@" ;;
+  esac
+  return 0
+}
+
+walk() {
+  ITEM=0
+  if [ "$ORDER" = "convergence" ]; then
+    for p in $STEPS; do
+      for i in $MODES; do
         PERT=$p
-        run_one "mode $i step $p" "runs/${i}_pert_${p}" "$i"
+        visit "mode $i step $p" "runs/${i}_pert_${p}" "$i"
+      done
+    done
+    return 0
+  fi
+  for i in $MODES; do
+    if [ "$ORDER" = "first_order" ]; then
+      visit "mode $i" "runs/$i" "$i"
+      continue
+    fi
+    for j in $MODES; do
+      if [ "$PAIR_MODE" = "diag" ] && [ "$i" != "$j" ]; then
+        continue
       fi
-      PAIR_ID=$((PAIR_ID + 1))
+      if [ "$PAIR_MODE" = "all" ] && [ $i -gt $j ]; then
+        continue
+      fi
+      visit "pair $i, $j" "runs/${i}_${j}" "$i" "$j"
     done
   done
-  MODES=""  # the loop below is for the first- and second-order trees
+}
+
+PASS=own
+walk
+if [ "$NJOBS" -gt 1 ]; then
+  echo "$ID: own share done -- taking free runs of the other tasks"
+  PASS=rest
+  walk
 fi
-for i in $MODES; do
-  if [ "$ORDER" = "first_order" ]; then
-    if [ $((PAIR_ID % NJOBS)) -eq $ID ]; then
-      echo "$ID: processing mode $i"
-      run_one "mode $i" "runs/$i" "$i"
-    fi
-    PAIR_ID=$((PAIR_ID + 1))
-    continue
-  fi
-  for j in $MODES; do
-    if [ "$PAIR_MODE" = "diag" ] && [ "$i" != "$j" ]; then
-      continue
-    fi
-    if [ "$PAIR_MODE" = "all" ] && [ $i -gt $j ]; then
-      continue
-    fi
-    if [ $((PAIR_ID % NJOBS)) -eq $ID ]; then
-      echo "$ID: processing pair $PAIR_ID (modes $i, $j)"
-      run_one "pair $i, $j" "runs/${i}_${j}" "$i" "$j"
-    fi
-    PAIR_ID=$((PAIR_ID + 1))
-  done
-done
 
 if [ "$VASP_FAILED" -gt 0 ]; then
   echo "$ID: VASP failed in $VASP_FAILED run(s); the task still attempted all its others"

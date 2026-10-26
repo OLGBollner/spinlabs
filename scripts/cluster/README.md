@@ -29,7 +29,11 @@ from that snapshot.
   (`create_combined_phonon_struct.py`, `runs/<i>_<j>`), convergence each of `MODES` at -p and
   +p for each size p in `PERTS` (`runs/<mode>_pert_<step>`; a sign, a repeat or 0 in `PERTS`
   is dropped, so older signed lists run the same steps). Run dirs whose OUTCAR already has a complete
-  spin-spin ZFS block are skipped, so restarts resume where they stopped.
+  spin-spin ZFS block are skipped, so restarts resume where they stopped. Each array task
+  first runs its own share (run index mod array size), then takes the other tasks' runs that
+  are still free, so no task idles while others have work left; a run directory's `.lock`
+  keeps two tasks out of it, and its `.attempted` (the array job id) stops the other tasks of
+  the same submission from retrying a run that failed.
 - `create_perturbation_tree.py`: build ready-to-go trees (`first_order`/`second_order` x
   `all_bands`/`defect_band_approx` x steps) from `<defect>/ZFS_hyp` and `<defect>/ZFS_occup`,
   plus the convergence folders `convergence_test_all/` and `convergence_test_occup/`.
