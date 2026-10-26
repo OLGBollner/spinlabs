@@ -120,7 +120,9 @@ class ZFSManager:
         self.calc_method: Optional[str] = (
             raw_data.calc_method or raw_data.metadata.get("calc_method") if raw_data else None
         )
-        self.mass_weighted: bool = raw_data.mass_weighted if raw_data else True
+        # How the runs were displaced (spinlabs.models.DISPLACEMENTS); sets each mode's amplitude q.
+        self.displacement: str = raw_data.displacement_convention if raw_data else "mass_weighted"
+        self.mass_weighted: bool = self.displacement != "unweighted"
         self.exclude_inconsistent_pairs = exclude_inconsistent_pairs
         # Second-order entries failing the linear-response check, as
         # (i, j, alpha, |remainder| in MHz) with 0-based modes; see calculate_second_order_derivatives.
@@ -130,13 +132,16 @@ class ZFSManager:
         self.degenerate_pairs_from_symmetry = degenerate_pairs_from_symmetry
         # (Ex, Ey) pairs, 0-based, whose couplings were replaced that way.
         self.symmetry_derived_pairs: list[tuple[int, int]] = []
-        if not self.mass_weighted:
+        if self.displacement != "mass_weighted":
             if spectrum is None:
                 raise ValueError(
-                    "Non-mass-weighted perturbation data needs the phonon spectrum (eigenvectors and masses) "
-                    "to correct the perturbation amplitudes"
+                    f"{self.displacement} perturbation data needs the phonon spectrum (eigenvectors and masses) "
+                    "to get each mode's perturbation amplitude"
                 )
-            LOGGER.info("Perturbations are not mass-weighted: scaling q by each mode's effective sqrt(mass)")
+            if self.displacement == "unweighted":
+                LOGGER.info("Perturbations are not mass-weighted: scaling q by each mode's effective sqrt(mass)")
+            else:
+                LOGGER.info("Perturbations are normalized (same Cartesian step per mode): q scaled by each mode's n_k")
 
         # Processed ZFS data in defect principal frame
         self.zfs_relaxed: Optional[np.ndarray] = None  # Shape (3, 3) in J
@@ -179,7 +184,7 @@ class ZFSManager:
 
     def get_phonon_pert(self, pert_scale_si: float) -> Optional[dict[str, Any]]:
         if self.spectrum is not None:
-            return self.spectrum.get_phonon_pert(pert_scale_si, mass_weighted=self.mass_weighted)
+            return self.spectrum.get_phonon_pert(pert_scale_si, displacement=self.displacement)
         return None
 
     def _ingest_raw_data(self, raw: RawZFSData):
@@ -840,6 +845,7 @@ class ZFSManager:
                 # which apply the 3/2 correction for approx data at intake.
                 spin_correction_applied=normalize_calc_method(self.calc_method) == "defect_band_approx",
                 mass_weighted=self.mass_weighted,
+                displacement=self.displacement,
                 order=kwargs.get("order", 1 if first is not None else 2),
                 ground_state_zfs=gs_tensor,
                 eigen_rotation=self.eigen_rotation,

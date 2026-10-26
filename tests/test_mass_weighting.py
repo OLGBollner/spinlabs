@@ -64,7 +64,7 @@ def test_flag_round_trips_and_legacy_files_read_as_mass_weighted(tmp_path):
 
 
 def test_mixed_weighting_cannot_be_combined():
-    with pytest.raises(ValueError, match="mass-weighted"):
+    with pytest.raises(ValueError, match="mass_weighted and unweighted"):
         _raw(True).combine(_raw(False))
 
 

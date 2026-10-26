@@ -115,7 +115,7 @@ def test_perturbation_check_accepts_the_intended_displacement(tmp_path):
     spectrum = _structures(tmp_path, 1.0)
     ok, line = check_perturbation(tmp_path / "POSCAR", tmp_path / "ref_POSCAR", spectrum, (2, 3), 0.1)
     assert ok, line
-    assert "perturbation OK: modes 2+3, Q=0.1" in line and "scale 1.000 x expected" in line
+    assert "perturbation OK: modes 2+3, step 0.1 (mass_weighted)" in line and "scale 1.000 x expected" in line
 
 
 def test_perturbation_check_rejects_a_doubled_displacement(tmp_path):

@@ -99,7 +99,9 @@ def _on_grid(valid: np.ndarray, values: np.ndarray, temps: np.ndarray) -> np.nda
 
 
 def _label(manager) -> str:
-    weighting = "" if manager.mass_weighted else ", not mass-weighted (corrected)"
+    weighting = {"mass_weighted": "", "unweighted": ", not mass-weighted (corrected)"}.get(
+        manager.displacement, f", {manager.displacement}"
+    )
     return f"{manager.defect}_{manager.cell_size}  {manager.calc_method}  pert {manager.pert_scale:g}{weighting}"
 
 

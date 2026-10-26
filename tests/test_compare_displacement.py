@@ -197,7 +197,7 @@ def test_expected_displacement_scale_with_and_without_mass_weighting(ref_poscar,
     compare_displacement_cli(ref_path, [run], spectrum=spectrum, mass_weighted=not generated_weighted)
     other = capsys.readouterr().out
 
-    assert "modes 1+2, Q=0.1" in matching
+    assert "modes 1+2, step 0.1" in matching
     assert "scale      = 1.000 x expected (residual 0.0%)" in matching
     # Assuming the other weighting gives a scale away from 1 (about sqrt(m) or 1/sqrt(m)).
     scale = float(other.split("scale      = ")[1].split(" x")[0])

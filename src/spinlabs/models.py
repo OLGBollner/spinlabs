@@ -60,6 +60,25 @@ def convert_energy(values: Union[float, np.ndarray], from_unit: str, to_unit: st
         raise ValueError(f"Unsupported target unit: '{to_unit}'")
 
 
+# How a perturbation run displaces the atoms along mode k (e_k: unit mass-weighted eigenvector,
+# m: atomic masses, step: the tree's PERT):
+#   normalized:    step * u_k / |u_k| with u_k = e_k / sqrt(m) -- every mode moves the atoms by the
+#                  same Cartesian length, step (Angstrom); its normal coordinate is step * n_k
+#                  with n_k = 1 / |u_k| (sqrt(amu)), see PhononSpectrum.mode_norm_factors
+#   mass_weighted: step * u_k -- normal coordinate Q = step (Angstrom*sqrt(amu)), the earlier default
+#   unweighted:    step * e_k -- the first NV_64 trees; Q = step * effective sqrt-mass
+DISPLACEMENTS = ("normalized", "mass_weighted", "unweighted")
+
+
+def displacement_convention(displacement: Optional[str], mass_weighted: bool = True) -> str:
+    """The displacement convention named by ``displacement``, else the legacy ``mass_weighted`` flag."""
+    if displacement is None:
+        return "mass_weighted" if mass_weighted else "unweighted"
+    if displacement not in DISPLACEMENTS:
+        raise ValueError(f"Unknown displacement convention {displacement!r}; expected one of {DISPLACEMENTS}")
+    return displacement
+
+
 @dataclass
 class ZFSTensor:
     """
@@ -656,20 +675,30 @@ class PhononSpectrum:
         perturbation_scale: Optional[float] = None,
         *,
         mass_weighted: bool = True,
+        displacement: Optional[str] = None,
     ) -> dict[str, Any]:
         """
         Computes mass-weighted perturbation displacements (SI), frequencies (J), symmetries, and IPRs.
 
         The perturbation amplitude for each mode follows the mass-weighted
-        phonon coordinate  q = q0 * sqrt(2*omega/hbar). Modes with frequency <= 0 get None.
+        phonon coordinate  q = Q * sqrt(2*omega/hbar), with Q the mode's normal
+        coordinate for a step q0 (the scale). Modes with frequency <= 0 get None.
 
-        ``mass_weighted=False`` is for runs displaced by q0 * e instead of
-        q0 * e / sqrt(m): their actual amplitude along mode k is q0 times the
-        mode's effective sqrt-mass (:meth:`effective_sqrt_mass`).
+        ``displacement`` (else ``mass_weighted``) names how the runs were displaced
+        (see DISPLACEMENTS): mass_weighted runs have Q = q0; unweighted runs (q0 * e)
+        have Q = q0 times the mode's effective sqrt-mass (:meth:`effective_sqrt_mass`);
+        normalized runs (a Cartesian step q0 along every mode) have Q = q0 * n_k
+        (:meth:`mode_norm_factors`).
         """
         scale = perturbation_scale if perturbation_scale is not None else perturbation_scale_si
         omega_rads = self.frequencies_mev * CONSTANTS["meV2rads"]
-        weights = np.ones(self.n_modes) if mass_weighted else self.effective_sqrt_mass()
+        convention = displacement_convention(displacement, mass_weighted)
+        if convention == "normalized":
+            weights = self.mode_norm_factors()
+        elif convention == "unweighted":
+            weights = self.effective_sqrt_mass()
+        else:
+            weights = np.ones(self.n_modes)
         displacements = [
             scale * w * np.sqrt(2.0 * omega / Cn.hbar) if freq > 0 else None
             for freq, omega, w in zip(self.frequencies_mev, omega_rads, weights)
@@ -698,6 +727,20 @@ class PhononSpectrum:
         weight = np.sum(np.abs(np.asarray(self.eigenvectors)) ** 2, axis=2)  # (n_modes, n_atoms)
         sqrt_m = np.sqrt(np.asarray(self.atomic_masses, dtype=float))
         return (weight @ sqrt_m) / weight.sum(axis=1)
+
+    def mode_norm_factors(self) -> np.ndarray:
+        """Per-mode n_k = 1 / |e_k / sqrt(m)|, in sqrt(amu).
+
+        A normalized run displaces the atoms by step * u_k / |u_k| with u_k = e_k / sqrt(m),
+        a Cartesian length `step` for every mode; that moves the normal coordinate of mode k by
+        step * n_k. sqrt(12.011) for an all-carbon mode, up to sqrt(m) of the heaviest atom.
+        """
+        if self.atomic_masses is None:
+            raise ValueError("Phonon spectrum has no atomic masses; cannot normalise the displacements")
+        eigs = np.abs(np.asarray(self.eigenvectors))
+        eigs = eigs.reshape(eigs.shape[0], -1, 3)
+        sqrt_m = np.sqrt(np.asarray(self.atomic_masses, dtype=float))
+        return 1.0 / np.linalg.norm((eigs / sqrt_m[None, :, None]).reshape(eigs.shape[0], -1), axis=1)
 
     def calc_ipr(self) -> np.ndarray:
         """Calculates and caches the Inverse Participation Ratio (IPR) for all phonon modes."""
@@ -960,6 +1003,8 @@ class RawZFSData:
     # False for runs displaced by Q * e instead of Q * e / sqrt(m) (before mass
     # weighting was added); the couplings then rescale q, see PhononSpectrum.get_phonon_pert.
     mass_weighted: bool = True
+    # One of DISPLACEMENTS; None for data from before the key, read through mass_weighted.
+    displacement: Optional[str] = None
     order: Optional[int] = None
     ground_state_zfs: Optional[ZFSTensor] = None
     eigen_rotation: Optional[np.ndarray] = None
@@ -969,6 +1014,11 @@ class RawZFSData:
     # VASP settings of the ground state and of each perturbation tree, recorded by
     # ``spinlabs package`` (spinlabs.vasp.settings): {"ground_state", "trees", "problems"}.
     vasp_settings: Optional[dict[str, Any]] = None
+
+    @property
+    def displacement_convention(self) -> str:
+        """How the runs were displaced (one of DISPLACEMENTS); legacy data falls back on mass_weighted."""
+        return displacement_convention(self.displacement, self.mass_weighted)
 
     @property
     def has_second_order(self) -> bool:
@@ -1069,10 +1119,10 @@ class RawZFSData:
                 "Correct the raw dataset first (RawZFSData.load with apply_corrections=True)."
             )
 
-        if self.mass_weighted != other.mass_weighted:
+        if self.displacement_convention != other.displacement_convention:
             raise ValueError(
-                "Cannot combine mass-weighted and non-mass-weighted perturbation datasets: "
-                "their perturbation amplitudes differ per mode."
+                f"Cannot combine {self.displacement_convention} and {other.displacement_convention} perturbation "
+                "datasets: their perturbation amplitudes differ per mode."
             )
 
         merged_metadata = dict(self.metadata)
@@ -1096,6 +1146,7 @@ class RawZFSData:
             calc_method=merged_method,
             spin_correction_applied=merged_correction,
             mass_weighted=self.mass_weighted,
+            displacement=self.displacement,
             order=eff_order,
             ground_state_zfs=gs,
             eigen_rotation=merged_rotation,
@@ -1157,6 +1208,7 @@ class RawZFSData:
             calc_method=self.calc_method,
             spin_correction_applied=self.spin_correction_applied,
             mass_weighted=self.mass_weighted,
+            displacement=self.displacement,
             order=self.order,
             ground_state_zfs=new_gs,
             eigen_rotation=self.eigen_rotation.copy() if self.eigen_rotation is not None else None,
@@ -1172,7 +1224,7 @@ class RawZFSData:
         C3v symmetries, and IPRs from the given phonon spectrum.
         """
         pert_SI = (self.pert_scale or 1.0) * CONSTANTS["ang_amu2SI"]
-        phonon_pert = spectrum.get_phonon_pert(pert_SI, mass_weighted=self.mass_weighted)
+        phonon_pert = spectrum.get_phonon_pert(pert_SI, displacement=self.displacement_convention)
         disps = phonon_pert.get("disp", [])
         syms = phonon_pert.get("sym", [])
         iprs = phonon_pert.get("ipr", [])
@@ -1221,6 +1273,7 @@ class RawZFSData:
         FieldSpec("calc_method", "str", optional=True, decode=_decode_calc_method),
         FieldSpec("spin_correction_applied", "bool", optional=True),
         FieldSpec("mass_weighted", "bool", optional=True),
+        FieldSpec("displacement", "str", optional=True),
         FieldSpec("order", "int", optional=True),
         FieldSpec("ground_state_zfs", "zfstensor", optional=True, legacy_keys=("zfs_relaxed",)),
         FieldSpec("eigen_rotation", "array", optional=True),
@@ -1327,10 +1380,13 @@ class RawZFSData:
             for k, v in (fields.get("second_order") or {}).items():
                 second_order.setdefault(k, v)
 
-        # Files without the key predate it and were mass-weighted.
-        weighted = {f.get("mass_weighted") is not False for f in scaled_fields}
-        if len(weighted) > 1:
-            raise ValueError("Cannot load mass-weighted and non-mass-weighted perturbation files together")
+        # Files without the keys predate them and were mass-weighted.
+        conventions = {
+            displacement_convention(f.get("displacement"), f.get("mass_weighted") is not False) for f in scaled_fields
+        }
+        if len(conventions) > 1:
+            raise ValueError(f"Cannot load perturbation files with different displacements together: {conventions}")
+        convention = conventions.pop()
 
         order = base.get("order")
         if second_order:
@@ -1346,7 +1402,8 @@ class RawZFSData:
             # all(): if some files are uncorrected (only possible with
             # apply_corrections=False), never report the merge as corrected.
             spin_correction_applied=all(f.get("spin_correction_applied") for f in scaled_fields),
-            mass_weighted=weighted.pop(),
+            mass_weighted=convention != "unweighted",
+            displacement=convention,
             order=order,
             ground_state_zfs=base.get("ground_state_zfs"),
             eigen_rotation=base.get("eigen_rotation"),

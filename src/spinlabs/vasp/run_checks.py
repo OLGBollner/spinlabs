@@ -70,19 +70,26 @@ def check_perturbation(
     amplitude: float,
     *,
     mass_weighted: bool = True,
+    displacement: str | None = None,
 ) -> tuple[bool, str]:
-    """Whether ``poscar`` is ``reference`` displaced by ``amplitude`` along ``modes``, with a log line."""
+    """Whether ``poscar`` is ``reference`` displaced by the step ``amplitude`` along ``modes``, with a log line.
+
+    ``displacement`` (else ``mass_weighted``) is the tree's convention, spinlabs.models.DISPLACEMENTS.
+    """
+    from spinlabs.models import displacement_convention
     from spinlabs.vasp.structures import compare_displacement, expected_displacement
 
+    convention = displacement_convention(displacement, mass_weighted)
     stats = compare_displacement(reference, poscar)
     disp = stats["disp"]
-    expected = expected_displacement(spectrum, modes, amplitude, mass_weighted=mass_weighted)
+    expected = expected_displacement(spectrum, modes, amplitude, displacement=convention)
     scale = float(np.sum(disp * expected) / np.sum(expected * expected))
     residual = float(np.linalg.norm(disp - scale * expected) / np.linalg.norm(disp)) if np.any(disp) else 1.0
     ok = abs(scale - 1) <= PERTURBATION_TOL and residual <= PERTURBATION_TOL
     norms = np.linalg.norm(expected, axis=1)
     line = (
-        f"perturbation {'OK' if ok else 'WRONG'}: modes {'+'.join(map(str, modes))}, Q={amplitude:g}: "
+        f"perturbation {'OK' if ok else 'WRONG'}: modes {'+'.join(map(str, modes))}, step {amplitude:g} "
+        f"({convention}): "
         f"max {stats['max']:.6f} A (expected {norms.max():.6f}), rms {stats['rms']:.6f} A "
         f"(expected {np.sqrt((norms ** 2).mean()):.6f}); scale {scale:.3f} x expected, residual {residual:.1%}"
     )
