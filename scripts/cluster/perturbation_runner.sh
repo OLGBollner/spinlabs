@@ -1,27 +1,29 @@
 #!/bin/sh
-# perturbation_runner.sh -- the loop behind run_perturbation_{first,second}_order.sh.
+# perturbation_runner.sh -- the loop behind run_perturbation_{first,second}_order.sh and run_convergence.sh.
 #
-# The per-tree wrappers start it inside a SLURM job, from the tree's all_bands folder:
-#     sh "$SPINLABS_CODE/scripts/cluster/perturbation_runner.sh" first_order|second_order
-# with the tree's config in the environment: DEFECT, binary, PHONON_PATH, PERT, PAIR_MODE
-# (second order), MASS_WEIGHTED (1: Q*e/sqrt(m), the default; 0: Q*e as the earliest
-# trees, e.g. NV_64, were made) and SPINLABS_CODE, the snapshot of the spinlabs repo taken when the job
-# was submitted. This file, the structure scripts and the spinlabs package all come from
-# that snapshot, so every task of a submission runs the same code.
+# The per-tree wrappers start it inside a SLURM job, from the tree's folder (all_bands, ...,
+# or convergence_test_<method>):
+#     sh "$SPINLABS_CODE/scripts/cluster/perturbation_runner.sh" first_order|second_order|convergence
+# with the tree's config in the environment: DEFECT, binary, PHONON_PATH, PERT (first and second
+# order), PAIR_MODE (second order), MODES and PERTS (convergence: modes, signed steps),
+# DISPLACEMENT (normalized | mass_weighted | unweighted; older job scripts give MASS_WEIGHTED
+# 1/0 instead) and SPINLABS_CODE, the snapshot of the spinlabs repo taken when the job was
+# submitted. This file, the structure scripts and the spinlabs package all come from that
+# snapshot, so every task of a submission runs the same code.
 
 ORDER=${1:-}
 case $ORDER in
-  first_order|second_order) ;;
-  *) echo "usage: $0 first_order|second_order" >&2; exit 2 ;;
+  first_order|second_order|convergence) ;;
+  *) echo "usage: $0 first_order|second_order|convergence" >&2; exit 2 ;;
 esac
 
 INPUT_DIR="input"
 HEAD_DIR=$(pwd)
 SCRIPTS="${SPINLABS_CODE:-}/scripts/cluster"
-if [ "$ORDER" = "first_order" ]; then
-  create_struct="$SCRIPTS/create_phonon_struct.py"
-else
+if [ "$ORDER" = "second_order" ]; then
   create_struct="$SCRIPTS/create_combined_phonon_struct.py"
+else
+  create_struct="$SCRIPTS/create_phonon_struct.py"
 fi
 get_n_modes="$SCRIPTS/get_n_modes.py"
 
@@ -32,16 +34,32 @@ fail() { echo "FATAL (task ${SLURM_ARRAY_TASK_ID:-?}): $*" >&2; exit 1; }
 case ${DEFECT:-} in ''|*'<defect>'*) fail "DEFECT unset or still placeholder: '${DEFECT:-}'" ;; esac
 case ${binary:-} in ''|*'<'*|*'/path/to/'*) fail "BINARY unset or still placeholder: '${binary:-}'" ;; esac
 case ${PHONON_PATH:-} in ''|*'<path_to_phonon_data.npz>'*) fail "PHONON_PATH unset or still placeholder: '${PHONON_PATH:-}'" ;; esac
-case ${PERT:-} in ''|*'<pert_scale>'*) fail "PERT unset or still placeholder: '${PERT:-}'" ;; esac
+if [ "$ORDER" = "convergence" ]; then
+  case ${MODES:-} in ''|*'<'*) fail "MODES unset or still placeholder: '${MODES:-}'" ;; esac
+  case ${PERTS:-} in ''|*'<'*) fail "PERTS unset or still placeholder: '${PERTS:-}'" ;; esac
+  for m in $MODES; do
+    case $m in *[!0-9]*) fail "MODES must be 1-based mode numbers, got: '$m'" ;; esac
+  done
+else
+  case ${PERT:-} in ''|*'<pert_scale>'*) fail "PERT unset or still placeholder: '${PERT:-}'" ;; esac
+fi
 if [ "$ORDER" = "second_order" ]; then
   case ${PAIR_MODE:-} in diag|all) ;; *) fail "PAIR_MODE must be diag or all, got: '${PAIR_MODE:-}'" ;; esac
 fi
-MASS_WEIGHTED=${MASS_WEIGHTED-1}  # unset: 1; set but empty (a broken config line) fails below
-case $MASS_WEIGHTED in
-  1) MW_FLAG="" ;;
-  0) MW_FLAG="--no-mass-weighted" ;;
-  '') fail "MASS_WEIGHTED is empty -- check the job script's config line (\${MASS_WEIGHTED:-0} needs the '-', or write MASS_WEIGHTED=0)" ;;
-  *) fail "MASS_WEIGHTED must be 1 (Q*e/sqrt(m)) or 0 (Q*e), got: '$MASS_WEIGHTED'" ;;
+# The displacement convention; job scripts from before DISPLACEMENT give MASS_WEIGHTED (1 or unset:
+# mass_weighted, 0: unweighted) and must keep displacing as their runs so far did.
+if [ -z "${DISPLACEMENT+set}" ]; then
+  MASS_WEIGHTED=${MASS_WEIGHTED-1}  # unset: 1; set but empty (a broken config line) fails below
+  case $MASS_WEIGHTED in
+    1) DISPLACEMENT=mass_weighted ;;
+    0) DISPLACEMENT=unweighted ;;
+    '') fail "MASS_WEIGHTED is empty -- check the job script's config line (\${MASS_WEIGHTED:-0} needs the '-', or write MASS_WEIGHTED=0)" ;;
+    *) fail "MASS_WEIGHTED must be 1 (Q*e/sqrt(m)) or 0 (Q*e), got: '$MASS_WEIGHTED'" ;;
+  esac
+fi
+case $DISPLACEMENT in
+  normalized|mass_weighted|unweighted) DISP_FLAG="--displacement $DISPLACEMENT" ;;
+  *) fail "DISPLACEMENT must be normalized, mass_weighted or unweighted, got: '$DISPLACEMENT'" ;;
 esac
 [ -x "$binary" ] || fail "VASP binary not found/executable: $binary"
 [ -f "$create_struct" ] || fail "create_struct script missing from the code snapshot: $create_struct"
@@ -56,14 +74,16 @@ case $spinlabs_dir in
   "$SPINLABS_CODE"/src/*) ;;
   *) fail "spinlabs is imported from $spinlabs_dir, not from the code snapshot $SPINLABS_CODE/src" ;;
 esac
-MODES=$(python "$get_n_modes" "$PHONON_PATH") || fail "get_n_modes exited nonzero on $PHONON_PATH"
-[ -n "$MODES" ] || fail "get_n_modes returned no modes for $PHONON_PATH"
-echo "Preflight OK: $ORDER, $(echo $MODES | wc -w) modes${PAIR_MODE:+, pair_mode=$PAIR_MODE}, binary=$binary"
-if [ "$MASS_WEIGHTED" = 0 ]; then
-  echo "displacements: Q*e (MASS_WEIGHTED=0, not mass-weighted; package with --no-mass-weighted)"
-else
-  echo "displacements: Q*e/sqrt(m) (mass-weighted)"
+if [ "$ORDER" != "convergence" ]; then  # convergence runs only the modes its config names
+  MODES=$(python "$get_n_modes" "$PHONON_PATH") || fail "get_n_modes exited nonzero on $PHONON_PATH"
+  [ -n "$MODES" ] || fail "get_n_modes returned no modes for $PHONON_PATH"
 fi
+echo "Preflight OK: $ORDER, $(echo $MODES | wc -w) modes${PAIR_MODE:+, pair_mode=$PAIR_MODE}${PERTS:+, steps $PERTS}, binary=$binary"
+case $DISPLACEMENT in
+  normalized) echo "displacements: step * u/|u|, u = e/sqrt(m) (normalized: the same Cartesian step for every mode)" ;;
+  mass_weighted) echo "displacements: Q*e/sqrt(m) (mass-weighted)" ;;
+  unweighted) echo "displacements: Q*e (not mass-weighted)" ;;
+esac
 echo "spinlabs code: $(basename "$SPINLABS_CODE") ($SPINLABS_CODE)"
 # ------------------------------------------------------------------------
 
@@ -169,7 +189,7 @@ run_one() {
   echo "$ID: starting job for $label"
   # In the if-condition a failing script does not trip set -e, so the job still
   # reports the failure and the script's output before exiting.
-  if MSG=$(python "$create_struct" -o POSCAR POSCAR "$PHONON_PATH" "$@" "$PERT" $MW_FLAG) \
+  if MSG=$(python "$create_struct" -o POSCAR POSCAR "$PHONON_PATH" "$@" "$PERT" $DISP_FLAG) \
     && echo "$MSG" | grep -q "Success"; then
     echo "Successfully created perturbed structure"
   else
@@ -179,7 +199,7 @@ run_one() {
     exit 1
   fi
   # The displacement must be Q along exactly these modes before any VASP time is spent.
-  if ! CHECK_MSG=$(python "$SCRIPTS/check_perturbation.py" POSCAR "$HEAD_DIR/$INPUT_DIR/POSCAR" "$PHONON_PATH" "$@" --pert "$PERT" $MW_FLAG); then
+  if ! CHECK_MSG=$(python "$SCRIPTS/check_perturbation.py" POSCAR "$HEAD_DIR/$INPUT_DIR/POSCAR" "$PHONON_PATH" "$@" --pert "$PERT" $DISP_FLAG); then
     echo "$ID: $CHECK_MSG"
     echo "$ID: $label: perturbed POSCAR is not the intended displacement -- VASP not started"
     printf 'perturbation check failed\n%s\n' "$CHECK_MSG" > CHECK
@@ -219,6 +239,20 @@ mkdir -p runs
 
 VASP_FAILED=0
 PAIR_ID=0
+if [ "$ORDER" = "convergence" ]; then
+  # Every (step, mode) run is one item, dealt round-robin over the array tasks.
+  for p in $PERTS; do
+    for i in $MODES; do
+      if [ $((PAIR_ID % NJOBS)) -eq $ID ]; then
+        echo "$ID: processing mode $i step $p"
+        PERT=$p
+        run_one "mode $i step $p" "runs/${i}_pert_${p}" "$i"
+      fi
+      PAIR_ID=$((PAIR_ID + 1))
+    done
+  done
+  MODES=""  # the loop below is for the first- and second-order trees
+fi
 for i in $MODES; do
   if [ "$ORDER" = "first_order" ]; then
     if [ $((PAIR_ID % NJOBS)) -eq $ID ]; then

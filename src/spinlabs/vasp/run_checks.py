@@ -158,9 +158,19 @@ def check_zfs_shape(
 # whole run
 # --------------------------------------------------------------------------- #
 def reference_outcar(run_dir: Path) -> Path | None:
-    """The basis's ground-state OUTCAR for a run folder in a perturbation tree, if it exists."""
+    """The basis's ground-state OUTCAR for a run folder in a perturbation tree, if it exists.
+
+    Tree runs sit at <defect>/<order>/pert_<x>/<basis>/runs/<modes>, convergence runs at
+    <defect>/convergence_test_<all|occup>/runs/<mode>_pert_<p>.
+    """
+    from spinlabs.vasp.trees import CONVERGENCE_FOLDER
+
     run_dir = Path(run_dir).resolve()
     basis = run_dir.parent.parent
+    convergence = {folder: BASIS_SOURCE[b] for b, folder in CONVERGENCE_FOLDER.items()}
+    if basis.name in convergence:
+        outcar = basis.parent / convergence[basis.name] / "OUTCAR"
+        return outcar if outcar.is_file() else None
     source = BASIS_SOURCE.get(basis.name)
     if source is None or len(basis.parents) < 3:
         return None

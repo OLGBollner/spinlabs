@@ -46,7 +46,7 @@ def test_cli_expands_tilde_binary(tmp_path, monkeypatch):
         for name in ("POSCAR", "KPOINTS", "POTCAR"):
             (d / name).write_text(name + "\n")
         (d / "OUTCAR").write_text("Elapsed time (sec):   100.000\n")
-    args = [str(defect), "--pert", "0.0001", "--array-jobs", "1", "--vasp-binary", "../me/vasp_std"]
+    args = [str(defect), "--pert", "0.0001", "--array-jobs", "1", "--vasp-binary", "../me/vasp_std", "--no-convergence"]
     r = subprocess.run(
         ["python", str(SCRIPTS / "create_perturbation_tree.py"), *args],
         capture_output=True,
@@ -73,7 +73,7 @@ def test_generated_scripts_keep_the_time_estimate_and_name_the_repo(tmp_path):
         (d / "OUTCAR").write_text("Elapsed time (sec):   3600.000\n")
     r = subprocess.run(
         ["python", str(SCRIPTS / "create_perturbation_tree.py"), str(defect),
-         "--pert", "0.1", "--array-jobs", "2", "--vasp-binary", "/bin/true"],
+         "--pert", "0.1", "--array-jobs", "2", "--vasp-binary", "/bin/true", "--no-convergence"],
         capture_output=True, text=True, cwd=tmp_path,
         env={"PYTHONPATH": str(REPO / "src"), "PATH": __import__("os").environ["PATH"]},
     )
@@ -89,7 +89,7 @@ def test_generated_scripts_keep_the_time_estimate_and_name_the_repo(tmp_path):
 
 
 def test_unweighted_tree_keeps_q_times_e_through_generation_structures_and_packaging(tmp_path):
-    """--no-mass-weighted writes MASS_WEIGHTED=0; the structure script then displaces by Q*e, which the
+    """--no-mass-weighted writes DISPLACEMENT=unweighted; the structure script then displaces by Q*e, which the
     perturbation check accepts only as unweighted, and packaging reads the setting back from the tree."""
     import os
 
@@ -97,7 +97,7 @@ def test_unweighted_tree_keeps_q_times_e_through_generation_structures_and_packa
     from pymatgen.core import Lattice, Structure
     from pymatgen.io.vasp.inputs import Poscar
 
-    from spinlabs.cli.package import tree_mass_weighted
+    from spinlabs.vasp.trees import tree_displacement
 
     defect = tmp_path / "NV_64"
     (defect / "data").mkdir(parents=True)
@@ -124,13 +124,13 @@ def test_unweighted_tree_keeps_q_times_e_through_generation_structures_and_packa
     env = {"PYTHONPATH": str(REPO / "src"), "PATH": os.environ["PATH"]}
     scripts = SCRIPTS
     r = subprocess.run(
-        ["python", str(scripts / "create_perturbation_tree.py"), str(defect), "--pert", "0.1", "--no-mass-weighted"],
+        ["python", str(scripts / "create_perturbation_tree.py"), str(defect), "--pert", "0.1", "--no-mass-weighted", "--no-convergence"],
         capture_output=True, text=True, cwd=tmp_path, env=env,
     )
     assert r.returncode == 0, r.stdout + r.stderr
     basis = defect / "first_order" / "pert_0.1" / "all_bands"
-    assert re.search(r"^MASS_WEIGHTED=0\b", (basis / "run_perturbation_first_order.sh").read_text(), re.M)
-    assert tree_mass_weighted(basis) is False
+    assert re.search(r"^DISPLACEMENT=unweighted\b", (basis / "run_perturbation_first_order.sh").read_text(), re.M)
+    assert tree_displacement(basis) == "unweighted"
 
     phonons = defect / "data" / "phonon_data.npz"
     run = lambda *a: subprocess.run(["python", *map(str, a)], capture_output=True, text=True, cwd=tmp_path, env=env)  # noqa: E731

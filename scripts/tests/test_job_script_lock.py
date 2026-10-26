@@ -11,7 +11,7 @@ REPO = Path(__file__).resolve().parents[2]
 SCRIPTS = REPO / "scripts" / "cluster"
 TEMPLATES = REPO / "src" / "spinlabs" / "vasp" / "templates"  # the per-tree job scripts
 RUNNER = SCRIPTS / "perturbation_runner.sh"
-WRAPPERS = ("run_perturbation_first_order.sh", "run_perturbation_second_order.sh")
+WRAPPERS = ("run_perturbation_first_order.sh", "run_perturbation_second_order.sh", "run_convergence.sh")
 
 
 def _lock_block() -> str:

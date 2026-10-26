@@ -12,6 +12,8 @@ from pathlib import Path
 
 from spinlabs.parsers import parse_phonon_data
 from spinlabs.vasp import compare_displacement_cli
+from spinlabs.vasp.structures import add_displacement_args, displacement_from_args
+from spinlabs.vasp.trees import tree_displacement
 
 
 def main() -> int:
@@ -33,17 +35,17 @@ def main() -> int:
     ap.add_argument(
         "--pert",
         type=float,
-        metavar="Q",
-        help="perturbation amplitude Q in Å·sqrt(amu) for the expected values (default: from the pert_<x> folder)",
+        metavar="STEP",
+        help="step for the expected values (default: from the pert_<x> folder or <i>_pert_<x> run folder)",
     )
-    ap.add_argument(
-        "--mass-weighted",
-        action=argparse.BooleanOptionalAction,
-        default=True,
-        help="expected displacement Q·e/sqrt(m) (default), or Q·e with --no-mass-weighted, "
-        "as the runs generated before mass weighting was added",
-    )
+    add_displacement_args(ap, default=None)
     args = ap.parse_args()
+    if args.displacement or args.no_mass_weighted:
+        displacement = displacement_from_args(args, ap)
+    else:  # the convention of the first run's tree (its job script), else mass_weighted
+        tree = args.perturbed[0].resolve()
+        tree = tree.parent.parent if tree.is_dir() else tree.parent.parent.parent
+        displacement = tree_displacement(tree) or "mass_weighted"
 
     if not args.reference.exists():
         sys.exit(f"Error: reference not found: {args.reference}")
@@ -58,7 +60,7 @@ def main() -> int:
         args.perturbed,
         spectrum=parse_phonon_data(args.phonons) if args.phonons else None,
         amplitude=args.pert,
-        mass_weighted=args.mass_weighted,
+        displacement=displacement,
     )
     return 0
 

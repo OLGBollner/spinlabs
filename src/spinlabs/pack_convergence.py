@@ -21,6 +21,7 @@ from pathlib import Path
 import numpy as np
 
 from spinlabs.parsers import parse_outcar_energy, parse_outcar_zfs
+from spinlabs.vasp.trees import tree_displacement
 
 from spinlabs.logging_utils import configure_logging, get_logger
 
@@ -112,6 +113,9 @@ def pack_convergence(
         "n_runs": len(runs),
         "method": method,
         "method_key": method_key,
+        # how the steps displaced the atoms (spinlabs.models.DISPLACEMENTS): normalized steps are
+        # Cartesian lengths in Angstrom, the others Q in Angstrom*sqrt(amu)
+        "displacement": tree_displacement(run_root) or "mass_weighted",
     }
     np.savez_compressed(
         output,

@@ -24,7 +24,9 @@ DEFECT=${DEFECT:-<defect>}
 binary=${BINARY:-<vasp_binary>}
 PHONON_PATH=${PHONON_PATH:-<path_to_phonon_data.npz>}
 PERT=${PERT:-<pert_scale>}
-MASS_WEIGHTED=${MASS_WEIGHTED:-1}  # 1: displace by Q*e/sqrt(m); 0: by Q*e (keep 0 for trees made that way, e.g. NV_64)
+# normalized: every mode moved by the Cartesian length PERT (Angstrom); mass_weighted: by Q*e/sqrt(m)
+# with Q = PERT (Angstrom*sqrt(amu)); unweighted: Q*e (the first NV_64 trees)
+DISPLACEMENT=${DISPLACEMENT:-<displacement>}
 PAIR_MODE=${PAIR_MODE:-<pair_mode>}
 SPINLABS_REPO=${SPINLABS_REPO:-<path_to_spinlabs_repo>}
 # ------------------------------------------------------------------------------------------
@@ -64,5 +66,5 @@ source activate /cfs/klemming/projects/supr/adaq/obollner/conda-dirs/envs/sim-en
   exit 1
 }
 PYTHONPATH="$SPINLABS_CODE/src${PYTHONPATH:+:$PYTHONPATH}"
-export PYTHONPATH DEFECT binary PHONON_PATH PERT MASS_WEIGHTED PAIR_MODE SPINLABS_CODE
+export PYTHONPATH DEFECT binary PHONON_PATH PERT DISPLACEMENT PAIR_MODE SPINLABS_CODE
 exec sh "$SPINLABS_CODE/$RUNNER" "$ORDER"

@@ -159,6 +159,8 @@ def test_perturbation_input_incar_is_restart_ready(tmp_path):
     failures = build_perturbation_tree(
         out=defect,
         pert=[0.0001],
+        displacement="normalized",
+        conv_modes=None,
         phonon=defect / "data" / "phonon_data.npz",
         array_jobs=1,
         force=True,
@@ -211,6 +213,8 @@ def test_perturbation_input_incar_corrects_algo_none(tmp_path, caplog):
     failures = build_perturbation_tree(
         out=defect,
         pert=[0.0001],
+        displacement="normalized",
+        conv_modes=None,
         phonon=defect / "data" / "phonon_data.npz",
         array_jobs=1,
         force=True,
@@ -241,6 +245,8 @@ def test_perturbation_input_incar_corrects_isym_with_ldmatrix(tmp_path, caplog):
     failures = build_perturbation_tree(
         out=defect,
         pert=[0.0001],
+        displacement="normalized",
+        conv_modes=None,
         phonon=defect / "data" / "phonon_data.npz",
         array_jobs=1,
         force=True,

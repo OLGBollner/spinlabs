@@ -305,6 +305,40 @@ def _displacement(
     raise ValueError(f"Unknown displacement convention {displacement!r}")
 
 
+def add_displacement_args(parser, default: str | None = "mass_weighted") -> None:
+    """--displacement (spinlabs.models.DISPLACEMENTS) and the older --no-mass-weighted (= unweighted)."""
+    from spinlabs.models import DISPLACEMENTS
+
+    parser.add_argument(
+        "--displacement",
+        choices=DISPLACEMENTS,
+        default=None,
+        help="how the step displaces the atoms: normalized (the same Cartesian length, in Angstrom, along "
+        "every mode), mass_weighted (Q*e/sqrt(m), Q in Angstrom*sqrt(amu)) or unweighted (Q*e)"
+        + (f"; default {default}" if default else "; required"),
+    )
+    parser.add_argument(
+        "--no-mass-weighted",
+        dest="no_mass_weighted",
+        action="store_true",
+        help="same as --displacement unweighted (displace by Q*e, as the earliest runs, e.g. NV_64, were)",
+    )
+    parser.set_defaults(_displacement_default=default)
+
+
+def displacement_from_args(args, parser) -> str:
+    """The convention named by add_displacement_args' options (parser.error on a contradiction)."""
+    if args.no_mass_weighted:
+        if args.displacement not in (None, "unweighted"):
+            parser.error(f"--no-mass-weighted contradicts --displacement {args.displacement}")
+        return "unweighted"
+    if args.displacement is None:
+        if args._displacement_default is None:
+            parser.error("--displacement is required (normalized, mass_weighted or unweighted)")
+        return args._displacement_default
+    return args.displacement
+
+
 def _resolve_mode(mode_index: int, original_indices: np.ndarray | None, n_modes: int) -> int:
     """Resolve a 1-based mode label to an eigenvector array row.
 

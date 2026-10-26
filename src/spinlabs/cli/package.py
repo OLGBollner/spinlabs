@@ -17,7 +17,8 @@ from typing import NamedTuple
 
 from spinlabs.cli import add_verbosity_args
 from spinlabs.logging_utils import attach_db_logging
-from spinlabs.models import RawZFSData, displacement_convention, normalize_calc_method
+from spinlabs.models import RawZFSData, normalize_calc_method
+from spinlabs.vasp.trees import tree_displacement
 from spinlabs.registry import ensure_db, register_file
 from spinlabs.pack_convergence import pack_convergence
 from spinlabs.parsers import parse_zfs_simulation_dataset, split_defect_folder_name
@@ -177,27 +178,11 @@ class _Scanned(NamedTuple):
     displacement: str | None = None
 
 
-_DISPLACEMENT_LINE = re.compile(r"^\s*DISPLACEMENT\s*=\s*(\S+)", re.M)
-_MASS_WEIGHTED_LINE = re.compile(r"^\s*MASS_WEIGHTED\s*=\s*(\S+)", re.M)
 _DISPLACEMENT_TEXT = {
     "normalized": "step * u/|u| (normalized: same Cartesian step per mode)",
     "mass_weighted": "Q*e/sqrt(m) (mass-weighted)",
     "unweighted": "Q*e (not mass-weighted)",
 }
-
-
-def tree_displacement(basis: Path) -> str | None:
-    """A tree's displacement convention from its job script: DISPLACEMENT, else the older MASS_WEIGHTED
-    (1 or its ${MASS_WEIGHTED:-1} default: mass_weighted, 0: unweighted); None when the script says neither."""
-    for script in sorted(basis.glob("run_*.sh")):
-        text = script.read_text(errors="replace")
-        match = _DISPLACEMENT_LINE.search(text)
-        if match:
-            return displacement_convention(match.group(1).strip("'\""))
-        match = _MASS_WEIGHTED_LINE.search(text)
-        if match:
-            return "unweighted" if match.group(1).strip("'\"") == "0" else "mass_weighted"
-    return None
 
 
 def _displacement_of(scanned: _Scanned, cli_unweighted: bool) -> str:

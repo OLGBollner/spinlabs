@@ -9,9 +9,8 @@ from __future__ import annotations
 import argparse
 import sys
 
-import numpy as np
-
 from spinlabs.vasp import apply_combined_perturbation, load_phonon_data, load_poscar, write_perturbed_poscar
+from spinlabs.vasp.structures import add_displacement_args, displacement_from_args
 
 
 def main() -> int:
@@ -20,15 +19,15 @@ def main() -> int:
     ap.add_argument("phonon_file", help="Path to phonon data file (.npz or phonopy .yaml)")
     ap.add_argument("mode_i", type=int, help="First phonon mode index (1-based)")
     ap.add_argument("mode_j", type=int, help="Second phonon mode index (1-based)")
-    ap.add_argument("amplitude", type=float, help="Perturbation amplitude in Angstroms")
-    ap.add_argument("-o", "--output", default=None, help="Output filename")
     ap.add_argument(
-        "--no-mass-weighted",
-        dest="mass_weighted",
-        action="store_false",
-        help="displace by Q*e instead of Q*e/sqrt(m), as the earliest runs (e.g. NV_64) were",
+        "amplitude",
+        type=float,
+        help="step per mode: a Cartesian length in Angstrom (normalized) or Q in Angstrom*sqrt(amu)",
     )
+    ap.add_argument("-o", "--output", default=None, help="Output filename")
+    add_displacement_args(ap)
     args = ap.parse_args()
+    displacement = displacement_from_args(args, ap)
 
     try:
         structure = load_poscar(args.poscar_file)
@@ -38,15 +37,16 @@ def main() -> int:
             phonon_data.eigenvectors,
             args.mode_i,
             args.mode_j,
-            phonon_data.atomic_masses if args.mass_weighted else np.ones(len(phonon_data.atomic_masses)),
+            phonon_data.atomic_masses,
             args.amplitude,
             original_indices=phonon_data.original_indices,
+            displacement=displacement,
         )
         output_file = args.output or f"POSCAR_combined_{args.mode_i}_{args.mode_j}_amp_{args.amplitude}"
         write_perturbed_poscar(
             perturbed,
             output_file,
-            f"Combined modes {args.mode_i}+{args.mode_j}, Q={args.amplitude} Ang*sqrt(amu)",
+            f"Combined modes {args.mode_i}+{args.mode_j}, step {args.amplitude} ({displacement})",
             template_poscar=args.poscar_file,
         )
         print("\nSuccess!")

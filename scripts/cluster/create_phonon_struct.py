@@ -9,10 +9,8 @@ from __future__ import annotations
 import argparse
 import sys
 
-import numpy as np
-
-
 from spinlabs.vasp import apply_perturbation, load_phonon_data, load_poscar, write_perturbed_poscar
+from spinlabs.vasp.structures import add_displacement_args, displacement_from_args
 
 
 def parse_index(s: str) -> list[int]:
@@ -29,15 +27,15 @@ def main() -> int:
     ap.add_argument("poscar_file")
     ap.add_argument("phonon_data")
     ap.add_argument("mode_indices", type=parse_index)
-    ap.add_argument("amplitude", type=float, help="Normal coordinate amplitude Q in Angstrom*sqrt(amu)")
-    ap.add_argument("-o", "--output", default=None)
     ap.add_argument(
-        "--no-mass-weighted",
-        dest="mass_weighted",
-        action="store_false",
-        help="displace by Q*e instead of Q*e/sqrt(m), as the earliest runs (e.g. NV_64) were",
+        "amplitude",
+        type=float,
+        help="step: a Cartesian length in Angstrom (normalized) or Q in Angstrom*sqrt(amu); may be negative",
     )
+    ap.add_argument("-o", "--output", default=None)
+    add_displacement_args(ap)
     args = ap.parse_args()
+    displacement = displacement_from_args(args, ap)
 
     structure = load_poscar(args.poscar_file)
     data = load_phonon_data(args.phonon_data)
@@ -46,14 +44,15 @@ def main() -> int:
         perturbed = apply_perturbation(
             structure,
             data.eigenvectors,
-            data.atomic_masses if args.mass_weighted else np.ones(len(data.atomic_masses)),
+            data.atomic_masses,
             idx,
             args.amplitude,
             original_indices=data.original_indices,
+            displacement=displacement,
         )
         out = args.output if args.output else f"POSCAR_pert_{args.amplitude}_mode_{idx}"
         write_perturbed_poscar(
-            perturbed, out, f"Mode {idx}, Q={args.amplitude} Ang*sqrt(amu)", template_poscar=args.poscar_file
+            perturbed, out, f"Mode {idx}, step {args.amplitude} ({displacement})", template_poscar=args.poscar_file
         )
         print(f"Saved: {out}")
     print("\nSuccess!")
