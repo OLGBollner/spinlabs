@@ -25,7 +25,7 @@ DEFECT=${DEFECT:-<defect>}
 binary=${BINARY:-<vasp_binary>}
 PHONON_PATH=${PHONON_PATH:-<path_to_phonon_data.npz>}
 MODES=${MODES:-<modes>}  # 1-based mode numbers, e.g. "13 62 231 378"
-PERTS=${PERTS:-<perts>}  # signed steps, e.g. "-0.05 -0.025 0.025 0.05"; 2*step gives the forward second order
+PERTS=${PERTS:-<perts>}  # step sizes, each run at -p and +p, e.g. "0.025 0.05"; 2*step gives the forward second order
 # normalized: every mode moved by the Cartesian length |step| (Angstrom); mass_weighted: by Q*e/sqrt(m)
 # with Q = step (Angstrom*sqrt(amu)); unweighted: Q*e (the first NV_64 trees)
 DISPLACEMENT=${DISPLACEMENT:-<displacement>}

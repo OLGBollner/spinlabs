@@ -5,7 +5,7 @@ with `input/` next to it) holds a job script made from the templates in
 `src/spinlabs/vasp/templates/` (`run_perturbation_first_order.sh` / `_second_order.sh`, and
 `run_convergence.sh` for the step-size convergence folders). The job script holds only the
 tree's `#SBATCH` header and config (`DEFECT`, `BINARY`, `PHONON_PATH`, `PERT`, `DISPLACEMENT`,
-`PAIR_MODE`, `SPINLABS_REPO`; convergence: `MODES` and signed `PERTS` instead of `PERT`).
+`PAIR_MODE`, `SPINLABS_REPO`; convergence: `MODES` and `PERTS`, step sizes each run at -p and +p, instead of `PERT`).
 Submit it with
 
 ```bash
@@ -26,15 +26,16 @@ from that snapshot.
 
 - `perturbation_runner.sh`: the loop. First order perturbs along single modes
   (`create_phonon_struct.py`, run dirs `runs/<mode>`), second order along mode pairs
-  (`create_combined_phonon_struct.py`, `runs/<i>_<j>`), convergence each of `MODES` at each
-  of `PERTS` (`runs/<mode>_pert_<step>`). Run dirs whose OUTCAR already has a complete
+  (`create_combined_phonon_struct.py`, `runs/<i>_<j>`), convergence each of `MODES` at -p and
+  +p for each size p in `PERTS` (`runs/<mode>_pert_<step>`; a sign, a repeat or 0 in `PERTS`
+  is dropped, so older signed lists run the same steps). Run dirs whose OUTCAR already has a complete
   spin-spin ZFS block are skipped, so restarts resume where they stopped.
 - `create_perturbation_tree.py`: build ready-to-go trees (`first_order`/`second_order` x
   `all_bands`/`defect_band_approx` x steps) from `<defect>/ZFS_hyp` and `<defect>/ZFS_occup`,
   plus the convergence folders `convergence_test_all/` and `convergence_test_occup/`.
   `--pert` (the step) is required; `--displacement` defaults to `normalized`;
   `--conv-modes` picks the convergence modes (or `--no-convergence`), `--conv-perts` their
-  steps (default +-p/2, +-p, +-2p for each step p). The generated script gets
+  step sizes (default p/2, p, 2p for each step p; each run at both signs). The generated script gets
   `#SBATCH -J <defect>_<order>_<basis>` and a time limit / array size from the reference
   OUTCAR's wall time x tasks / `--array-jobs`; `--max-hours` caps the per-job limit.
 - `add_convergence_tree.py`: add the convergence folders to an existing defect folder

@@ -33,7 +33,7 @@ def main() -> int:
     ap.add_argument("output", type=Path, help="defect folder (holds ZFS_hyp/, ZFS_occup/ and its trees)")
     ap.add_argument("--modes", type=int, nargs="+", required=True, help="1-based modes to run, e.g. 13 62 231 378")
     steps = ap.add_mutually_exclusive_group(required=True)
-    steps.add_argument("--steps", type=float, nargs="+", help="signed steps, e.g. -0.05 -0.025 0.025 0.05")
+    steps.add_argument("--steps", type=float, nargs="+", help="step sizes, each run at -s and +s, e.g. 0.025 0.05")
     steps.add_argument("--pert", type=float, nargs="+", help="tree step(s) p: runs +-p/2, +-p and +-2p")
     add_displacement_args(ap, default=None)
     ap.add_argument("--phonon", type=Path, default=None, help="phonon data file (default: <out>/data/phonon_data.npz)")

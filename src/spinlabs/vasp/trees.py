@@ -330,8 +330,8 @@ def prepare_basis(
     """Fill dst/input/ and write the prefilled SLURM script.
 
     The script comes from the package's templates/ folder.  ``order`` is first_order,
-    second_order (one step, ``pert``) or convergence (``conv_modes`` at the signed steps
-    ``conv_perts``).  Returns the list of failure messages.
+    second_order (one step, ``pert``) or convergence (``conv_modes`` at -p and +p for each
+    step size p in ``conv_perts``).  Returns the list of failure messages.
     """
     failures: list[str] = []
 
@@ -371,7 +371,7 @@ def prepare_basis(
     # timing: per-sim wall time from the reference ZFS run's OUTCAR
     per_sim = read_outcar_time(src)
     if order == "convergence":
-        n_tasks = len(conv_modes or []) * len(conv_perts or [])
+        n_tasks = len(conv_modes or []) * 2 * len(step_sizes(conv_perts or []))  # -p and +p
     else:
         n_tasks = n_tasks_for(order, pair_mode, n_modes)
     if per_sim is None:
@@ -391,7 +391,7 @@ def prepare_basis(
     text = replace_tag(text, "PHONON_PATH", str(phonon.resolve()))
     if order == "convergence":
         text = replace_tag(text, "MODES", f'"{" ".join(str(m) for m in conv_modes or [])}"')
-        text = replace_tag(text, "PERTS", f'"{" ".join(f"{p:g}" for p in conv_perts or [])}"')
+        text = replace_tag(text, "PERTS", f'"{" ".join(f"{p:g}" for p in step_sizes(conv_perts or []))}"')
     else:
         text = replace_tag(text, "PERT", str(pert))
     if vasp_binary:
@@ -560,11 +560,19 @@ def defect_vasp_binary(out: Path) -> Path | None:
     return None
 
 
+def step_sizes(steps: list[float]) -> list[float]:
+    """The convergence step sizes in `steps`: sorted, without sign, zero or repeats.
+
+    The runner runs each size at -p and +p, so a signed list and its magnitudes give the same runs.
+    """
+    return sorted({round(abs(s), 10) for s in steps if round(abs(s), 10) > 0})
+
+
 def convergence_steps(pert: list[float]) -> list[float]:
-    """Signed convergence steps for a tree's steps: +-p/2, +-p and +-2p for each p, so the forward
-    second-order difference (needs the run at 2Q) has points up to the tree's own steps."""
-    steps = sorted({round(s * f * p, 10) for p in pert for f in (0.5, 1.0, 2.0) for s in (-1, 1)})
-    return steps
+    """Convergence step sizes for a tree's steps: p/2, p and 2p for each p (each run at both
+    signs), so the forward second-order difference (needs the run at 2Q) has points up to the
+    tree's own steps."""
+    return step_sizes([f * p for p in pert for f in (0.5, 1.0, 2.0)])
 
 
 def build_convergence_tree(
@@ -582,13 +590,15 @@ def build_convergence_tree(
     """Step-size convergence folders of a defect: <out>/convergence_test_<all|occup>/.
 
     Each holds input/ (from ZFS_hyp, ZFS_occup) and run_convergence.sh, which runs every
-    1-based mode in `modes` at every signed step in `steps` into runs/<mode>_pert_<step>/,
+    1-based mode in `modes` at -p and +p for every step size p in `steps` (a sign there is
+    ignored) into runs/<mode>_pert_<step>/,
     displaced by `displacement`, through the shared perturbation runner. Works on a new
     defect folder and on one that already has its perturbation trees; existing convergence
     folders are kept unless `force`. Returns the list of failure messages.
     """
+    steps = step_sizes(steps)
     if not modes or not steps:
-        raise ValueError("convergence folders need modes and steps")
+        raise ValueError("convergence folders need modes and nonzero step sizes")
     known = set(mode_numbers(phonon))
     missing = [m for m in modes if m not in known]
     if missing:

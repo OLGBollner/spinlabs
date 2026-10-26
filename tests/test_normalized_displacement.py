@@ -149,7 +149,7 @@ def test_new_tree_is_normalized_and_gets_convergence_folders(tmp_path):
         script = defect / folder / "run_convergence.sh"
         assert (defect / folder / "input" / "INCAR").is_file()
         assert _config(script, "MODES") == '"2 7"'
-        assert _config(script, "PERTS") == '"-0.05 -0.025 -0.0125 0.0125 0.025 0.05"'  # +-p/2, +-p, +-2p
+        assert _config(script, "PERTS") == '"0.0125 0.025 0.05"'  # p/2, p, 2p, each run at both signs
         assert _config(script, "DISPLACEMENT") == "normalized"
         assert "<" not in "".join(ln for ln in script.read_text().splitlines() if re.match(r"^[A-Za-z_]+=", ln))
 

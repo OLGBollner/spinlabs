@@ -123,6 +123,52 @@ def test_tree_creation_requires_a_step_and_convergence_modes(tmp_path):
     assert (defect / "convergence_test_all" / "run_convergence.sh").is_file()
 
 
+def _fake_slurm(tmp_path: Path) -> Path:
+    """srun that writes a complete ZFS block, squeue that reports no jobs."""
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    zfs = (" Spin-spin contribution to zero-field splitting tensor (MHz)\n ---\n"
+           "      D_xx      D_yy      D_zz      D_xy      D_xz      D_yz\n ---\n"
+           "  -1.0  -1.0  2.0  0.0  0.0  0.0\n ---\n")
+    (bin_dir / "srun").write_text(f"#!/bin/sh\nprintf '%s' '{zfs}' > OUTCAR\n")
+    (bin_dir / "squeue").write_text("#!/bin/sh\nexit 0\n")
+    for f in bin_dir.iterdir():
+        f.chmod(0o755)
+    return bin_dir
+
+
+@pytest.mark.parametrize("perts", ["0.025 0.05", "-0.05 -0.025 0.0 0.025 0.05 0.05"])
+def test_convergence_runner_runs_each_step_size_at_both_signs(tmp_path, perts):
+    """A list of sizes and an older signed list (with 0 and a repeat) give the same runs."""
+    from spinlabs.vasp.trees import build_convergence_tree
+
+    defect = _defect(tmp_path)
+    phonon = defect / "data" / "phonon_data.npz"
+    assert build_convergence_tree(defect, phonon, [2, 7], [STEP], displacement="normalized",
+                                  vasp_binary=Path("/bin/true")) == []
+    folder = defect / "convergence_test_all"
+    env = {**ENV, "PATH": f"{_fake_slurm(tmp_path)}:{ENV['PATH']}", "SPINLABS_CODE": str(REPO), "DEFECT": "SiV_3",
+           "binary": "/bin/true", "PHONON_PATH": str(phonon), "MODES": "2 7", "PERTS": perts,
+           "DISPLACEMENT": "normalized", "SLURM_ARRAY_TASK_ID": "0", "SLURM_ARRAY_TASK_COUNT": "1",
+           "SLURM_ARRAY_JOB_ID": "99"}
+    r = subprocess.run(["sh", str(SCRIPTS / "perturbation_runner.sh"), "convergence"], cwd=folder, env=env,
+                       capture_output=True, text=True)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "steps -0.025 0.025 -0.05 0.05" in r.stdout
+    assert sorted(p.name for p in (folder / "runs").iterdir()) == sorted(
+        f"{m}_pert_{s}" for m in (2, 7) for s in ("-0.025", "0.025", "-0.05", "0.05"))
+
+
+def test_convergence_runner_refuses_a_non_numeric_step(tmp_path):
+    folder = tmp_path / "conv"
+    (folder / "input").mkdir(parents=True)
+    env = {**ENV, "SPINLABS_CODE": str(REPO), "DEFECT": "SiV_3", "binary": "/bin/true",
+           "PHONON_PATH": "/nonexistent.npz", "MODES": "2", "PERTS": "0.025 abc", "DISPLACEMENT": "normalized"}
+    r = subprocess.run(["sh", str(SCRIPTS / "perturbation_runner.sh"), "convergence"], cwd=folder, env=env,
+                       capture_output=True, text=True)
+    assert r.returncode != 0 and "PERTS must be numbers, got: 'abc'" in r.stderr
+
+
 def test_normalized_structure_passes_only_its_own_check(tmp_path):
     defect = _defect(tmp_path)
     poscar, phonons = defect / "ZFS_hyp" / "POSCAR", defect / "data" / "phonon_data.npz"
@@ -150,4 +196,4 @@ def test_add_convergence_to_an_existing_defect_takes_its_trees_displacement(tmp_
     script = defect / "convergence_test_occup" / "run_convergence.sh"
     assert _config(script, "DISPLACEMENT") == "mass_weighted"
     assert _config(script, "binary") == "/opt/vasp_std"
-    assert _config(script, "PERTS") == '"-0.2 -0.1 -0.05 0.05 0.1 0.2"'
+    assert _config(script, "PERTS") == '"0.05 0.1 0.2"'

@@ -5,7 +5,7 @@
 # or convergence_test_<method>):
 #     sh "$SPINLABS_CODE/scripts/cluster/perturbation_runner.sh" first_order|second_order|convergence
 # with the tree's config in the environment: DEFECT, binary, PHONON_PATH, PERT (first and second
-# order), PAIR_MODE (second order), MODES and PERTS (convergence: modes, signed steps),
+# order), PAIR_MODE (second order), MODES and PERTS (convergence: modes, step sizes run at -p and +p),
 # DISPLACEMENT (normalized | mass_weighted | unweighted; older job scripts give MASS_WEIGHTED
 # 1/0 instead) and SPINLABS_CODE, the snapshot of the spinlabs repo taken when the job was
 # submitted. This file, the structure scripts and the spinlabs package all come from that
@@ -40,6 +40,14 @@ if [ "$ORDER" = "convergence" ]; then
   for m in $MODES; do
     case $m in *[!0-9]*) fail "MODES must be 1-based mode numbers, got: '$m'" ;; esac
   done
+  # Each step size p runs at -p and +p. A sign in PERTS is dropped (older scripts list signed
+  # steps), and so are repeated sizes and zero, which is the unperturbed reference ZFS_hyp/ZFS_occup.
+  bad=$(echo "$PERTS" | tr ' ' '\n' | awk 'NF && $1 !~ /^[-+]?([0-9]+\.?[0-9]*|\.[0-9]+)([eE][-+]?[0-9]+)?$/ { print $1; exit }')
+  [ -z "$bad" ] || fail "PERTS must be numbers, got: '$bad'"
+  SIZES=$(echo "$PERTS" | tr ' ' '\n' | awk 'NF { v = $1 + 0; if (v < 0) v = -v; if (v > 0) printf "%g\n", v }' | sort -g -u)
+  [ -n "$SIZES" ] || fail "PERTS has no nonzero step size: '$PERTS'"
+  STEPS=""
+  for s in $SIZES; do STEPS="$STEPS${STEPS:+ }-$s $s"; done
 else
   case ${PERT:-} in ''|*'<pert_scale>'*) fail "PERT unset or still placeholder: '${PERT:-}'" ;; esac
 fi
@@ -78,7 +86,7 @@ if [ "$ORDER" != "convergence" ]; then  # convergence runs only the modes its co
   MODES=$(python "$get_n_modes" "$PHONON_PATH") || fail "get_n_modes exited nonzero on $PHONON_PATH"
   [ -n "$MODES" ] || fail "get_n_modes returned no modes for $PHONON_PATH"
 fi
-echo "Preflight OK: $ORDER, $(echo $MODES | wc -w) modes${PAIR_MODE:+, pair_mode=$PAIR_MODE}${PERTS:+, steps $PERTS}, binary=$binary"
+echo "Preflight OK: $ORDER, $(echo $MODES | wc -w) modes${PAIR_MODE:+, pair_mode=$PAIR_MODE}${STEPS:+, steps $STEPS}, binary=$binary"
 case $DISPLACEMENT in
   normalized) echo "displacements: step * u/|u|, u = e/sqrt(m) (normalized: the same Cartesian step for every mode)" ;;
   mass_weighted) echo "displacements: Q*e/sqrt(m) (mass-weighted)" ;;
@@ -241,7 +249,7 @@ VASP_FAILED=0
 PAIR_ID=0
 if [ "$ORDER" = "convergence" ]; then
   # Every (step, mode) run is one item, dealt round-robin over the array tasks.
-  for p in $PERTS; do
+  for p in $STEPS; do
     for i in $MODES; do
       if [ $((PAIR_ID % NJOBS)) -eq $ID ]; then
         echo "$ID: processing mode $i step $p"
