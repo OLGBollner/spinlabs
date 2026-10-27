@@ -14,9 +14,10 @@ jobs:
       matrix:
         python-version: ["3.10", "3.12", "3.13"]
     steps:
+      # No LFS: the two small cells the tests read (NV_64, ClV_128) are plain
+      # git blobs. Tests pinned to the 19 MB NV_512 data skip when it is an
+      # LFS pointer, which keeps LFS bandwidth at zero.
       - uses: actions/checkout@v7
-        with:
-          lfs: true
 
       - uses: actions/setup-python@v7
         with:
