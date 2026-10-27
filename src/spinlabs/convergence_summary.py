@@ -1,18 +1,20 @@
-"""One figure per defect from its convergence packs: finite differences and SNR against step size.
+"""One figure per defect from its convergence packs: finite differences and their safe step sizes.
 
 It shows how the finite differences spinlabs takes from the ZFS tensor behave as the step
 size changes. Each pack (one convergence folder, ``spinlabs package --conv``) is one column
-of three rows:
+of two rows:
 
 - first order, |D(Q) - D0| / Q per mode against |Q| (filled +Q, open -Q), with noise error
   bars sqrt 2 sigma / Q and the cubic fit's Q -> 0 value b as a line;
 - second order, the forward difference (D(2Q) - 2 D(Q) + D0) / Q^2 that
   ZFSManager.calculate_second_order_derivatives takes from the i = i pair run (D(2Q)) and the
   first-order run (D(Q)), for every Q whose 2Q was run on the same side (filled +Q, open -Q),
-  with noise error bars sqrt 6 sigma / Q^2 and the fit's 2c as a line;
-- the signal-to-noise of those finite differences: first order b Q / err1 and the forward
-  second order 2 c Q^2 / err2, against the SNR target (SNR above it shaded), with markers
-  at the amplitudes that were run.
+  with noise error bars sqrt 6 sigma / Q^2 and the fit's 2c as a line.
+
+In both rows a band along each mode's line marks its safe |Q|: from where the finite
+difference's SNR (b Q / err1, 2 c Q^2 / err2) reaches the target to where its truncation
+error (c Q / b, 3 d Q / c) reaches the tolerance. The shaded column is the |Q| safe for every
+mode of the pack (convergence.common_window).
 
 Every norm is over the 5 traceless parts (convergence.traceless_parts), as the fit and the
 SNR use them. The grey dashed curve in a quotient row is the error of that quotient with
@@ -32,6 +34,7 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 import numpy as np
 from matplotlib.lines import Line2D
+from matplotlib.patches import Patch
 from matplotlib.ticker import NullLocator
 
 from spinlabs.convergence import (
@@ -53,6 +56,9 @@ COLORS = ["#2a78d6", "#eb6834", "#1baf7a", "#eda100", "#e87ba4", "#008300"]
 METHODS = {"all": "all bands", "approx": "defect band approx"}  # pack metadata 'method' -> column title
 STANDARD_KEYS = {"test_all", "test_occup"}  # folder suffixes the column title need not repeat
 FAINT = 0.4  # alpha of an unresolved coefficient's lines and points
+BAND_WIDTH, BAND_ALPHA = 10, 0.25  # a mode's safe |Q| band along its fit line
+COMMON_COLOR = "#e5f4e4"  # the |Q| column safe for every mode
+_ORDER_NAMES = {1: "first order", 2: "second order"}
 
 
 def quotients(p, parts, p0):
@@ -159,6 +165,50 @@ def mode_symmetries(path, modes, cache: dict | None = None) -> dict[int, str]:
     return {m: labels[m - 1] for m in modes}
 
 
+def safe_window(r, order: int) -> tuple[float, float, bool] | None:
+    """(lower, upper, upper_known) of one mode's safe |Q| for this order, or None when its coefficient is unresolved.
+
+    The lower end is where the finite difference reaches the SNR target, the upper end where its
+    truncation error reaches the tolerance. With the next Taylor term unresolved the upper end is
+    only a lower limit (``upper_known`` False): these amplitudes do not limit it.
+    """
+    if order == 1:
+        return (r.q_lo1, r.q_hi1, r.c_resolved) if r.b_resolved else None
+    return (r.q_lo2, r.q_hi2, r.d_resolved) if r.c_resolved else None
+
+
+def shade_safe_windows(ax, rows, order: int, xlim: tuple[float, float], name: str) -> None:
+    """Each mode's safe |Q| as a band along its fit line, and the |Q| safe for every mode as a column.
+
+    As convergence.common_window: the column runs from the largest lower end to the smallest
+    known upper end; a mode whose upper end is not limited by these amplitudes reaches the axis.
+    """
+    los, his = [], []
+    for color, (mode, _p, _first, _second, r) in zip(COLORS, rows):
+        window = safe_window(r, order)
+        if window is None:
+            continue
+        lo, hi, known = window
+        los.append(lo)
+        if known:
+            his.append(hi)
+        start, end = max(lo, xlim[0]), min(hi, xlim[1]) if known else xlim[1]
+        if start < end:
+            level = r.b if order == 1 else 2 * r.c
+            ax.plot([start, end], [level, level], lw=BAND_WIDTH, alpha=BAND_ALPHA, color=color,
+                    solid_capstyle="butt", zorder=1)
+        else:
+            LOGGER.info(f"{name}: mode {mode} has no safe |Q| ({lo:.3g} .. {hi:.3g})")
+    if not los:
+        return
+    lo, hi = max(los), min(his, default=xlim[1])
+    if lo < hi:
+        ax.axvspan(max(lo, xlim[0]), min(hi, xlim[1]), color=COMMON_COLOR, zorder=0, lw=0)
+        LOGGER.info(f"{name}: safe |Q| for all modes {lo:.3g} .. {hi:.3g}" + ("" if his else " (upper end not limited)"))
+    else:
+        LOGGER.info(f"{name}: no |Q| is safe for all modes ({lo:.3g} .. {hi:.3g})")
+
+
 def plot_signed(ax, rows, marker, color, yerr, alpha, big=9, small=5):
     """Points at |Q|; nearly equal at +-Q, so the -Q ring first and a smaller +Q dot inside it."""
     for side, face, ms in ((-1, "white", big), (1, color, small)):
@@ -174,7 +224,7 @@ def plot_convergence_summary(
     """One figure, one column per pack (e.g. a defect's all-bands and defect-band packs); returns its path."""
     packs = [Path(p) for p in packs]
     # each column ticks its own pack's step sizes, so only the rows of one column share x
-    fig, axes = plt.subplots(3, len(packs), figsize=(7.5 * len(packs), 13), squeeze=False, sharex="col")
+    fig, axes = plt.subplots(2, len(packs), figsize=(7.5 * len(packs), 9.5), squeeze=False, sharex="col")
     spectra: dict = {}  # registered phonon symmetries, parsed once per figure
     for col, path in enumerate(packs):
         rows, sigma, offset = analyse(path, modes, noise, target, tol)
@@ -187,7 +237,7 @@ def plot_convergence_summary(
             rows = rows[:len(COLORS)]
         LOGGER.info(f"{title}: {len(rows)} modes, noise sigma {sigma:.3g} MHz, D0 offset {offset:.3g} MHz ({path})")
         symmetries = mode_symmetries(path, [r[0] for r in rows], spectra)
-        first_ax, second_ax, snr_ax = axes[:, col]
+        first_ax, second_ax = axes[:, col]
         steps = np.concatenate([np.abs(p[~np.isclose(p, 0.0)]) for _, p, *_ in rows]) if rows else np.array([0.01, 0.3])
         q = np.geomspace(steps.min() / 2, steps.max() * 1.5, 200)
         for color, (mode, p, first, second, r) in zip(COLORS, rows):
@@ -197,43 +247,37 @@ def plot_convergence_summary(
             first_ax.axhline(r.b, color=color, lw=1, alpha=0.7 * a1)
             plot_signed(second_ax, second, "s", color, lambda x: np.sqrt(6) * sigma / x**2, a2)
             second_ax.axhline(2 * r.c, color=color, lw=1, alpha=0.7 * a2)
-            # SNR = 1 / relative noise-and-offset error of each finite difference
-            snr_ax.plot(q, 1 / r.first_order(q)[0], "-", color=color, lw=1.5, alpha=a1)
-            snr_ax.plot(q, 1 / r.second_order(q)[0], "--", color=color, lw=1.5, alpha=a2)
-            measured = np.unique(np.abs(p[~np.isclose(p, 0.0)]))
-            snr_ax.plot(measured, 1 / r.first_order(measured)[0], "o", ms=6, color=color, alpha=a1)
-            snr_ax.plot(measured, 1 / r.second_order(measured)[0], "s", ms=6, color=color, alpha=a2)
         # the quotient's error with D0's offset: points near or below it are not measured
         err1 = float(np.hypot(np.sqrt(2) * sigma, offset))
         err2 = float(np.hypot(np.sqrt(6) * sigma, offset))
         first_ax.plot(q, err1 / q, "--", color="0.35", lw=1)
         second_ax.plot(q, err2 / q**2, "--", color="0.35", lw=1)
-        snr_ax.axhline(target, color="0.35", ls="--", lw=1)
-        snr_ax.annotate(f"SNR ≥ {target:g}", (0.0, target), xycoords=("axes fraction", "data"),
-                        xytext=(4, 4), textcoords="offset points", fontsize=10, color="0.35")
         # log |Q| axis ticked at the step sizes that were run, not at decades
         run_steps = np.unique(np.round(steps, 12))
-        for ax in (first_ax, second_ax, snr_ax):
+        for ax in (first_ax, second_ax):
             ax.set_xscale("log")
             ax.set_yscale("log")
             ax.set_xticks(run_steps, [f"{s:g}" for s in run_steps])
             ax.xaxis.set_minor_locator(NullLocator())
             ax.grid(True, which="major", color="0.9", linewidth=0.6)
-        # shade SNR >= target behind the curves, keeping the limits the curves set
-        ylo, yhi = snr_ax.get_ylim()
-        snr_ax.axhspan(target, yhi, color="#e5f4e4", zorder=0, lw=0)
-        snr_ax.set_ylim(ylo, yhi)
+            ax.set_xlim(q[0], q[-1])
+        for ax, order in ((first_ax, 1), (second_ax, 2)):
+            shade_safe_windows(ax, rows, order, (q[0], q[-1]), f"{title} {_ORDER_NAMES[order]}")
         first_ax.set_title(f"{title}: σ = {sigma:.2g} MHz, D0 offset {offset:.2g} MHz", fontsize=12)
         first_ax.set_ylabel(r"first order $\|D(Q) - D_0\| / Q$ (MHz/Q)")
         second_ax.set_ylabel(r"second order $\|D(2Q) - 2D(Q) + D_0\| / Q^2$ (MHz/Q²)")
-        snr_ax.set_ylabel("SNR of the finite difference")
-        snr_ax.set_xlabel("|Q| (step size)")
+        second_ax.set_xlabel("|Q| (step size)")
         # "<mode>: <symmetry>", or the bare mode number when the symmetry is unknown
         mode_handles = [
             Line2D([], [], marker="o", ls="", color=c, ms=7, label=f"{m}: {symmetries[m]}" if m in symmetries else f"{m}")
             for c, (m, *_) in zip(COLORS, rows)
         ]
         error_handle = Line2D([], [], ls="--", color="0.35", label="error incl. D0 offset")
+        window_handles = [
+            Line2D([], [], lw=BAND_WIDTH, alpha=BAND_ALPHA, color="0.35", solid_capstyle="butt",
+                   label=f"mode's safe |Q| (SNR ≥ {target:g}, truncation ≤ {tol:.0%})"),
+            Patch(color=COMMON_COLOR, label="safe |Q| for all modes"),
+        ]
         modes_legend = first_ax.legend(handles=mode_handles, loc="lower right", fontsize=10)
         first_ax.add_artist(modes_legend)
         first_ax.legend(handles=[
@@ -241,19 +285,15 @@ def plot_convergence_summary(
             Line2D([], [], marker="o", ls="", color="0.35", mfc="white", label="−Q"),
             Line2D([], [], ls="-", color="0.35", label="b (fit, Q → 0)"),
             error_handle,
+            *window_handles,
         ], loc="lower left", fontsize=10)
         second_ax.legend(handles=[
             Line2D([], [], marker="s", ls="", color="0.35", mfc="0.35", label="+Q"),
             Line2D([], [], marker="s", ls="", color="0.35", mfc="white", label="−Q"),
             Line2D([], [], ls="-", color="0.35", label="2c (fit, Q → 0)"),
             error_handle,
+            *window_handles,
         ], loc="lower left", fontsize=10)
-        snr_ax.legend(handles=[
-            Line2D([], [], ls="-", marker="o", color="0.35", label="first order (D(Q) − D0)/Q"),
-            Line2D([], [], ls="--", marker="s", color="0.35", label="second order (D(2Q) − 2D(Q) + D0)/Q²"),
-            Line2D([], [], ls="-", color="0.35", alpha=FAINT, label="first order, b unresolved"),
-            Line2D([], [], ls="--", color="0.35", alpha=FAINT, label="second order, c unresolved"),
-        ], loc="lower right", fontsize=10)
     fig.tight_layout()
     output = Path(output)
     output.parent.mkdir(parents=True, exist_ok=True)

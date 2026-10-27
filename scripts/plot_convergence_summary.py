@@ -26,7 +26,7 @@ def find_packs(data_dir):
 
 
 if __name__ == "__main__":
-    parser = Parser("Plots one convergence figure per defect: finite differences and SNR against step size.")
+    parser = Parser("Plots one convergence figure per defect: finite differences and safe step sizes.")
     parser.add_argument("--data", default="data", help="Folder with the <defect>_<date>_conv_test_*.npz packs")
     parser.add_argument("--defect", nargs="+", help="Defects to plot, e.g. NV_512 (default: every pack found)")
     parser.add_argument("-o", "--output-dir", default=".", help="Folder for <defect>_convergence_summary.png")

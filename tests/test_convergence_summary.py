@@ -79,7 +79,7 @@ def test_log_q_axis_is_ticked_at_the_run_step_sizes(tmp_path, monkeypatch):
     figures = []
     monkeypatch.setattr(summary.plt, "close", figures.append)  # keep the figure to inspect it
     summary.plot_convergence_summary([_pack(tmp_path / "NV.npz")], tmp_path / "out.png")
-    rows = figures[0].axes[:3]
+    rows = figures[0].axes[:2]
     for ax in rows:
         assert ax.get_xscale() == "log"
         assert list(ax.get_xticks()) == pytest.approx([0.025, 0.05, 0.1, 0.2])
@@ -126,6 +126,31 @@ def test_legend_falls_back_to_mode_numbers_without_phonon_data(tmp_path, monkeyp
     texts = _legend_texts(_plot_summary(tmp_path, monkeypatch))
     assert "5" in texts and "7" in texts
     assert "no registered phonon data for NV_512" in caplog.text
+
+
+def _report(lo, hi, *, resolved=True, next_resolved=True):
+    """The SNR report fields shade_safe_windows reads, for the first order."""
+    from types import SimpleNamespace
+
+    return SimpleNamespace(b=10.0, c=1.0, q_lo1=lo, q_hi1=hi, b_resolved=resolved, c_resolved=next_resolved)
+
+
+def test_safe_windows_are_banded_per_mode_and_shaded_where_all_overlap(caplog):
+    import matplotlib.pyplot as plt
+
+    rows = [
+        (5, None, None, None, _report(0.02, 0.1)),
+        (7, None, None, None, _report(0.05, 0.2)),
+        (9, None, None, None, _report(0.01, 0.03, next_resolved=False)),  # upper end not limited
+        (11, None, None, None, _report(0.001, 1.0, resolved=False)),  # b ~ 0: no window, no limit
+    ]
+    fig, ax = plt.subplots()
+    with caplog.at_level("INFO", logger="spinlabs"):
+        summary.shade_safe_windows(ax, rows, 1, (0.01, 0.3), "NV_512 all bands first order")
+    bands = [line.get_xdata() for line in ax.lines if line.get_linewidth() == summary.BAND_WIDTH]
+    assert [list(b) for b in bands] == [[0.02, 0.1], [0.05, 0.2], [0.01, 0.3]]  # mode 9 reaches the axis
+    assert "safe |Q| for all modes 0.05 .. 0.1" in caplog.text  # largest lower end, smallest known upper end
+    plt.close(fig)
 
 
 def test_analyse_measures_the_linear_and_quadratic_terms(tmp_path):
