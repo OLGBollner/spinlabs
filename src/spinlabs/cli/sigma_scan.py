@@ -21,7 +21,6 @@ from spinlabs.relaxation_dynamics import INIT_STATES, normalize_init_state
 LOGGER = get_logger(__name__)
 
 DEFAULT_SIGMAS = (0.25, 0.5, 1.0, 2.0, 3.0, 5.0, 7.5, 10.0)
-DEFAULT_T_RANGE = (10.0, 500.0, 10.0)  # K: start, end, step of the --plot-temperature grid
 
 
 def build_sigma_scan_parser(parser: argparse.ArgumentParser) -> None:
@@ -52,21 +51,6 @@ def build_sigma_scan_parser(parser: argparse.ArgumentParser) -> None:
         help="Initial spin state(s) (default: all; 1 0 -1 also accepted)",
     )
     opt.add_argument("--plot", type=Path, metavar="FILE", help="Also save a T1-vs-sigma figure to FILE")
-    opt.add_argument(
-        "--plot-temperature",
-        type=Path,
-        metavar="FILE",
-        help="Also save a T1-vs-temperature figure to FILE: one line per sigma, coloured by sigma",
-    )
-    opt.add_argument(
-        "--t-range",
-        nargs=3,
-        type=float,
-        default=list(DEFAULT_T_RANGE),
-        metavar=("START", "END", "STEP"),
-        help="Temperature grid of the --plot-temperature figure in K (default: "
-        f"{' '.join(f'{t:g}' for t in DEFAULT_T_RANGE)})",
-    )
     add_verbosity_args(opt)
     parser.set_defaults(func=_run_sigma_scan)
 
@@ -79,14 +63,6 @@ def _run_sigma_scan(args: argparse.Namespace) -> None:
     if any(s <= 0 for s in sigmas):
         raise SystemExit("--sigma values must be positive")
     temps = np.array(sorted(set(args.temperature)), dtype=float)
-    # the T1-vs-T figure needs a temperature grid; the table still reports at --temperature only
-    grid = np.array([], dtype=float)
-    if getattr(args, "plot_temperature", None):
-        start, end, step = args.t_range
-        if step <= 0 or end < start or start <= 0:
-            raise SystemExit("--t-range needs 0 < START <= END and STEP > 0")
-        grid = np.arange(start, end + step / 2, step)
-    all_temps = np.unique(np.concatenate([temps, grid]))
     manager, ph_path, orders = load_manager(args, "spinlabs run sigma-scan")
 
     section(LOGGER, f"Spin-phonon coupling: {manager.defect}_{manager.cell_size} {manager.calc_method}")
@@ -99,26 +75,16 @@ def _run_sigma_scan(args: argparse.Namespace) -> None:
         coupling = Path(f"{base}.npz")
         has_second = SpinPhononCouplingData.load(coupling).has_second_order
 
-        # t1_all[sigma][state] -> T1 (s) at each of all_temps; t1 = the same at --temperature
-        t1_all: dict[float, dict[str, np.ndarray]] = {}
+        # t1[sigma][state] -> T1 (s) at each temperature
+        t1: dict[float, dict[str, np.ndarray]] = {}
         for n, sigma in enumerate(sigmas, start=1):
             section(LOGGER, f"Transition rates and T1, sigma {sigma:g} meV ({n}/{len(sigmas)})")
-            valid, _, directional = compute_rates(coupling, all_temps, sigma=sigma, has_second_order=has_second)
+            valid, _, directional = compute_rates(coupling, temps, sigma=sigma, has_second_order=has_second)
             dir_path = Path(tmp) / f"directional_rates_{n}.npz"
             np.savez(dir_path, temperatures=valid, **directional)
-            t1_all[sigma] = {
-                state: _on_grid(valid, solve_t1(dir_path, state)[0], all_temps) for state in args.init_state
-            }
-    at = [int(np.flatnonzero(np.isclose(all_temps, T))[0]) for T in temps]
-    t1 = {sigma: {state: v[at] for state, v in by_state.items()} for sigma, by_state in t1_all.items()}
+            t1[sigma] = {state: _on_grid(valid, solve_t1(dir_path, state)[0], temps) for state in args.init_state}
 
     print(_table(manager, t1, temps, args.init_state, has_second, DEFAULT_SIGMA_MEV))
-    if getattr(args, "plot_temperature", None):
-        if not any(np.any(np.isfinite(v) & (v > 0)) for by_state in t1_all.values() for v in by_state.values()):
-            LOGGER.warning(f"no finite T1 to plot; {args.plot_temperature} not written")
-        else:
-            _plot_temperature(manager, t1_all, all_temps, args.init_state, args.plot_temperature, DEFAULT_SIGMA_MEV)
-            LOGGER.info(f"saved figure: {args.plot_temperature}")
     if args.plot:
         if not any(np.any(np.isfinite(v) & (v > 0)) for by_state in t1.values() for v in by_state.values()):
             LOGGER.warning(f"no finite T1 to plot; {args.plot} not written")
@@ -163,58 +129,6 @@ def _table(manager, t1, temps, states, has_second, default_sigma) -> str:
     lines.append(f"{'max/min':>12s} " + " ".join(spread))
     lines.append(f"  * default sigma ({default_sigma:g} meV)")
     return "\n".join(lines)
-
-
-def _plot_temperature(manager, t1, temps, states, path: Path, default_sigma) -> None:
-    """T1 against temperature, one line per sigma coloured by sigma (log scale), a panel per initial state.
-
-    The colour bar is ticked at the scanned sigmas, so each line's sigma reads off the bar; the default
-    sigma's line is drawn thicker. States whose curves coincide at every sigma (ms=+1 and ms=-1) share
-    a panel.
-    """
-    import matplotlib
-
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
-    from matplotlib.colors import LogNorm, Normalize
-
-    from spinlabs.plotter import _INIT_STATE_LABELS
-
-    sigmas = np.array(sorted(t1))
-    panels: list[list[str]] = []
-    for state in states:
-        same = next(
-            (g for g in panels if all(np.allclose(t1[s][g[0]], t1[s][state], rtol=1e-9, equal_nan=True) for s in sigmas)),
-            None,
-        )
-        if same:
-            same.append(state)
-        else:
-            panels.append([state])
-    norm = LogNorm(sigmas.min(), sigmas.max()) if len(sigmas) > 1 else Normalize(sigmas[0] / 2, sigmas[0] * 2)
-    cmap = plt.get_cmap("viridis")
-    fig, axes = plt.subplots(1, len(panels), figsize=(5.2 * len(panels) + 1.2, 4.5), sharey=True, squeeze=False)
-    for ax, group in zip(axes[0], panels):
-        for sigma in sigmas:
-            y = t1[sigma][group[0]]
-            ok = np.isfinite(y) & (y > 0)
-            default = np.isclose(sigma, default_sigma)
-            ax.plot(temps[ok], y[ok], "-", lw=2.6 if default else 1.6, color=cmap(norm(sigma)), zorder=3 if default else 2)
-        name = "$m_s=\\pm1$" if sorted(group) == ["ms_-1", "ms_1"] else ", ".join(_INIT_STATE_LABELS.get(g, g) for g in group)
-        ax.set_title(name, fontsize=10)
-        ax.set_yscale("log")
-        ax.set_xlabel("Temperature (K)")
-        ax.grid(True, which="major", ls=":", alpha=0.6)
-    axes[0, 0].set_ylabel(r"$T_1$ (s)")
-    bar = fig.colorbar(plt.cm.ScalarMappable(norm=norm, cmap=cmap), ax=axes[0].tolist(), pad=0.02)
-    bar.set_ticks(sigmas)
-    bar.set_ticklabels([f"{s:g}" + (" (default)" if np.isclose(s, default_sigma) else "") for s in sigmas])
-    bar.minorticks_off()
-    bar.set_label(r"Broadening $\sigma$ (meV)")
-    fig.suptitle(_label(manager).replace("  ", ", "), fontsize=10)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(path, dpi=200, bbox_inches="tight")
-    plt.close(fig)
 
 
 def _plot(manager, t1, temps, states, path: Path, default_sigma) -> None:
