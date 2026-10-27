@@ -141,17 +141,29 @@ def _run_convergence(args: argparse.Namespace) -> None:
         _plot_convergence(args, Path(npz))
 
 
+def _conv_displacement(meta: dict) -> str:
+    """A convergence pack's displacement convention; packs that do not say were mass-weighted."""
+    return str(meta.get("displacement") or "mass_weighted")
+
+
 def _plot_convergence_summaries(args: argparse.Namespace, files: list[Path]) -> None:
-    """One summary figure per defect and cell, a column per convergence file (all bands first)."""
+    """One summary figure per defect, cell and displacement, a column per convergence file (all bands first).
+
+    Packs of different displacement conventions (e.g. older mass-weighted and new normalized
+    runs) get separate figures, named <defect>_<cell>_<displacement>_convergence_summary.
+    """
     groups: dict[str, list[tuple[tuple, Path]]] = {}
     for npz in files:
         meta = read_conv_metadata(npz)
         name = "_".join(str(meta[k]) for k in ("defect", "cell") if meta.get(k) is not None) or npz.stem
+        name = f"{name}_{_conv_displacement(meta)}"
         order = (list(_METHODS).index(meta["method"]) if meta.get("method") in _METHODS else len(_METHODS),
                  str(meta.get("method_key") or ""))
         groups.setdefault(name, []).append((order, npz))
     if len(groups) > 1 and args.output:
-        raise SystemExit(f"error: -o names one figure but the files hold {len(groups)} defects ({', '.join(groups)})")
+        raise SystemExit(
+            f"error: -o names one figure but the files make {len(groups)} figures ({', '.join(groups)})"
+        )
     for name, entries in groups.items():
         section(LOGGER, f"Convergence summary: {name}")
         packs = [npz for _, npz in sorted(entries, key=lambda e: e[0])]
@@ -169,6 +181,9 @@ def _plot_convergence(args: argparse.Namespace, npz: Path) -> None:
     method = meta.get("method_key") or meta.get("method")
     if method:
         stem = f"{stem}_{method}" if stem else str(method)
+    displacement = _conv_displacement(meta)
+    if stem and displacement not in stem:  # an old folder suffix may already say mass_weighted
+        stem = f"{stem}_{displacement}"
     if not stem:
         if not args.output:
             raise SystemExit(

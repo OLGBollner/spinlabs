@@ -17,7 +17,7 @@ D0 = np.diag([-1000.0, -1000.0, 2000.0])
 STEPS = [-0.2, -0.1, -0.05, -0.025, 0.025, 0.05, 0.1, 0.2]
 
 
-def _pack(path, defect="NV", cell="512", method="all", key="test_all", modes=(5, 7)):
+def _pack(path, defect="NV", cell="512", method="all", key="test_all", modes=(5, 7), displacement="normalized"):
     """A convergence pack whose modes respond linearly (E) and quadratically (A1), with a little noise."""
     rng = np.random.default_rng(1)
     e_part = np.array([[1.0, 0.0, 0.5], [0.0, -1.0, 0.0], [0.5, 0.0, 0.0]])
@@ -27,7 +27,8 @@ def _pack(path, defect="NV", cell="512", method="all", key="test_all", modes=(5,
         for m in modes
     ])
     tensors = (tensors + tensors.transpose(0, 1, 3, 2)) / 2
-    scan = ConvergenceScan(path.parent, list(modes), STEPS, tensors, np.zeros(tensors.shape[:2]), tensors.shape[0] * 8)
+    scan = ConvergenceScan(path.parent, list(modes), STEPS, tensors, np.zeros(tensors.shape[:2]), tensors.shape[0] * 8,
+                           displacement=displacement)
     gs = path.parent / f"{key}_OUTCAR"
     gs.write_text(
         " Spin-spin contribution to zero-field splitting tensor (MHz)\n ---\n"
@@ -54,13 +55,27 @@ def test_summary_is_the_default_one_figure_per_defect(tmp_path, monkeypatch):
     monkeypatch.setattr(cli_plot, "plot_convergence_summary", lambda packs, out, **kw: columns.append(packs) or real(packs, out, **kw))
 
     made = _plot(monkeypatch, tmp_path, [str(nv_occup), str(div), str(nv_all)])
-    assert made == ["figures/convergence/DiV_128_convergence_summary.png", "figures/convergence/NV_512_convergence_summary.png"]
+    assert made == ["figures/convergence/DiV_128_normalized_convergence_summary.png",
+                    "figures/convergence/NV_512_normalized_convergence_summary.png"]
     assert [nv_all, nv_occup] in columns  # all bands first, whatever the order given
 
 
+def test_displacements_get_separate_summaries(tmp_path, monkeypatch):
+    new = _pack(tmp_path / "NV_new.npz")
+    old = _pack(tmp_path / "NV_old.npz", key="test_all_mass_weighted", displacement="mass_weighted")
+    assert _plot(monkeypatch, tmp_path, [str(new), str(old)]) == [
+        "figures/convergence/NV_512_mass_weighted_convergence_summary.png",
+        "figures/convergence/NV_512_normalized_convergence_summary.png",
+    ]
+
+
 def test_mode_gives_the_per_mode_plots(tmp_path, monkeypatch):
-    pack = _pack(tmp_path / "NV_all.npz")
-    assert _plot(monkeypatch, tmp_path, [str(pack), "-m", "7"]) == ["figures/convergence/NV_512_test_all_mode7.png"]
+    new = _pack(tmp_path / "NV_all.npz")
+    old = _pack(tmp_path / "NV_old.npz", key="test_all_mass_weighted", displacement="mass_weighted")
+    assert _plot(monkeypatch, tmp_path, [str(new), str(old), "-m", "7"]) == [
+        "figures/convergence/NV_512_test_all_mass_weighted_mode7.png",  # the suffix already names it
+        "figures/convergence/NV_512_test_all_normalized_mode7.png",
+    ]
 
 
 def test_per_mode_options_need_a_mode(tmp_path, monkeypatch):
@@ -71,7 +86,7 @@ def test_per_mode_options_need_a_mode(tmp_path, monkeypatch):
 
 def test_one_output_for_several_defects_is_refused(tmp_path, monkeypatch):
     packs = [_pack(tmp_path / "NV.npz"), _pack(tmp_path / "DiV.npz", defect="DiV", cell="128")]
-    with pytest.raises(SystemExit, match="-o names one figure but the files hold 2 defects"):
+    with pytest.raises(SystemExit, match="-o names one figure but the files make 2 figures"):
         _plot(monkeypatch, tmp_path, [*map(str, packs), "-o", str(tmp_path / "x.png")])
 
 
