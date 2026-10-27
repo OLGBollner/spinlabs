@@ -51,7 +51,7 @@ def test_pipeline_logs_captured_without_cli(tmp_path, dummy_coupling_file):
         handler.close()
 
     messages = {r[2] for r in _run_logs(reg)}
-    assert any("Starting spinlabs pipeline run" in m for m in messages)
+    assert any(m == "Load input data" for m in messages)
 
 
 def test_pipeline_reattaches_own_handler_after_detach(tmp_path, dummy_coupling_file):

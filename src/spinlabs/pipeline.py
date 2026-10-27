@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import time
 from collections.abc import Sequence
 from datetime import datetime
 from pathlib import Path
@@ -13,6 +14,7 @@ from spinlabs.logging_utils import (
     db_logging_attached,
     detach_db_logging,
     get_logger,
+    section,
     set_db_run_id,
 )
 
@@ -216,7 +218,7 @@ def load_raw_inputs(
     elif phonon_file is not None:
         raise FileNotFoundError(f"Phonon file not found: {phonon_file}")
     elif ph_path is not None and not ph_path.exists():
-        LOGGER.warning(f"Phonon file {ph_path} not found, running without phonon data.")
+        LOGGER.warning(f"phonon file {ph_path} not found; looking in the registry instead")
 
     # Load raw ZFS
     if sim_folder is not None:
@@ -267,8 +269,8 @@ def load_raw_inputs(
     # otherwise it belongs to another cell and the registry is asked instead.
     if spectrum is not None and phonon_file is None and not _covers(spectrum, n_needed):
         LOGGER.warning(
-            f"Phonon file {ph_path} has {spectrum.n_modes} modes but the raw data uses mode indices up to "
-            f"{n_needed}; it belongs to another cell. Looking for a matching one in the registry."
+            f"phonon file {ph_path} has {spectrum.n_modes} modes but the raw data uses mode indices up to "
+            f"{n_needed} (another cell?); looking in the registry instead"
         )
         spectrum, ph_path = None, None
 
@@ -281,20 +283,22 @@ def load_raw_inputs(
         for p, s in candidates:
             if not _covers(s, n_needed):
                 LOGGER.warning(
-                    f"  Registry: {p} is registered for {defect}_{cell_size} but has {s.n_modes} modes, "
+                    f"registry phonon file {p} for {defect}_{cell_size} has {s.n_modes} modes, "
                     f"fewer than the raw data's {n_needed}; skipped (wrong registry entry?)"
                 )
         if fitting:
             ph_path, spectrum = fitting[0]
             if len(fitting) > 1:
                 LOGGER.warning(
-                    f"  Registry: {len(fitting)} phonon files fit {defect}_{cell_size}; using {ph_path} "
+                    f"{len(fitting)} registry phonon files fit {defect}_{cell_size}; using {ph_path} "
                     "(pass --phonon-file to pick another)"
                 )
-            else:
-                LOGGER.info(f"  Registry: using phonon file {ph_path} for {defect}_{cell_size}")
         elif candidates:
-            LOGGER.warning(f"  Registry: no phonon file for {defect}_{cell_size} covers the raw data's modes")
+            LOGGER.warning(f"no registry phonon file for {defect}_{cell_size} covers the raw data's modes")
+    if spectrum is not None:
+        LOGGER.info(f"phonon data: {ph_path}")
+    else:
+        LOGGER.warning(f"no phonon data for {defect}_{cell_size}; mode frequencies and symmetries are unknown")
 
     return raw_data, spectrum, ph_path
 
@@ -483,7 +487,7 @@ def _execute_pipeline(
 ) -> dict[str, Any]:
     """Pipeline body of :func:`run_full_pipeline` (DB logging already owned)."""
 
-    LOGGER.info("Starting spinlabs pipeline run")
+    section(LOGGER, "Load input data")
     init_states = list(dict.fromkeys([init_state] if isinstance(init_state, str) else init_state))
     unknown = [s for s in init_states if s not in INIT_POPULATIONS]
     if unknown or not init_states:
@@ -639,24 +643,24 @@ def _execute_pipeline(
         pert_scale=pert_eff,
         run_name=run_name,
     )
-    LOGGER.info("=" * 56)
-    LOGGER.info(f"  Initialized run in: {run_dir}")
-    LOGGER.info(f"  Defect: {defect} | Cell: {cell_size} | Method: {calc_method} | Orders: {analyzed}")
-    LOGGER.info("=" * 56)
+    name = f"{defect}_{cell_size} {calc_method}"  # names the data in every chapter below
+    LOGGER.info(f"data: {name}, orders {sorted(analyzed)}")
+    LOGGER.info(f"run folder: {run_dir}")
 
     # ── 4. Save Raw ZFS Data (if generated/loaded) ───────────────────────────
     raw_path = run_dir / "raw_zfs_data.npz"
     if raw_data is not None:
         raw_data.save(raw_path, spectrum=spectrum)
-        LOGGER.info(f"[1/5] Saved raw ZFS data -> {raw_path.name}")
+        LOGGER.info(f"saved raw ZFS data: {raw_path}")
 
     # ── 5. Calculate Spin-Phonon Couplings ───────────────────────────────────
+    section(LOGGER, f"Spin-phonon coupling: {name}")
     coupling_path = run_dir / "spin_phonon_coupling.npz"
     inconsistent_pairs: list[tuple[int, int, float, float]] = []
     symmetry_derived_pairs: list[tuple[int, int]] = []
     if coupling_data is not None:
         coupling_data.save(coupling_path)
-        LOGGER.info(f"[2/5] Using provided coupling data -> {coupling_path.name}")
+        LOGGER.info(f"saved coupling data (copied from the input): {coupling_path}")
     else:
         manager = ZFSManager(
             raw_data=raw_data,
@@ -685,11 +689,11 @@ def _execute_pipeline(
         coupling_data = SpinPhononCouplingData.load(coupling_path)
         inconsistent_pairs = manager.inconsistent_pairs
         symmetry_derived_pairs = manager.symmetry_derived_pairs
-        LOGGER.info(f"[2/5] Computed and saved spin-phonon coupling -> {coupling_path.name}")
 
     # ── 6. Transition Rates Calculation ──────────────────────────────────────
     temps = temperature_grid(t_start, t_end, t_step, temperatures)
-    LOGGER.info(f"[3/5] Computing transition rates for {len(temps)} temperature points (sigma {sigma:g} meV)...")
+    section(LOGGER, f"Transition rates: {name}, {len(temps)} temperatures, sigma {sigma:g} meV")
+    started = time.perf_counter()
     valid_temps_arr, rate_results, directional_results = compute_rates(
         coupling_path,
         temps,
@@ -720,15 +724,16 @@ def _execute_pipeline(
         temperatures=valid_temps_arr,
         **directional_results,
     )
-    LOGGER.info(f"      Saved transition rates -> {rates_path.name}")
-    LOGGER.info(f"      Saved directional rates -> {dir_rates_path.name}")
+    LOGGER.info(f"saved transition rates: {rates_path} ({time.perf_counter() - started:.1f} s)")
+    LOGGER.info(f"saved directional rates: {dir_rates_path}")
 
     # ── 7. Population Relaxation Dynamics & T1 Times ─────────────────────────
     # Only this step depends on the initial state, so every state shares the
     # run directory (and the couplings/rates above) and gets its own T1 file.
+    section(LOGGER, f"T1 relaxation: {name}, initial state(s) {', '.join(init_states)}")
     t1_paths: dict[str, Path] = {}
     for state in init_states:
-        LOGGER.info(f"[4/5] Solving population relaxation dynamics (initial state: {state})...")
+        started = time.perf_counter()
         t1_fit_arr, t1_eig_arr = solve_t1(dir_rates_path, state)
         rates_fit = np.where(np.isfinite(t1_fit_arr) & (t1_fit_arr > 0), 1.0 / t1_fit_arr, np.nan)
         rates_eig = np.where(np.isfinite(t1_eig_arr) & (t1_eig_arr > 0), 1.0 / t1_eig_arr, np.nan)
@@ -750,7 +755,7 @@ def _execute_pipeline(
             rates_eigenval=rates_eig,
         )
         t1_paths[state] = t1_path
-        LOGGER.info(f"      Saved T1 relaxation -> {t1_path.name}")
+        LOGGER.info(f"saved T1 ({state}): {t1_path} ({time.perf_counter() - started:.1f} s)")
 
     # ── 8. Summary and Metadata ──────────────────────────────────────────────
     run_info = {
@@ -823,7 +828,7 @@ def _execute_pipeline(
     )
     reg.commit()
     set_db_run_id(run_id)
-    LOGGER.info("      Registered run in ~/.spinlabs/registry.db")
+    LOGGER.debug(f"registered run {run_id}: {run_dir}")
 
     # Mark the run failed on any unhandled error so queries don't skip
     # files that were never fully analyzed.
@@ -833,7 +838,7 @@ def _execute_pipeline(
         if save_plots:
             fig_dir = run_dir / "figures"
             fig_dir.mkdir(exist_ok=True)
-            LOGGER.info(f"[5/5] Generating figures in {fig_dir.name}/ ...")
+            section(LOGGER, f"Figures: {name}")
 
             # Coupling plots (1D and 2D diagonal)
             try:
@@ -884,8 +889,10 @@ def _execute_pipeline(
                     fc2_path = fig_dir / "coupling_spectral_2d.png"
                     fig_c2.savefig(fc2_path, dpi=300)
                     figures_saved.append(fc2_path)
+                for path in figures_saved:
+                    LOGGER.info(f"saved figure: {path}")
             except Exception as e:
-                LOGGER.warning(f"Could not generate coupling plot: {e}")
+                LOGGER.warning(f"{name}: coupling plot failed: {e}")
 
             # Transition rate stacked plots
             try:
@@ -894,7 +901,7 @@ def _execute_pipeline(
                 figures_saved.append(fig_dir / "transition_rates_0_1.png")
                 figures_saved.append(fig_dir / "transition_rates_1_-1.png")
             except Exception as e:
-                LOGGER.warning(f"Could not generate rate plots: {e}")
+                LOGGER.warning(f"{name}: transition rate plots failed: {e}")
 
             # T1 plot
             try:
@@ -902,12 +909,9 @@ def _execute_pipeline(
                 plot_t1(list(t1_paths.values()), output_path=ft1_path, plain_name=True)
                 figures_saved.append(ft1_path)
             except Exception as e:
-                LOGGER.warning(f"Could not generate T1 plot: {e}")
+                LOGGER.warning(f"{name}: T1 plot failed: {e}")
 
-        LOGGER.info("=" * 56)
-        LOGGER.info("  Run successfully completed!")
-        LOGGER.info(f"  All results stored in: {run_dir}")
-        LOGGER.info("=" * 56)
+        LOGGER.info(f"run finished: {run_dir}")
 
         finish_run(reg, run_id, "done")
         reg.commit()

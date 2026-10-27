@@ -157,6 +157,6 @@ def _write(args: argparse.Namespace, tex: str) -> None:
     if args.output:
         args.output.parent.mkdir(parents=True, exist_ok=True)
         args.output.write_text(tex)
-        LOGGER.info(f"Saved table to: {args.output}")
+        LOGGER.info(f"saved table: {args.output}")
     else:
         sys.stdout.write(tex)

@@ -13,7 +13,7 @@ from spinlabs.parsers import parse_phonon_data, save_phonon_npz
 from spinlabs.vasp.modes import mode_numbers
 from spinlabs.symmetry import classify_and_pair, filter_degenerate_partners, symmetrize_degenerate_groups
 
-from spinlabs.logging_utils import get_logger
+from spinlabs.logging_utils import get_logger, section
 
 LOGGER = get_logger(__name__)
 
@@ -21,6 +21,7 @@ RUN_STAGES = ("relaxation_data", "ZFS_hyp", "ZFS_occup")
 
 FIRST_ORDER_SCRIPT = "run_perturbation_first_order.sh"
 SECOND_ORDER_SCRIPT = "run_perturbation_second_order.sh"
+CONVERGENCE_SCRIPT = "run_convergence.sh"
 COPIED_FILES = ("INCAR", "POSCAR", "KPOINTS", "POTCAR", "CHGCAR")
 REQUIRED_FILES = COPIED_FILES[:4]  # CHGCAR optional
 
@@ -29,6 +30,37 @@ BASIS_SOURCE = {
     "all_bands": "ZFS_hyp",
     "defect_band_approx": "ZFS_occup",
 }
+# basis -> step-size convergence folder of the defect (`spinlabs package --conv` finds convergence*,
+# and tells the methods apart by "all"/"occup" in the name)
+CONVERGENCE_FOLDER = {
+    "all_bands": "convergence_test_all",
+    "defect_band_approx": "convergence_test_occup",
+}
+
+_DISPLACEMENT_LINE = re.compile(r"^\s*DISPLACEMENT\s*=\s*(\S+)", re.M)
+_MASS_WEIGHTED_LINE = re.compile(r"^\s*MASS_WEIGHTED\s*=\s*(\S+)", re.M)
+
+
+def tree_displacement(folder: Path) -> str | None:
+    """A tree's displacement convention (spinlabs.models.DISPLACEMENTS) from its job script in ``folder``.
+
+    DISPLACEMENT if the script sets it (a ${DISPLACEMENT:-x} default counts as x), else the
+    older MASS_WEIGHTED (0 or ${MASS_WEIGHTED:-0}: unweighted, 1 or ${MASS_WEIGHTED:-1}: mass_weighted);
+    None when the script says neither (trees from before both were mass-weighted).
+    """
+    from spinlabs.models import displacement_convention
+
+    for script in sorted(Path(folder).glob("run_*.sh")):
+        text = script.read_text(errors="replace")
+        match = _DISPLACEMENT_LINE.search(text)
+        if match:
+            value = re.sub(r"^\$\{DISPLACEMENT:-(.*)\}$", r"\1", match.group(1).strip("'\""))
+            return displacement_convention(value)
+        match = _MASS_WEIGHTED_LINE.search(text)
+        if match:  # a ${MASS_WEIGHTED:-0} default counts as its value, 0
+            value = re.sub(r"^\$\{MASS_WEIGHTED:?-(.*)\}$", r"\1", match.group(1).strip("'\""))
+            return "unweighted" if value.strip("'\"") == "0" else "mass_weighted"
+    return None
 
 
 # --------------------------------------------------------------------------- #
@@ -80,18 +112,20 @@ def patch_restart_incar(incar: str) -> str:
 def forbid_algo_none(incar: str) -> tuple[str, str | None]:
     """Guard against ALGO=None in a perturbation INCAR.
 
-    ALGO=None runs a single diagonalization on whatever CHGCAR is present,
-    so a perturbed structure would be evaluated on the relaxed structure's
-    (stale) charge density -- silently invalid ZFS.  If ALGO=None is found,
-    correct it to ALGO=Normal and return a warning message.
+    ALGO=None does no electronic minimization at all: the orbitals stay as
+    they start, and the density is never updated. Without a WAVECAR
+    (ISTART=0) the orbitals start random and the ZFS is noise; with one,
+    they are the WAVECAR's orbitals of another structure. Either way the
+    D tensor is silently invalid.  If ALGO=None is found, correct it to
+    ALGO=Normal and return a warning message.
     """
     if not re.search(r"^\s*ALGO\s*=\s*None\b", incar, re.M | re.I):
         return incar, None
     out = replace_tag(incar, "ALGO", "Normal")
     warning = (
-        "INCAR had ALGO=None (non-self-consistent single "
-        "diagonalization on the CHGCAR); corrected to ALGO=Normal "
-        "so the perturbed structure gets its own SCF density"
+        "INCAR had ALGO=None (no orbital or density update, so the ZFS "
+        "would come from the starting orbitals); corrected to ALGO=Normal "
+        "so the perturbed structure gets its own SCF solution"
     )
     return out, warning
 
@@ -215,10 +249,10 @@ def resolve_sym_phonon(out: Path, phonon: Path) -> Path:
     filtered = filter_degenerate_partners(symmetrized)
     target = data / f"phonon_data_sym{filtered.n_modes}.npz"
     if target.is_file():
-        LOGGER.info(f"  using existing symmetrised phonon file {target}")
+        LOGGER.info(f"symmetrised phonon data (existing file): {target}")
         return target
     save_phonon_npz(filtered, target)
-    LOGGER.info(f"  symmetrised phonon data saved to {target} ({filtered.n_modes} of {spectrum.n_modes} modes)")
+    LOGGER.info(f"saved symmetrised phonon data: {target} ({filtered.n_modes} of {spectrum.n_modes} modes)")
     return target
 
 
@@ -263,14 +297,14 @@ def build_zfs_tree(inp: Path, run_dirs: list[str] | tuple[str, ...] = RUN_STAGES
     if out.exists():
         raise FileExistsError(f"output directory {out} already exists, refusing to overwrite")
 
-    LOGGER.info(f"Creating {out}/ from {inp}")
+    section(LOGGER, f"Create ZFS tree {out} from {inp}")
     shutil.copytree(data_src, out / "data")
 
     for stage in run_dirs:
         dst = out / stage
         shutil.copytree(relax_src, dst)
         shutil.copy2(struct_file, dst / "POSCAR")
-        LOGGER.info(f"  {stage}/  <- template/relax + POSCAR")
+        LOGGER.info(f"created {dst} (template/relax + POSCAR)")
     return out
 
 
@@ -283,7 +317,7 @@ def prepare_basis(
     script_name: str,
     phonon: Path,
     defect: str,
-    pert: float,
+    pert: float | None,
     order: str,
     n_array_jobs: int,
     n_modes: int,
@@ -291,18 +325,21 @@ def prepare_basis(
     vasp_binary: Path | None = None,
     pair_mode: str | None = None,
     max_hours: float | None = None,
-    mass_weighted: bool = True,
+    displacement: str = "normalized",
+    conv_modes: list[int] | None = None,
+    conv_perts: list[float] | None = None,
 ) -> list[str]:
     """Fill dst/input/ and write the prefilled SLURM script.
 
-    The script comes from the package's templates/ folder.  Returns the list of
-    failure messages.
+    The script comes from the package's templates/ folder.  ``order`` is first_order,
+    second_order (one step, ``pert``) or convergence (``conv_modes`` at -p and +p for each
+    step size p in ``conv_perts``).  Returns the list of failure messages.
     """
     failures: list[str] = []
 
     def fail(msg: str) -> None:
         failures.append(msg)
-        LOGGER.error(f"  FAIL: {msg}")
+        LOGGER.error(f"{dst}: {msg}")
 
     inp = dst / "input"
     inp.mkdir(parents=True, exist_ok=True)
@@ -329,13 +366,16 @@ def prepare_basis(
                 warnings.append(warning)
         incar_path.write_text(patch_restart_incar(incar))
         for warning in warnings:
-            LOGGER.warning(f"  WARN: {warning}")
+            LOGGER.warning(f"{dst}: {warning}")
     else:
         fail("no INCAR in the ZFS source folder -- cannot make it restart-ready")
 
     # timing: per-sim wall time from the reference ZFS run's OUTCAR
     per_sim = read_outcar_time(src)
-    n_tasks = n_tasks_for(order, pair_mode, n_modes)
+    if order == "convergence":
+        n_tasks = len(conv_modes or []) * 2 * len(step_sizes(conv_perts or []))  # -p and +p
+    else:
+        n_tasks = n_tasks_for(order, pair_mode, n_modes)
     if per_sim is None:
         fail(
             f"no Elapsed time found in OUTCARs under {src} -- leaving the template time limit and array size untouched"
@@ -351,13 +391,16 @@ def prepare_basis(
     text = tmpl.read_text()
     text = replace_tag(text, "DEFECT", defect)
     text = replace_tag(text, "PHONON_PATH", str(phonon.resolve()))
-    text = replace_tag(text, "PERT", str(pert))
+    if order == "convergence":
+        text = replace_tag(text, "MODES", f'"{" ".join(str(m) for m in conv_modes or [])}"')
+        text = replace_tag(text, "PERTS", f'"{" ".join(f"{p:g}" for p in step_sizes(conv_perts or []))}"')
+    else:
+        text = replace_tag(text, "PERT", str(pert))
     if vasp_binary:
         text = replace_tag(text, "BINARY", str(vasp_binary))
     if pair_mode:
         text = replace_tag(text, "PAIR_MODE", pair_mode)
-    # 0 keeps a tree displaced by Q*e (as NV_64's first trees were) consistent with its old runs
-    text = replace_tag(text, "MASS_WEIGHTED", "${MASS_WEIGHTED:-1}" if mass_weighted else "0")
+    text = replace_tag(text, "DISPLACEMENT", displacement)
     # The loop and the structure scripts run from a snapshot of this repo taken at
     # submission (see the script header), so the script only names the checkout.
     text = replace_tag(text, "SPINLABS_REPO", str(repo_root()))
@@ -374,7 +417,7 @@ def prepare_basis(
 
     if per_sim is not None:
         LOGGER.info(
-            f"    time: {per_sim:.0f} s/sim x {n_tasks} tasks / "
+            f"{dst.name} wall time: {per_sim:.0f} s/sim x {n_tasks} tasks / "
             f"{n_array_jobs} array jobs = {per_job:.0f} s/job "
             f"-> {sbatch_time(per_job)}"
         )
@@ -385,12 +428,16 @@ def build_perturbation_tree(
     out: Path,
     pert: list[float],
     phonon: Path,
+    *,
+    displacement: str,
+    conv_modes: list[int] | None,
+    conv_perts: list[float] | None = None,
     pair_mode: str = "diag",
     array_jobs: int = 10,
+    conv_array_jobs: int = 5,
     max_hours: float | None = None,
     vasp_binary: Path | None = None,
     force: bool = False,
-    mass_weighted: bool = True,
 ) -> list[str]:
     """Build ready-to-go perturbed ZFS run folders under a defect directory.
 
@@ -399,38 +446,28 @@ def build_perturbation_tree(
     POTCAR.  `phonon` should be the raw phonon npz (default
     <out>/data/phonon_data.npz) -- the tree always runs from a symmetrised
     file in <out>/data, created by resolve_sym_phonon if missing.
+    Every step in `pert` gets first_order/ and second_order/ trees displaced by
+    `displacement` (spinlabs.models.DISPLACEMENTS); with `conv_modes` the defect also
+    gets its step-size convergence folders (see build_convergence_tree), at
+    `conv_perts` or, by default, convergence_steps(pert).
     Returns the list of failure messages (empty on success).
     """
+    if not pert:
+        raise ValueError("no perturbation step given: the step (--pert) is required")
     failures: list[str] = []
     defect = out.name
-
-    sources: dict[str, Path] = {}
-    for basis, folder in BASIS_SOURCE.items():
-        src = out / folder
-        if not src.is_dir():
-            raise FileNotFoundError(
-                f"missing {src} -- both ZFS_hyp and ZFS_occup must exist before creating perturbation folders"
-            )
-        for name in REQUIRED_FILES:
-            if not (src / name).is_file():
-                raise FileNotFoundError(f"missing {name} in {src}")
-        sources[basis] = src
+    sources = zfs_sources(out)
 
     phonon = resolve_sym_phonon(out, phonon)
     n_modes = n_modes_from_phonon(phonon)
-    LOGGER.info(f"=== {defect}: phonon {phonon} ({n_modes} modes) -> {out} ===")
+    section(LOGGER, f"Perturbation trees {defect}: {n_modes} modes, {displacement} displacements")
+    LOGGER.info(f"phonon data: {phonon}")
     for order in ("first_order", "second_order"):
         for basis, src in sources.items():
             for p in pert:
                 dst = out / order / f"pert_{p}" / basis
-                if dst.exists():
-                    if force:
-                        LOGGER.info(f"  overwriting {dst}")
-                        shutil.rmtree(dst)
-                    else:
-                        LOGGER.info(f"  note: {dst} already exists -- skipping")
-                        continue
-                LOGGER.info(f"  creating {dst}")
+                if not _make_room(dst, force):
+                    continue
                 script_name = FIRST_ORDER_SCRIPT if order == "first_order" else SECOND_ORDER_SCRIPT
                 failures.extend(
                     prepare_basis(
@@ -445,9 +482,154 @@ def build_perturbation_tree(
                         n_modes=n_modes,
                         basis=dst.name,
                         vasp_binary=vasp_binary,
-                        mass_weighted=mass_weighted,
+                        displacement=displacement,
                         pair_mode=pair_mode if order == "second_order" else None,
                         max_hours=max_hours,
                     )
                 )
+    if conv_modes:
+        failures.extend(
+            build_convergence_tree(
+                out,
+                phonon,
+                conv_modes,
+                conv_perts if conv_perts else convergence_steps(pert),
+                displacement=displacement,
+                array_jobs=conv_array_jobs,
+                max_hours=max_hours,
+                vasp_binary=vasp_binary,
+                force=force,
+            )
+        )
+    return failures
+
+
+def zfs_sources(out: Path) -> dict[str, Path]:
+    """basis -> the defect's ground-state ZFS folder (ZFS_hyp, ZFS_occup); both must hold the VASP input."""
+    sources: dict[str, Path] = {}
+    for basis, folder in BASIS_SOURCE.items():
+        src = out / folder
+        if not src.is_dir():
+            raise FileNotFoundError(
+                f"missing {src} -- both ZFS_hyp and ZFS_occup must exist before creating perturbation folders"
+            )
+        for name in REQUIRED_FILES:
+            if not (src / name).is_file():
+                raise FileNotFoundError(f"missing {name} in {src}")
+        sources[basis] = src
+    return sources
+
+
+def _make_room(dst: Path, force: bool) -> bool:
+    """Whether to (re)create dst: an existing folder is kept unless ``force``."""
+    if dst.exists():
+        if not force:
+            LOGGER.info(f"exists, kept (--force rebuilds it): {dst}")
+            return False
+        LOGGER.info(f"rebuilding: {dst}")
+        shutil.rmtree(dst)
+    LOGGER.info(f"building: {dst}")
+    return True
+
+
+def defect_trees(out: Path) -> list[Path]:
+    """A defect's perturbation tree folders (first_order/pert_*/<basis>, then second_order)."""
+    return sorted(out.glob("first_order/pert_*/*")) + sorted(out.glob("second_order/pert_*/*"))
+
+
+def defect_displacement(out: Path) -> str | None:
+    """The displacement convention a defect's existing trees use: None if it has no trees.
+
+    Trees whose job scripts name none predate both settings and were mass-weighted.
+    Raises ValueError when the trees disagree.
+    """
+    trees = defect_trees(out)
+    if not trees:
+        return None
+    found = {tree_displacement(t) or "mass_weighted" for t in trees}
+    if len(found) > 1:
+        raise ValueError(f"the trees of {out.name} use different displacements {sorted(found)}")
+    return found.pop()
+
+
+def defect_vasp_binary(out: Path) -> Path | None:
+    """The VASP binary a defect's existing trees' job scripts name, if any."""
+    for tree in defect_trees(out):
+        for script in sorted(tree.glob("run_*.sh")):
+            match = re.search(r"^\s*binary\s*=\s*(\S+)", script.read_text(errors="replace"), re.M)
+            value = re.sub(r"^\$\{BINARY:-(.*)\}$", r"\1", match.group(1).strip("'\"")) if match else ""
+            if value and "<" not in value:
+                return Path(value)
+    return None
+
+
+def step_sizes(steps: list[float]) -> list[float]:
+    """The convergence step sizes in `steps`: sorted, without sign, zero or repeats.
+
+    The runner runs each size at -p and +p, so a signed list and its magnitudes give the same runs.
+    """
+    return sorted({round(abs(s), 10) for s in steps if round(abs(s), 10) > 0})
+
+
+def convergence_steps(pert: list[float]) -> list[float]:
+    """Convergence step sizes for a tree's steps: p/2, p and 2p for each p (each run at both
+    signs), so the forward second-order difference (needs the run at 2Q) has points up to the
+    tree's own steps."""
+    return step_sizes([f * p for p in pert for f in (0.5, 1.0, 2.0)])
+
+
+def build_convergence_tree(
+    out: Path,
+    phonon: Path,
+    modes: list[int],
+    steps: list[float],
+    *,
+    displacement: str,
+    array_jobs: int = 5,
+    max_hours: float | None = None,
+    vasp_binary: Path | None = None,
+    force: bool = False,
+) -> list[str]:
+    """Step-size convergence folders of a defect: <out>/convergence_test_<all|occup>/.
+
+    Each holds input/ (from ZFS_hyp, ZFS_occup) and run_convergence.sh, which runs every
+    1-based mode in `modes` at -p and +p for every step size p in `steps` (a sign there is
+    ignored) into runs/<mode>_pert_<step>/,
+    displaced by `displacement`, through the shared perturbation runner. Works on a new
+    defect folder and on one that already has its perturbation trees; existing convergence
+    folders are kept unless `force`. Returns the list of failure messages.
+    """
+    steps = step_sizes(steps)
+    if not modes or not steps:
+        raise ValueError("convergence folders need modes and nonzero step sizes")
+    known = set(mode_numbers(phonon))
+    missing = [m for m in modes if m not in known]
+    if missing:
+        raise ValueError(f"modes {missing} are not in {phonon} (its modes: {min(known)}..{max(known)})")
+    failures: list[str] = []
+    n_modes = n_modes_from_phonon(phonon)
+    section(LOGGER, f"Convergence folders {out.name}: modes {modes}, steps {steps}, {displacement} displacements")
+    for basis, src in zfs_sources(out).items():
+        dst = out / CONVERGENCE_FOLDER[basis]
+        if not _make_room(dst, force):
+            continue
+        failures.extend(
+            prepare_basis(
+                src,
+                dst,
+                CONVERGENCE_SCRIPT,
+                phonon,
+                defect=out.name,
+                pert=None,
+                order="convergence",
+                n_array_jobs=array_jobs,
+                n_modes=n_modes,
+                basis=dst.name,
+                vasp_binary=vasp_binary,
+                displacement=displacement,
+                max_hours=max_hours,
+                conv_modes=list(modes),
+                conv_perts=list(steps),
+            )
+        )
     return failures

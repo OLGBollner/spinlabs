@@ -29,7 +29,7 @@ def test_plot_t1_single_file(tmp_path, caplog):
     with caplog.at_level("INFO", logger="spinlabs"):
         args.func(args)
     assert list(tmp_path.glob("out*.png"))
-    assert "Saved T1 figure to:" in caplog.text
+    assert "saved figure: " in caplog.text
 
 
 def test_plot_t1_multiple_files_same_figure(tmp_path):

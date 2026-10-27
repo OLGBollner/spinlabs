@@ -12,7 +12,7 @@ from spinlabs.pipeline import DEFAULT_SIGMA_MEV, run_full_pipeline
 from spinlabs.registry import ensure_db, parse_orders
 from spinlabs.relaxation_dynamics import INIT_STATES, normalize_init_state
 
-from spinlabs.logging_utils import get_logger
+from spinlabs.logging_utils import get_logger, section
 
 LOGGER = get_logger(__name__)
 
@@ -286,15 +286,14 @@ def _run_query(args: argparse.Namespace) -> None:
                 seen.add(path)
                 files.append((path, defect, cell_size, pert_scale))
     if not files:
-        LOGGER.warning("No packaged data matching the query.")
+        LOGGER.warning("no packaged data matches the query")
         return
     # With multiple matched datasets, disambiguate the run-name so each
     # dataset lands in its own <run_name>_<stem> directory instead of
     # silently sharing/creating duplicate <run_name>_1, _2, ... folders.
     failed: list[tuple[Path, Exception]] = []
     for n, (path, defect, cell_size, pert_scale) in enumerate(files, start=1):
-        # Shown without -v, so warnings and errors below can be traced to their dataset.
-        print(f"[{n}/{len(files)}] {path}", flush=True)
+        section(LOGGER, f"Dataset {n}/{len(files)}: {path}", major=True)
         method = _infer_method_from_file(Path(path))
         if args.run_name and len(files) > 1:
             run_name = f"{args.run_name}_{Path(path).stem}"
@@ -303,9 +302,10 @@ def _run_query(args: argparse.Namespace) -> None:
         try:
             _run_one_query_dataset(args, path, method, pert_scale, defect, cell_size, run_name)
         except Exception as error:  # one bad dataset must not stop the rest of the query
-            LOGGER.error(f"Failed: {path}: {error}")
+            LOGGER.error(f"dataset {n}/{len(files)} failed: {path}: {error}")
             failed.append((Path(path), error))
-    print(f"Done: {len(files) - len(failed)} of {len(files)} dataset(s) analyzed.")
+    section(LOGGER, "Query summary", major=True)
+    LOGGER.info(f"analyzed {len(files) - len(failed)} of {len(files)} dataset(s)")
     if failed:
         raise SystemExit(
             f"{len(failed)} dataset(s) failed:\n" + "\n".join(f"  {path}: {error}" for path, error in failed)

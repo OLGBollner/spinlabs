@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import re
-import warnings
 from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 from typing import Any
@@ -127,12 +126,7 @@ def _dedupe_phonon_qpoints(raw_data: dict, path: Path) -> None:
     for i, entry in enumerate(q_entries):
         q = tuple(entry.get("q-position", [None, None, None]))
         if q in seen:
-            warnings.warn(
-                f"Duplicate q-point {q} found in {path} "
-                f"(indices {seen[q]} and {i}); keeping the first "
-                f"occurrence only.",
-                stacklevel=3,
-            )
+            LOGGER.warning(f"duplicate q-point {q} in {path} (blocks {seen[q]} and {i}); the first one is used")
         else:
             seen[q] = i
             keep.append(i)
@@ -185,7 +179,7 @@ def parse_phonopy_yaml(yaml_path: str | Path, poscar_path: str | Path | None = N
                         f"({sibling}) vs {n_lattice} atoms in eigenvectors "
                         f"of {path}"
                     )
-                LOGGER.info(f"Trying to read data from: {sibling}")
+                LOGGER.debug(f"structure of {path.name} from {sibling}")
                 struct = sibling_struct
 
     if struct is not None:
@@ -203,13 +197,10 @@ def parse_phonopy_yaml(yaml_path: str | Path, poscar_path: str | Path | None = N
             frac_coords = np.zeros((n_lattice, 3), dtype=float)
             symbols = ["X"] * n_lattice
             masses = np.ones(n_lattice, dtype=float)
-            warnings.warn(
-                f"No structure data in {path} and no POSCAR found in "
-                f"{path.parent}: falling back to degenerate defaults "
-                f"(identity lattice, all atoms at origin, symbol X, mass 1.0). "
-                f"Symmetry analysis will fail; place a matching POSCAR next "
-                f"to the file or run write_full_phonopy_yaml().",
-                stacklevel=2,
+            LOGGER.warning(
+                f"no structure data in {path} and no POSCAR in {path.parent}: using degenerate defaults "
+                "(identity lattice, all atoms at the origin, symbol X, mass 1.0), so symmetry analysis will fail; "
+                "place a matching POSCAR next to the file or run write_full_phonopy_yaml()"
             )
 
         lattice = np.array(raw_data.get("lattice", np.eye(3)), dtype=float)
@@ -347,7 +338,7 @@ def prepare_phonopy_yaml(
         f.write("\n".join(struct_lines))
         f.write("\n")
     LOGGER.info(
-        f"wrote {out} (structure data from {poscar_path})"
+        f"saved phonopy yaml: {out} (structure data from {poscar_path})"
         + (f"; removed {n_dup} duplicate q-point block(s)" if n_dup else "")
     )
     return spectrum, out
@@ -508,10 +499,8 @@ def parse_perturbation_directory(
     outcar_files = _run_outcars(dir_path, order)
     if not outcar_files:
         if verbose:
-            warnings.warn(f"No OUTCARs found in: {dir_path}")
+            LOGGER.warning(f"no run OUTCARs found: {dir_path}")
         return {}
-    if verbose:
-        LOGGER.info(f"Parsing {len(outcar_files)} OUTCARs in {dir_path} ...")
 
     worker_fn = _worker_parse_outcar_1d if order == 1 else _worker_parse_outcar_2d
     results = {}
@@ -531,8 +520,13 @@ def parse_perturbation_directory(
 
     if verbose:
         skipped = len(outcar_files) - len(results)
-        suffix = f" ({skipped} skipped)" if skipped else ""
-        LOGGER.info(f"  -> {len(results)}/{len(outcar_files)} parsed{suffix}")
+        if skipped:
+            LOGGER.warning(
+                f"{skipped} of {len(outcar_files)} OUTCARs have no ZFS tensor (unfinished or failed runs) "
+                f"and are left out: {dir_path}"
+            )
+        else:
+            LOGGER.debug(f"parsed {len(results)} OUTCARs: {dir_path}")
 
     return results
 

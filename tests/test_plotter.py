@@ -166,7 +166,7 @@ class TestPlotter:
 
         fig, ax = plot_t1([p])
         assert len(ax.get_lines()) == 0
-        assert "No valid T1 data" in caplog.text
+        assert "no finite T1 values" in caplog.text
         plt.close(fig)
 
     def test_plot_t1_output_filename_metadata(self, tmp_path):

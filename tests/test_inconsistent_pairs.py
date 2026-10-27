@@ -59,7 +59,7 @@ def test_over_displaced_pair_is_listed_and_kept_by_default(caplog):
     assert [(i, j) for i, j, *_ in manager.inconsistent_pairs] == [(0, 3)]
     assert abs(manager.inconsistent_pairs[0][2] - 1.0) < 1e-6  # alpha of a doubled run
     assert v00[0, 3] > 0
-    assert "Kept 1 of 4 second-order entries" in caplog.text and "1_4 (alpha=1.00)" in caplog.text
+    assert "1 of 4 second-order entries kept" in caplog.text and "1_4 (alpha=1.00)" in caplog.text
     assert "--exclude-inconsistent-pairs drops them" in caplog.text
 
 
@@ -69,7 +69,7 @@ def test_exclude_inconsistent_pairs_drops_them(caplog):
 
     assert v00[0, 3] == 0 and np.all(d2[0, 3] == 0)
     assert v00[0, 0] > 0 and v00[3, 3] > 0  # healthy diagonal entries kept
-    assert "Excluded (--exclude-inconsistent-pairs) 1 of 4" in caplog.text
+    assert "1 of 4 second-order entries excluded (--exclude-inconsistent-pairs)" in caplog.text
 
 
 def test_a2_diagonal_pair_with_pure_curvature_is_consistent():

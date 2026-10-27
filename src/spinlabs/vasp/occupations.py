@@ -6,7 +6,7 @@ import re
 import shutil
 from pathlib import Path
 
-from spinlabs.logging_utils import get_logger
+from spinlabs.logging_utils import get_logger, section
 
 LOGGER = get_logger(__name__)
 
@@ -137,12 +137,12 @@ def prepare_relax_to_zfs(relax: Path, zfs: Path) -> list[str]:
 
     def fail(msg: str) -> None:
         failures.append(msg)
-        LOGGER.error(f"  FAIL: {msg}")
+        LOGGER.error(f"{zfs}: {msg}")
 
     def warn(msg: str) -> None:
-        LOGGER.warning(f"  warn: {msg}")
+        LOGGER.warning(f"{zfs}: {msg}")
 
-    LOGGER.info(f"=== {relax}  ->  {zfs} ===")
+    section(LOGGER, f"ZFS run {zfs} from relaxation {relax}")
     if not relax.is_dir():
         fail(f"relaxation dir {relax} does not exist")
         return failures
@@ -159,7 +159,7 @@ def prepare_relax_to_zfs(relax: Path, zfs: Path) -> list[str]:
     kpts_text = (relax / "KPOINTS").read_text()
     if kpoints_is_gamma_only(kpts_text):
         shutil.copy2(relax / "KPOINTS", zfs / "KPOINTS")
-        LOGGER.info("  KPOINTS already Gamma-only; copied as-is")
+        LOGGER.debug("KPOINTS already Gamma-only; copied as-is")
     else:
         (zfs / "KPOINTS").write_text(GAMMA_KPOINTS)
         warn(
@@ -167,7 +167,7 @@ def prepare_relax_to_zfs(relax: Path, zfs: Path) -> list[str]:
             "of the relaxation -- wrote a Gamma-only KPOINTS into the ZFS dir "
             "instead of copying"
         )
-    LOGGER.info("  copied CONTCAR->POSCAR, CHGCAR, POTCAR (+ KPOINTS as Gamma-only)")
+    LOGGER.info("copied CONTCAR -> POSCAR, CHGCAR, POTCAR, KPOINTS (Gamma-only)")
 
     if (zfs / "WAVECAR").exists():
         warn(
@@ -183,7 +183,7 @@ def prepare_relax_to_zfs(relax: Path, zfs: Path) -> list[str]:
 
     n_up, n_dn, nbands, unp_up, unp_dn = occupied_bands_from_eigenval(relax / "EIGENVAL")
     LOGGER.info(
-        f"  EIGENVAL: {n_up} occupied (up), {n_dn} (down), NBANDS = {nbands}; "
+        f"EIGENVAL: {n_up} occupied (up), {n_dn} (down), NBANDS = {nbands}; "
         f"unpaired up {sorted(unp_up)}, down {sorted(unp_dn)}"
     )
 
@@ -202,12 +202,12 @@ def prepare_relax_to_zfs(relax: Path, zfs: Path) -> list[str]:
 
     (zfs / "INCAR").write_text(patch_incar(incar_text, n_up, n_dn, nbands, unp_up, unp_dn))
     LOGGER.info(
-        f"  wrote INCAR with NUPDOWN={n_up - n_dn}, "
+        f"wrote INCAR with NUPDOWN={n_up - n_dn}, "
         f"DOCCUP={n_up}*1.0 {nbands - n_up}*0.0, DOCCDO={n_dn}*1.0 {nbands - n_dn}*0.0"
     )
 
     if failures:
-        LOGGER.error(f"  {len(failures)} problem(s) found -- do NOT launch until fixed")
+        LOGGER.error(f"{zfs}: {len(failures)} problem(s) found; do NOT launch until fixed")
     else:
-        LOGGER.info("  all checks passed; ready to launch")
+        LOGGER.info("all checks passed; ready to launch")
     return failures

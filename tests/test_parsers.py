@@ -365,7 +365,7 @@ class TestSpinCorrectionOnLoad:
         assert loaded.ground_state_zfs.matrix[0, 0] == pytest.approx(-1500.0e6 * h)
         entry = loaded.first_order[1060]
         assert entry["tensor"][2, 2] == pytest.approx(2970.0e6 * h)
-        assert "Applied spin correction scaling: 1.5" in caplog.text
+        assert "applied spin correction (defect_band_approx, x1.5)" in caplog.text
 
         # Saving the corrected object persists the flag; re-loading must not rescale
         out2 = tmp_path / "resaved.npz"

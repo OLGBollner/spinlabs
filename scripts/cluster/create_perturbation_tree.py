@@ -11,11 +11,12 @@ import sys
 from pathlib import Path
 
 from spinlabs.vasp import build_perturbation_tree, default_phonon
+from spinlabs.vasp.structures import add_displacement_args, displacement_from_args
 from spinlabs.logging_utils import configure_logging
 
 
 def main() -> int:
-    configure_logging(verbosity=1)
+    configure_logging()
     ap = argparse.ArgumentParser(
         description="Build ready-to-go perturbed ZFS run folders (first_order/second_order x basis x perturbation)"
     )
@@ -24,8 +25,30 @@ def main() -> int:
         "--pert",
         type=float,
         nargs="+",
-        default=[0.05, 0.1, 0.2],
-        help="perturbation amplitudes Q (default: 0.05 0.1 0.2)",
+        required=True,
+        help="perturbation step(s), required; with the default normalized displacement a Cartesian length in "
+        "Angstrom that every mode is moved by (e.g. 0.025)",
+    )
+    add_displacement_args(ap, default="normalized")
+    ap.add_argument(
+        "--conv-modes",
+        type=int,
+        nargs="+",
+        default=None,
+        help="1-based modes for the step-size convergence folders convergence_test_<all|occup>/ (required "
+        "unless --no-convergence)",
+    )
+    ap.add_argument(
+        "--conv-perts",
+        type=float,
+        nargs="+",
+        default=None,
+        help="convergence step sizes, each run at -s and +s (default: p/2, p, 2p for each --pert p, so the "
+        "forward second order has a point at every tree step)",
+    )
+    ap.add_argument("--no-convergence", action="store_true", help="do not create the convergence folders")
+    ap.add_argument(
+        "--conv-array-jobs", type=int, default=5, help="SLURM array jobs for each convergence folder (default: 5)"
     )
     ap.add_argument(
         "--phonon",
@@ -59,14 +82,10 @@ def main() -> int:
         "job count is raised until the limit fits (e.g. "
         "--max-hours 8)",
     )
-    ap.add_argument(
-        "--no-mass-weighted",
-        dest="mass_weighted",
-        action="store_false",
-        help="displace by Q*e instead of Q*e/sqrt(m) (MASS_WEIGHTED=0 in the job scripts), to stay consistent "
-        "with trees made that way, e.g. NV_64",
-    )
     args = ap.parse_args()
+    displacement = displacement_from_args(args, ap)
+    if not args.no_convergence and not args.conv_modes:
+        ap.error("--conv-modes is required for the convergence folders (or pass --no-convergence)")
 
     if args.force:
         try:
@@ -86,14 +105,17 @@ def main() -> int:
             out,
             args.pert,
             phonon,
+            displacement=displacement,
+            conv_modes=None if args.no_convergence else args.conv_modes,
+            conv_perts=args.conv_perts,
             pair_mode=args.pair_mode,
             array_jobs=args.array_jobs,
+            conv_array_jobs=args.conv_array_jobs,
             max_hours=args.max_hours,
             vasp_binary=vasp_binary,
             force=args.force,
-            mass_weighted=args.mass_weighted,
         )
-    except FileNotFoundError as e:
+    except (FileNotFoundError, ValueError) as e:
         sys.exit(f"Error: {e}")
 
     if failures:

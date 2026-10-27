@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import logging
-import warnings
 from pathlib import Path
 from typing import Any, Optional
 import numpy as np
@@ -67,11 +66,7 @@ class ZFSManager:
                 # in the classifier must NOT be caught here.
                 if stored_syms is None:
                     raise
-                warnings.warn(
-                    f"Fresh symmetry classification failed ({exc}); falling back to stored labels.",
-                    RuntimeWarning,
-                    stacklevel=2,
-                )
+                LOGGER.warning(f"symmetry classification of the phonon modes failed ({exc}); using the stored labels")
                 fresh_labels = stored_syms
                 # Stored labels are trusted as-is here, so sym_check cannot be
                 # verified (no detectable point group to build characters
@@ -81,10 +76,9 @@ class ZFSManager:
                 mismatched = [i for i, (a, b) in enumerate(zip(stored_syms, fresh_labels)) if a != b]
                 if mismatched:
                     LOGGER.warning(
-                        f"{len(mismatched)} stored symmetry label(s) differ "
-                        f"from fresh classification: {mismatched[:10]}"
-                        f"{'...' if len(mismatched) > 10 else ''}. "
-                        f"Using fresh classification."
+                        f"{len(mismatched)} stored symmetry label(s) differ from a fresh classification "
+                        f"(modes {', '.join(str(i + 1) for i in mismatched[:10])}"
+                        f"{', ...' if len(mismatched) > 10 else ''}); the fresh labels are used"
                     )
             spectrum.symmetries = fresh_labels
             spectrum.deg_groups = deg_groups
@@ -120,7 +114,9 @@ class ZFSManager:
         self.calc_method: Optional[str] = (
             raw_data.calc_method or raw_data.metadata.get("calc_method") if raw_data else None
         )
-        self.mass_weighted: bool = raw_data.mass_weighted if raw_data else True
+        # How the runs were displaced (spinlabs.models.DISPLACEMENTS); sets each mode's amplitude q.
+        self.displacement: str = raw_data.displacement_convention if raw_data else "mass_weighted"
+        self.mass_weighted: bool = self.displacement != "unweighted"
         self.exclude_inconsistent_pairs = exclude_inconsistent_pairs
         # Second-order entries failing the linear-response check, as
         # (i, j, alpha, |remainder| in MHz) with 0-based modes; see calculate_second_order_derivatives.
@@ -130,13 +126,16 @@ class ZFSManager:
         self.degenerate_pairs_from_symmetry = degenerate_pairs_from_symmetry
         # (Ex, Ey) pairs, 0-based, whose couplings were replaced that way.
         self.symmetry_derived_pairs: list[tuple[int, int]] = []
-        if not self.mass_weighted:
+        if self.displacement != "mass_weighted":
             if spectrum is None:
                 raise ValueError(
-                    "Non-mass-weighted perturbation data needs the phonon spectrum (eigenvectors and masses) "
-                    "to correct the perturbation amplitudes"
+                    f"{self.displacement} perturbation data needs the phonon spectrum (eigenvectors and masses) "
+                    "to get each mode's perturbation amplitude"
                 )
-            LOGGER.info("Perturbations are not mass-weighted: scaling q by each mode's effective sqrt(mass)")
+            if self.displacement == "unweighted":
+                LOGGER.info("displacements: not mass-weighted; q scaled by each mode's effective sqrt(mass)")
+            else:
+                LOGGER.info("displacements: normalized (same Cartesian step per mode); q scaled by each mode's n_k")
 
         # Processed ZFS data in defect principal frame
         self.zfs_relaxed: Optional[np.ndarray] = None  # Shape (3, 3) in J
@@ -179,7 +178,7 @@ class ZFSManager:
 
     def get_phonon_pert(self, pert_scale_si: float) -> Optional[dict[str, Any]]:
         if self.spectrum is not None:
-            return self.spectrum.get_phonon_pert(pert_scale_si, mass_weighted=self.mass_weighted)
+            return self.spectrum.get_phonon_pert(pert_scale_si, displacement=self.displacement)
         return None
 
     def _ingest_raw_data(self, raw: RawZFSData):
@@ -338,10 +337,9 @@ class ZFSManager:
 
         if dropped:
             LOGGER.warning(
-                f"Note: {len(dropped)} raw mode indices have no partner in the "
-                f"phonon spectrum ({n_phon} modes kept) and were skipped: "
-                f"{sorted(set(dropped))[:10]}{'...' if len(set(dropped)) > 10 else ''}. "
-                "Their V-coefficients will be inherited via degeneracy groups where available."
+                f"{len(dropped)} raw mode indices have no partner in the phonon spectrum ({n_phon} modes kept) "
+                f"and are skipped: {sorted(set(dropped))[:10]}{'...' if len(set(dropped)) > 10 else ''}; "
+                "their couplings are inherited through degeneracy groups where available"
             )
 
         self.treated_modes = self._get_symmetry_factor()
@@ -350,18 +348,17 @@ class ZFSManager:
         total_modes = self.nmodes
         n_1d = len(self.zfs_tensors)
         n_2d = len(self.zfs_tensors_2d)
-        LOGGER.info(f"Tensor data size: {n_1d} 1D, {n_2d} 2D out of {total_modes} total modes")
-
         treated = self.zfs_tensors.keys() if (0 < n_1d <= n_2d or n_2d == 0) else self.zfs_tensors_2d.keys()
         mode_set = {x for item in treated for x in (item if isinstance(item, tuple) else (item,))}
-        LOGGER.info(f"Treated unique modes: {len(mode_set)}")
+        LOGGER.info(
+            f"ZFS tensors: {n_1d} first order, {n_2d} second order; {len(mode_set)} of {total_modes} modes treated"
+        )
         return mode_set
 
     def calculate_first_order_derivatives(self, ipr_thresh: Optional[float] = None):
         """
         Calculates 1st order finite difference derivatives dD/dq and spin-phonon coupling coefficients.
         """
-        LOGGER.info("Calculating first-order derivatives...")
         n_modes = self.nmodes
 
         zfs_deriv = np.zeros((n_modes, 3, 3))
@@ -437,10 +434,10 @@ class ZFSManager:
                     V_p_m[i] / CONSTANTS["MHz2J"],
                 )
 
-        LOGGER.info("Symmetry adjusted coefficients (1st order):")
-        LOGGER.info(f"V_00:  {np.sum(V_0_0 > 0)}")
-        LOGGER.info(f"V_pm:  {np.sum(V_p_m > 0)}")
-        LOGGER.info(f"V_0pm: {np.sum(V_0_pm > 0)}")
+        LOGGER.info(
+            f"first-order couplings (nonzero): V_00 {np.sum(V_0_0 > 0)}, V_pm {np.sum(V_p_m > 0)}, "
+            f"V_0pm {np.sum(V_0_pm > 0)}"
+        )
 
         return zfs_deriv, V_0_0, V_p_m, V_0_pm
 
@@ -448,7 +445,6 @@ class ZFSManager:
         """
         Calculates 2nd order finite difference derivatives d2D/dqi dqj and 2-phonon coupling coefficients.
         """
-        LOGGER.info("Calculating second-order derivatives...")
         n_modes = self.nmodes
         phonon_energies = self.get_phonon_frequencies()
 
@@ -570,38 +566,38 @@ class ZFSManager:
             self._degenerate_pairs_from_symmetry(zfs_2nd_derivs, V_0_0_2nd, V_p_m_2nd, V_0_pm_2nd)
 
         if outside_strict:
-            LOGGER.info(
-                f"Second-order symmetry: {len(outside_strict)} of {n_judged} entries hold content outside "
+            LOGGER.debug(
+                f"second-order symmetry: {len(outside_strict)} of {n_judged} entries hold content outside "
                 f"Gi x Gj (median {np.median(outside_strict):.2f} MHz, max {np.max(outside_strict):.2f} MHz); "
                 "expected O(q D''') finite-difference terms, warned about only beyond those"
             )
 
         if no_first_order:
             LOGGER.warning(
-                f"Skipped {len(no_first_order)} second-order entries with a mode that has no first-order "
-                "derivative (its linear response cannot be removed). Run folders (1-based): "
+                f"{len(no_first_order)} second-order entries skipped: a mode has no first-order derivative, so "
+                "its linear response cannot be removed; run folders "
                 + ", ".join(f"{i + 1}_{j + 1}" for i, j in no_first_order[:20])
                 + (", ..." if len(no_first_order) > 20 else "")
             )
 
         if self.inconsistent_pairs:
             if self.exclude_inconsistent_pairs:
-                action, hint = "Excluded (--exclude-inconsistent-pairs)", ""
+                action, hint = "excluded (--exclude-inconsistent-pairs)", ""
             else:
-                action = "Kept"
+                action = "kept"
                 hint = "; check the geometry with compare_displacement.py, --exclude-inconsistent-pairs drops them"
             LOGGER.warning(
-                f"{action} {len(self.inconsistent_pairs)} of {len(self.zfs_tensors_2d)} second-order entries "
-                f"whose ZFS change departs from the one expected from the first-order runs by a multiple of it "
+                f"{len(self.inconsistent_pairs)} of {len(self.zfs_tensors_2d)} second-order entries {action}: "
+                f"their ZFS change departs from the one expected from the first-order runs by a multiple of it "
                 f"(|alpha| > {INCONSISTENT_ALPHA}: strongly nonlinear at this Q, or an over-displaced or stale "
-                f"run{hint}). Run folders (1-based): "
+                f"run{hint}); run folders "
                 + ", ".join(f"{i + 1}_{j + 1} (alpha={a:.2f})" for i, j, a, _ in self.inconsistent_pairs)
             )
 
-        LOGGER.info("Symmetry adjusted coefficients (2nd order):")
-        LOGGER.info(f"V_00:  {np.sum(V_0_0_2nd > 0)}")
-        LOGGER.info(f"V_pm:  {np.sum(V_p_m_2nd > 0)}")
-        LOGGER.info(f"V_0pm: {np.sum(V_0_pm_2nd > 0)}")
+        LOGGER.info(
+            f"second-order couplings (nonzero): V_00 {np.sum(V_0_0_2nd > 0)}, V_pm {np.sum(V_p_m_2nd > 0)}, "
+            f"V_0pm {np.sum(V_0_pm_2nd > 0)}"
+        )
 
         return zfs_2nd_derivs, V_0_0_2nd, V_p_m_2nd, V_0_pm_2nd
 
@@ -622,7 +618,7 @@ class ZFSManager:
         """
         spectrum = self.spectrum
         if spectrum is None or spectrum.deg_groups is None or spectrum.symmetries is None:
-            LOGGER.warning("Degenerate Ex-Ey pairs from symmetry need the phonon spectrum; skipped.")
+            LOGGER.warning("degenerate Ex-Ey pairs from symmetry need the phonon spectrum; option ignored")
             return
 
         syms = list(spectrum.symmetries)
@@ -649,7 +645,7 @@ class ZFSManager:
 
         n_kept = n_pairs - len(self.symmetry_derived_pairs)
         LOGGER.info(
-            f"Degenerate Ex-Ey couplings from symmetry: {len(self.symmetry_derived_pairs)} of {n_pairs} pairs"
+            f"degenerate Ex-Ey couplings from symmetry: {len(self.symmetry_derived_pairs)} of {n_pairs} pairs"
             + (f" ({n_kept} without an Ex-Ex derivative keep their computed values)" if n_kept else "")
         )
 
@@ -823,7 +819,7 @@ class ZFSManager:
                 zfs_2nd_derivs=kwargs.get("zfs_2nd_derivs"),
             )
             out = coupling_obj.save(save_name)
-            LOGGER.info(f"Saved ZFS spin-phonon coupling data to: {out}")
+            LOGGER.info(f"saved coupling data: {out}")
             return out
 
         # 2. If saving raw dataset (RawZFSData)
@@ -840,6 +836,7 @@ class ZFSManager:
                 # which apply the 3/2 correction for approx data at intake.
                 spin_correction_applied=normalize_calc_method(self.calc_method) == "defect_band_approx",
                 mass_weighted=self.mass_weighted,
+                displacement=self.displacement,
                 order=kwargs.get("order", 1 if first is not None else 2),
                 ground_state_zfs=gs_tensor,
                 eigen_rotation=self.eigen_rotation,
@@ -847,7 +844,7 @@ class ZFSManager:
                 second_order=second or {},
             )
             out = raw_obj.save(save_name)
-            LOGGER.info(f"Saved raw ZFS dataset to: {out}")
+            LOGGER.info(f"saved raw ZFS data: {out}")
             return out
 
         # 3. Fallback for generic arrays
@@ -858,7 +855,7 @@ class ZFSManager:
             "pert_scale": self.pert_scale,
         }
         np.savez(save_name, **metadata, **kwargs)
-        LOGGER.info(f"Saved ZFS data to: {save_name}")
+        LOGGER.info(f"saved ZFS arrays: {save_name}")
         return save_name
 
     def _check_symmetry(self, change: np.ndarray, labels: list[str], idx: Any, kind: str) -> Optional[ZFSResponseCheck]:
@@ -874,7 +871,8 @@ class ZFSManager:
             change / CONSTANTS["MHz2J"], labels, kind=kind, point_group=self.point_group, reference=self.zfs_relaxed
         )
         if check.problem:
-            LOGGER.warning(f"Symmetry mismatch at index {idx}: {check.problem}; {check.line}")
+            folder = "_".join(str(k + 1) for k in idx) if isinstance(idx, tuple) else str(idx + 1)
+            LOGGER.warning(f"symmetry mismatch in run folder {folder}: {check.problem}; {check.line}")
         return check
 
     def _debug_derivs(self, dD, q, symmetry, idx, V_0_0, V_0_pm, V_p_m):

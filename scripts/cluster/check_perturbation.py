@@ -2,7 +2,7 @@
 """check_perturbation.py -- is a perturbed POSCAR displaced as intended?
 
 Compares POSCAR with the reference structure and the displacement the generator applies
-(Q * e / sqrt(m) along each mode; --no-mass-weighted for the old Q * e runs). Prints one
+along each mode by the tree's --displacement convention. Prints one
 line with max/rms displacement and the fitted actual/expected scale; exit 1 when the
 scale or the residual is off by more than 1%. The job runner calls it right after
 perturbing, before VASP starts.
@@ -16,6 +16,7 @@ from pathlib import Path
 
 from spinlabs.parsers import parse_phonon_data
 from spinlabs.vasp.run_checks import check_perturbation
+from spinlabs.vasp.structures import add_displacement_args, displacement_from_args
 
 
 def main() -> int:
@@ -24,13 +25,13 @@ def main() -> int:
     ap.add_argument("reference", type=Path, help="unperturbed POSCAR (the tree's input/POSCAR)")
     ap.add_argument("phonons", type=Path, help="phonon file the structure was perturbed with")
     ap.add_argument("modes", type=int, nargs="+", help="1-based mode number(s)")
-    ap.add_argument("--pert", type=float, required=True, help="amplitude Q in Angstrom*sqrt(amu)")
-    ap.add_argument("--no-mass-weighted", dest="mass_weighted", action="store_false")
+    ap.add_argument("--pert", type=float, required=True, help="the step (see --displacement for its unit)")
+    add_displacement_args(ap)
     args = ap.parse_args()
     try:
         ok, line = check_perturbation(
             args.poscar, args.reference, parse_phonon_data(args.phonons), tuple(args.modes), args.pert,
-            mass_weighted=args.mass_weighted,
+            displacement=displacement_from_args(args, ap),
         )
     except (FileNotFoundError, ValueError) as error:
         print(f"perturbation check failed: {error}")

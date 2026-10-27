@@ -74,14 +74,14 @@ def test_prepare_phonopy_yaml(tmp_path):
     assert prepare_phonopy_yaml(yaml_path, poscar_path=tmp_path / "missing")[1] is None
 
 
-def test_missing_structure_warns(tmp_path):
+def test_missing_structure_warns(tmp_path, caplog):
     yaml_path = tmp_path / "phonons.yaml"
     _write_yaml(yaml_path, np.eye(3))
-    with pytest.warns(UserWarning, match="No structure data"):
-        parse_phonopy_yaml(yaml_path)
+    parse_phonopy_yaml(yaml_path)
+    assert any(r.levelname == "WARNING" and "no structure data" in r.getMessage() for r in caplog.records)
 
 
-def test_duplicate_qpoint_deduplicated(tmp_path, recwarn):
+def test_duplicate_qpoint_deduplicated(tmp_path, caplog):
     """phonons.yaml with the same Gamma block twice: keep only the first."""
     n = 2
     bands = [{"frequency": 1.0 + i * 0.1, "eigenvector": [[[1.0, 0.0, 0.0]] for _ in range(n)]} for i in range(3 * n)]
@@ -96,7 +96,7 @@ def test_duplicate_qpoint_deduplicated(tmp_path, recwarn):
 
     spectrum = parse_phonopy_yaml(yaml_path)
     assert spectrum.frequencies_mev.shape == (6,)
-    dup = [w for w in recwarn if "Duplicate q-point" in str(w.message)]
+    dup = [r for r in caplog.records if "duplicate q-point" in r.getMessage()]
     assert len(dup) == 1
 
 

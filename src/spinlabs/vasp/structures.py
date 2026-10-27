@@ -12,8 +12,11 @@ import numpy as np
 from pymatgen.core.structure import Structure
 from pymatgen.io.vasp.inputs import Poscar
 
-from spinlabs.models import PhononSpectrum
+from spinlabs.models import PhononSpectrum, displacement_convention
 from spinlabs.parsers import parse_phonon_data
+from spinlabs.logging_utils import get_logger
+
+LOGGER = get_logger(__name__)
 
 
 def load_poscar(poscar_file: str | Path) -> Structure:
@@ -284,13 +287,59 @@ def load_phonon_data(phonon_file: str | Path) -> PhononSpectrum:
     return spectrum
 
 
-def _displacement(eigenvectors: np.ndarray, masses: np.ndarray, index0: int, amplitude: float) -> np.ndarray:
-    """Mass-weighted displacement for one mode, in Angstrom.
+def _displacement(
+    eigenvectors: np.ndarray, masses: np.ndarray, index0: int, amplitude: float, displacement: str = "mass_weighted"
+) -> np.ndarray:
+    """Displacement (n_atoms, 3) in Angstrom along one mode for a step ``amplitude``.
 
-    amplitude is the normal coordinate Q in Angstrom*sqrt(amu):
-    Delta r_alpha(j) = Q * e_alpha(j) / sqrt(m_j).
+    By ``displacement`` (spinlabs.models.DISPLACEMENTS), with u = e / sqrt(m):
+    normalized: amplitude * u / |u|, a Cartesian length ``amplitude`` (Angstrom) for every mode;
+    mass_weighted: amplitude * u, the normal coordinate Q = amplitude (Angstrom*sqrt(amu));
+    unweighted: amplitude * e.
     """
-    return amplitude * eigenvectors[index0] / np.sqrt(masses[:, None])
+    e = eigenvectors[index0]
+    if displacement == "unweighted":
+        return amplitude * e
+    u = e / np.sqrt(masses[:, None])
+    if displacement == "normalized":
+        return amplitude * u / np.linalg.norm(u)
+    if displacement == "mass_weighted":
+        return amplitude * u
+    raise ValueError(f"Unknown displacement convention {displacement!r}")
+
+
+def add_displacement_args(parser, default: str | None = "mass_weighted") -> None:
+    """--displacement (spinlabs.models.DISPLACEMENTS) and the older --no-mass-weighted (= unweighted)."""
+    from spinlabs.models import DISPLACEMENTS
+
+    parser.add_argument(
+        "--displacement",
+        choices=DISPLACEMENTS,
+        default=None,
+        help="how the step displaces the atoms: normalized (the same Cartesian length, in Angstrom, along "
+        "every mode), mass_weighted (Q*e/sqrt(m), Q in Angstrom*sqrt(amu)) or unweighted (Q*e)"
+        + (f"; default {default}" if default else "; required"),
+    )
+    parser.add_argument(
+        "--no-mass-weighted",
+        dest="no_mass_weighted",
+        action="store_true",
+        help="same as --displacement unweighted (displace by Q*e, as the earliest runs, e.g. NV_64, were)",
+    )
+    parser.set_defaults(_displacement_default=default)
+
+
+def displacement_from_args(args, parser) -> str:
+    """The convention named by add_displacement_args' options (parser.error on a contradiction)."""
+    if args.no_mass_weighted:
+        if args.displacement not in (None, "unweighted"):
+            parser.error(f"--no-mass-weighted contradicts --displacement {args.displacement}")
+        return "unweighted"
+    if args.displacement is None:
+        if args._displacement_default is None:
+            parser.error("--displacement is required (normalized, mass_weighted or unweighted)")
+        return args._displacement_default
+    return args.displacement
 
 
 def _resolve_mode(mode_index: int, original_indices: np.ndarray | None, n_modes: int) -> int:
@@ -335,24 +384,29 @@ def apply_perturbation(
     mode_index: int,
     amplitude: float,
     original_indices: np.ndarray | None = None,
+    displacement: str = "mass_weighted",
 ) -> Structure:
-    """Apply a mass-weighted single-mode perturbation to a structure.
+    """Apply a single-mode perturbation to a structure.
 
-    mode_index is 1-based; amplitude is Q in Angstrom*sqrt(amu). For a
-    carbon (12 amu), Q=0.1 gives per-atom displacements ~0.1/sqrt(12) ~
-    0.029 Angstrom.
+    mode_index is 1-based; ``amplitude`` is the step, displaced by the
+    ``displacement`` convention (see _displacement): a Cartesian length in
+    Angstrom for normalized, Q in Angstrom*sqrt(amu) for mass_weighted (for a
+    carbon mode Q=0.1 moves the atoms by 0.1/sqrt(12) ~ 0.029 Angstrom in total).
     """
     n_modes, _, _ = eigs.shape
     idx = _resolve_mode(mode_index, original_indices, n_modes)
     _check_mode(eigs, structure, masses, idx, n_modes)
 
-    disp = _displacement(eigs, masses, idx, amplitude)  # (n_atoms, 3)
+    disp = _displacement(eigs, masses, idx, amplitude, displacement)  # (n_atoms, 3)
 
     perturbed = structure.copy()
     for j in range(len(structure)):
         perturbed.sites[j].coords = structure.sites[j].coords + disp[j]
 
-    print(f"Mode {mode_index}: max atomic displacement = {np.max(np.linalg.norm(disp, axis=1)):.6f} Å")
+    LOGGER.info(
+        f"mode {mode_index} ({displacement}): total displacement {np.linalg.norm(disp):.6f} A, "
+        f"max atomic displacement {np.max(np.linalg.norm(disp, axis=1)):.6f} A"
+    )
     return perturbed
 
 
@@ -364,25 +418,27 @@ def apply_combined_perturbation(
     masses: np.ndarray,
     amplitude: float,
     original_indices: np.ndarray | None = None,
+    displacement: str = "mass_weighted",
 ) -> Structure:
-    """Apply a two-mode combined perturbation (Mode I + Mode J, 1-based)."""
+    """Apply a two-mode combined perturbation (Mode I + Mode J, 1-based): each mode displaced by the step."""
     n_modes, _, _ = eigenvectors.shape
     idx_i = _resolve_mode(mode_i, original_indices, n_modes)
     idx_j = _resolve_mode(mode_j, original_indices, n_modes)
     _check_mode(eigenvectors, structure, masses, idx_i, n_modes)
     _check_mode(eigenvectors, structure, masses, idx_j, n_modes)
 
-    disp = _displacement(eigenvectors, masses, idx_i, amplitude) + _displacement(eigenvectors, masses, idx_j, amplitude)
+    disp_i = _displacement(eigenvectors, masses, idx_i, amplitude, displacement)
+    disp_j = _displacement(eigenvectors, masses, idx_j, amplitude, displacement)
+    disp = disp_i + disp_j
 
     perturbed = structure.copy()
     for j in range(len(structure)):
         perturbed.sites[j].coords = structure.sites[j].coords + disp[j]
 
-    print(
-        f"Applied combined perturbation: Mode {mode_i} + Mode {mode_j}, "
-        f"amplitude {amplitude} Å; max displacements "
-        f"{np.max(np.linalg.norm(_displacement(eigenvectors, masses, idx_i, amplitude), axis=1)):.6f} Å "
-        f"and {np.max(np.linalg.norm(_displacement(eigenvectors, masses, idx_j, amplitude), axis=1)):.6f} Å"
+    LOGGER.info(
+        f"modes {mode_i} + {mode_j}, step {amplitude} ({displacement}): "
+        f"total displacements {np.linalg.norm(disp_i):.6f} A and {np.linalg.norm(disp_j):.6f} A, max atomic "
+        f"{np.max(np.linalg.norm(disp_i, axis=1)):.6f} A and {np.max(np.linalg.norm(disp_j, axis=1)):.6f} A"
     )
     return perturbed
 
@@ -425,36 +481,44 @@ def compare_displacement(reference: str | Path, perturbed: str | Path) -> dict:
 
 
 def run_modes(path: str | Path) -> tuple[int, ...] | None:
-    """1-based modes of a perturbation run folder: ``runs/<i>`` (first order) or ``runs/<i>_<j>`` (pair)."""
+    """1-based modes of a run folder: ``runs/<i>`` (first order), ``runs/<i>_<j>`` (pair), ``runs/<i>_pert_<p>``
+    (convergence)."""
     path = Path(path)
     folder = path if path.is_dir() else path.parent
-    match = re.fullmatch(r"(\d+)(?:_(\d+))?", folder.name)
+    match = re.fullmatch(r"(\d+)(?:_(\d+))?", folder.name) or re.fullmatch(r"(\d+)_pert_-?[0-9.]+", folder.name)
     return tuple(int(g) for g in match.groups() if g) if match else None
 
 
 def run_pert_scale(path: str | Path) -> float | None:
-    """Perturbation scale from a ``pert_<x>`` component of the path, or None."""
+    """Step from a ``pert_<x>`` path component (a tree) or a ``<i>_pert_<x>`` run folder (convergence), or None."""
     for part in reversed(Path(path).resolve().parts):
-        match = re.fullmatch(r"pert_(-?[0-9.]+)", part)
+        match = re.fullmatch(r"(?:\d+_)?pert_(-?[0-9.]+)", part)
         if match:
             return float(match.group(1))
     return None
 
 
 def expected_displacement(
-    spectrum: PhononSpectrum, modes: tuple[int, ...], amplitude: float, *, mass_weighted: bool = True
+    spectrum: PhononSpectrum,
+    modes: tuple[int, ...],
+    amplitude: float,
+    *,
+    mass_weighted: bool = True,
+    displacement: str | None = None,
 ) -> np.ndarray:
-    """Per-atom displacement (n_atoms, 3) in Å for ``amplitude`` along each 1-based mode, summed.
+    """Per-atom displacement (n_atoms, 3) in Å for the step ``amplitude`` along each 1-based mode, summed.
 
     This is what the generator applies: a pair folder i_j displaces along both
-    modes and i_i twice along one. Without mass weighting each mode is displaced
-    by Q * e instead of Q * e / sqrt(m), as the earliest perturbation runs were.
+    modes and i_i twice along one, each by the ``displacement`` convention (else
+    the legacy ``mass_weighted`` flag; see spinlabs.models.DISPLACEMENTS).
     """
+    convention = displacement_convention(displacement, mass_weighted)
     eigs = np.real(np.asarray(spectrum.eigenvectors))
-    masses = np.asarray(spectrum.atomic_masses, dtype=float) if mass_weighted else np.ones(eigs.shape[1])
+    masses = np.asarray(spectrum.atomic_masses, dtype=float)
     total = np.zeros(eigs.shape[1:])
     for mode in modes:
-        total += _displacement(eigs, masses, _resolve_mode(mode, spectrum.original_indices, eigs.shape[0]), amplitude)
+        row = _resolve_mode(mode, spectrum.original_indices, eigs.shape[0])
+        total += _displacement(eigs, masses, row, amplitude, convention)
     return total
 
 
@@ -465,14 +529,17 @@ def compare_displacement_cli(
     spectrum: PhononSpectrum | None = None,
     amplitude: float | None = None,
     mass_weighted: bool = True,
+    displacement: str | None = None,
 ) -> None:
     """Print a table of displacement statistics for one or more structures.
 
-    With ``spectrum`` each run folder's modes (``runs/<i>`` or ``runs/<i>_<j>``)
-    are compared with the expected displacement at ``amplitude`` (default: the
-    path's ``pert_<x>``): the fitted scale is actual/expected along the expected
-    direction, and the residual is the part of the displacement it leaves out.
+    With ``spectrum`` each run folder's modes (``runs/<i>``, ``runs/<i>_<j>`` or
+    ``runs/<i>_pert_<p>``) are compared with the expected displacement at
+    ``amplitude`` (default: the path's ``pert_<x>``) by the ``displacement``
+    convention (else ``mass_weighted``): the fitted scale is actual/expected along
+    the expected direction, and the residual is the part of the displacement it leaves out.
     """
+    convention = displacement_convention(displacement, mass_weighted)
     rows = []
     for path in perturbed:
         try:
@@ -488,7 +555,7 @@ def compare_displacement_cli(
             f"\n    n_atoms    = {stats['n_atoms']}"
         )
         if spectrum is not None:
-            print(_expected_report(path, stats["disp"], spectrum, amplitude, mass_weighted))
+            print(_expected_report(path, stats["disp"], spectrum, amplitude, convention))
         print()
     # Relative sizes need a displaced first entry; identical structures (e.g. a ground state
     # checked against the tree's input) have nothing to compare.
@@ -502,14 +569,14 @@ def compare_displacement_cli(
 
 
 def _expected_report(
-    path: str | Path, disp: np.ndarray, spectrum: PhononSpectrum, amplitude: float | None, mass_weighted: bool
+    path: str | Path, disp: np.ndarray, spectrum: PhononSpectrum, amplitude: float | None, convention: str
 ) -> str:
     modes = run_modes(path)
     amplitude = amplitude if amplitude is not None else run_pert_scale(path)
     if modes is None or amplitude is None:
         return "    expected   = ? (modes need a runs/<i> or runs/<i>_<j> folder, amplitude --pert or pert_<x>)"
     try:
-        expected = expected_displacement(spectrum, modes, amplitude, mass_weighted=mass_weighted)
+        expected = expected_displacement(spectrum, modes, amplitude, displacement=convention)
     except ValueError as e:
         return f"    expected   = ? ({e})"
     if expected.shape != disp.shape:
@@ -517,10 +584,10 @@ def _expected_report(
     norms = np.linalg.norm(expected, axis=1)
     scale = float(np.sum(disp * expected) / np.sum(expected * expected))
     residual = float(np.linalg.norm(disp - scale * expected) / np.linalg.norm(disp)) if np.any(disp) else 0.0
-    weighting = "mass-weighted" if mass_weighted else "not mass-weighted"
+    weighting = {"mass_weighted": "mass-weighted", "unweighted": "not mass-weighted"}.get(convention, convention)
     return (
         f"    expected   = max {norms.max():.6f} Å, rms {np.sqrt((norms**2).mean()):.6f} Å "
-        f"(modes {'+'.join(map(str, modes))}, Q={amplitude:g}, {weighting})"
+        f"(modes {'+'.join(map(str, modes))}, step {amplitude:g}, {weighting})"
         f"\n    scale      = {scale:.3f} x expected (residual {residual:.1%})"
     )
 

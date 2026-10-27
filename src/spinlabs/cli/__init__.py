@@ -15,9 +15,9 @@ def add_verbosity_args(parser: argparse.ArgumentParser) -> None:
         "--verbose",
         action="count",
         default=0,
-        help="info-level console logging; repeat (-vv) for debug output",
+        help="also show debug output: how each step is done (per-mode fits, settings, ...)",
     )
-    parser.add_argument("-q", "--quiet", action="store_true", help="Show only errors")
+    parser.add_argument("-q", "--quiet", action="store_true", help="Show only warnings and errors")
 
 
 def build_parser() -> argparse.ArgumentParser:

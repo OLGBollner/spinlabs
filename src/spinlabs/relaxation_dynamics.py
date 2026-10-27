@@ -63,7 +63,6 @@ class RelaxationDynamics:
 
         rate_matrices = []
 
-        LOGGER.info("Creating rate matrices...")
         for i, t in enumerate(data.get("temperatures")):
             A = [
                 [-data["1_to_0"][i] - data["1_to_-1"][i], data["0_to_1"][i], data["-1_to_1"][i]],
@@ -228,7 +227,7 @@ class RelaxationDynamics:
         def _power_law_fit(T_region, rate_region, label):
             valid = np.isfinite(T_region) & (T_region > 0) & np.isfinite(rate_region) & (rate_region > 0)
             if valid.sum() < 2:
-                LOGGER.warning(f"{label}: not enough valid data points – skipping.")
+                LOGGER.warning(f"rate fit {label}: fewer than 2 valid data points; region not fitted")
                 return None, None
 
             log_T = np.log(T_region[valid])
@@ -238,15 +237,14 @@ class RelaxationDynamics:
             n, log_c = np.polyfit(log_T, log_rate, 1)
             c = np.exp(log_c)
 
-            LOGGER.info(f"{label}  |  power‑law exponent n = {n:+.4f}   (1/T₁ ∝ T^{n:.4f},  prefactor c = {c:.4e} s⁻¹)")
+            LOGGER.info(f"rate fit {label}: 1/T1 = c T^n with n = {n:+.4f}, c = {c:.4e} 1/s")
             return n, c
 
         # ── 4. Power‑law fit – Low T (0–50 K) ────────────────────────────────
-        LOGGER.info("── Low‑T region (0–50 K) ─────────────────────────────────────")
-        n_low, c_low = _power_law_fit(temperatures[mask_low], rate[mask_low], "Low T  (0–50 K) ")
+        n_low, c_low = _power_law_fit(temperatures[mask_low], rate[mask_low], f"low T (<= {low_T:g} K)")
 
         # ── 5. Bose‑factor fit – Mid T (50–200 K) ────────────────────────────
-        LOGGER.info("── Mid‑T region (50–200 K) ───────────────────────────────────")
+        mid_label = f"mid T ({low_T:g}-{high_T:g} K)"
         T_mid = temperatures[mask_mid]
         rate_mid = rate[mask_mid]
         valid_m = np.isfinite(T_mid) & (T_mid > 0) & np.isfinite(rate_mid) & (rate_mid > 0)
@@ -271,16 +269,17 @@ class RelaxationDynamics:
                 A_fit, omega_fit = popt
                 E_fit = hbar_eVs * omega_fit  # ħω in eV
 
-                LOGGER.info("Mid T  (50–200 K)  |  Fit: rate = A ω³/(exp(ħω/kT)-1)")
-                LOGGER.info(f"  A = {A_fit:.4e} s⁻¹,  ω = {omega_fit:.4e} s⁻¹  (ħω = {E_fit:.4f} eV)")
+                LOGGER.info(
+                    f"rate fit {mid_label}: 1/T1 = A/(exp(hbar w/kT) - 1) with A = {A_fit:.4e} 1/s, "
+                    f"w = {omega_fit:.4e} 1/s (hbar w = {E_fit:.4f} eV)"
+                )
             except Exception as e:
-                LOGGER.warning(f"Mid T (50–200 K): curve_fit failed – {e}")
+                LOGGER.warning(f"rate fit {mid_label}: curve_fit failed ({e}); region not fitted")
         else:
-            LOGGER.warning("Mid T (50–200 K): not enough valid data points – skipping.")
+            LOGGER.warning(f"rate fit {mid_label}: fewer than 2 valid data points; region not fitted")
 
         # ── 6. Power‑law fit – High T (> 200 K) ──────────────────────────────
-        LOGGER.info("── High‑T region (>200 K) ────────────────────────────────────")
-        n_high, c_high = _power_law_fit(temperatures[mask_high], rate[mask_high], "High T (>200 K)")
+        n_high, c_high = _power_law_fit(temperatures[mask_high], rate[mask_high], f"high T (> {high_T:g} K)")
 
         # ── 7. Build callable fit functions ──────────────────────────────────
         def _make_power_law(n, c):

@@ -94,10 +94,10 @@ def test_sigma_scan_reports_t1_per_sigma_and_saves_only_the_plot(tmp_path, capsy
     plot = tmp_path / "scan.png"
 
     cli.main(["run", "sigma-scan", "--raw-zfs-file", str(raw_file), "--sigma", "7.5", "1",
-              "--temperature", "300", "--init-state", "0", "--plot", str(plot), "-q"])
+              "--temperature", "300", "--init-state", "0", "--plot", str(plot)])
 
     out = capsys.readouterr().out
-    assert "[1/2] sigma 1 meV" in out and "[2/2] sigma 7.5 meV" in out
+    assert "== Transition rates and T1, sigma 1 meV (1/2) ==" in out and "sigma 7.5 meV (2/2)" in out
     assert "ms_0 @300K" in out and "max/min" in out
     rows = [line.split() for line in out.splitlines() if line.strip().startswith(("1 ", "7.5*"))]
     assert len(rows) == 2 and all(0 < float(r[1]) < np.inf for r in rows)
@@ -113,5 +113,5 @@ def test_sigma_scan_without_spin_flip_coupling_reports_infinite_t1(tmp_path, cap
               "--plot", str(tmp_path / "scan.png"), "-q"])
 
     out = capsys.readouterr().out
-    assert "inf" in out and "No finite T1 to plot" in out
+    assert "inf" in out and "warning: no finite T1 to plot" in out
     assert not (tmp_path / "scan.png").exists()

@@ -11,7 +11,7 @@ import numpy as np
 
 from spinlabs.cli import add_verbosity_args
 from spinlabs.constants import CONSTANTS
-from spinlabs.logging_utils import get_logger
+from spinlabs.logging_utils import get_logger, section
 from spinlabs.registry import parse_orders
 
 LOGGER = get_logger(__name__)
@@ -68,7 +68,7 @@ def build_coupling_parser(parser: argparse.ArgumentParser) -> None:
         type=int,
         default=[],
         metavar="N",
-        help="Also list these modes (1-based, as in the -vv derivative details and POSCAR generator)",
+        help="Also list these modes (1-based, as in the -v derivative details and POSCAR generator)",
     )
     add_verbosity_args(opt)
 
@@ -119,6 +119,7 @@ def load_manager(args: argparse.Namespace, command: str):
     else:
         order_hint = 2 if any(k in str(sim_folder).lower() for k in ("second_order", "2d", "2nd")) else 1
 
+    section(LOGGER, "Load input data")
     raw_data, spectrum, ph_path = load_raw_inputs(
         sim_folder=sim_folder,
         raw_zfs_file=args.raw_zfs_file,
@@ -148,6 +149,7 @@ def load_manager(args: argparse.Namespace, command: str):
 
 def _run_coupling(args: argparse.Namespace) -> None:
     manager, ph_path, orders = load_manager(args, "spinlabs run coupling")
+    section(LOGGER, f"Spin-phonon coupling: {manager.defect}_{manager.cell_size} {manager.calc_method}")
     first = manager.calculate_first_order_derivatives()
     second = None
     if 2 in orders and manager.zfs_tensors_2d:

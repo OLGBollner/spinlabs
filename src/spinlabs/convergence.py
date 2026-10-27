@@ -32,7 +32,7 @@ import numpy as np
 
 from spinlabs.models import ZFSTensor
 
-from spinlabs.logging_utils import get_logger
+from spinlabs.logging_utils import get_logger, section
 
 LOGGER = get_logger(__name__)
 
@@ -104,6 +104,34 @@ def cubic_fit(perts: np.ndarray, values: np.ndarray) -> tuple[np.ndarray, np.nda
     coef = np.linalg.lstsq(X, flat, rcond=None)[0]
     resid = flat - X @ coef
     return coef.reshape((4,) + values.shape[1:]), resid.reshape(values[keep].shape), X
+
+
+def helper_step(perts: np.ndarray) -> float | None:
+    """The step size run only as the 2Q partner of the pair scheme, or None.
+
+    Convergence tests run p/2, p and 2p (trees.convergence_steps): 2p gives D(2Q) for the
+    forward second difference (D(2Q) - 2 D(Q) + D0)/Q^2 at Q = p and is no data point of its
+    own, so the Taylor fit, the noise and the first-order differences leave it out. It is the
+    largest |step| when half of it was run too. It is kept (None) when leaving it out would
+    leave fewer than 3 step sizes, too few for the cubic fit to estimate the noise.
+    """
+    perts = np.asarray(perts, dtype=float)
+    sizes = np.unique(np.round(np.abs(perts[~np.isclose(perts, 0.0)]), 12))
+    if len(sizes) < 2 or not np.isclose(sizes[:-1], sizes[-1] / 2).any():
+        return None
+    if len(sizes) < 4:
+        LOGGER.info(
+            f"step {sizes[-1]:g} is the 2Q partner of {sizes[-1] / 2:g} but stays in the fits: "
+            f"without it only {len(sizes) - 1} step sizes remain"
+        )
+        return None
+    return float(sizes[-1])
+
+
+def fit_points(perts: np.ndarray, helper: float | None) -> np.ndarray:
+    """Mask of the runs the Taylor fit and noise use: every step but the 2Q helper (helper_step)."""
+    perts = np.asarray(perts, dtype=float)
+    return np.ones(len(perts), bool) if helper is None else ~np.isclose(np.abs(perts), helper)
 
 
 def pooled_noise(perts: list[np.ndarray], parts_by_mode: list[np.ndarray]) -> tuple[float, int]:
@@ -203,12 +231,17 @@ def snr_report(
     offset: np.ndarray | None = None,
     target: float = SNR_TARGET,
     tol: float = TRUNC_TOL,
+    pair: tuple[np.ndarray, np.ndarray] | None = None,
 ) -> SNRReport | None:
     """Fit D(Q) per traceless part with a cubic and derive SNR and the safe Q window.
 
     perts must contain Q=0 (D0); parts is (n_Q, 5) from traceless_parts. The cubic is
     fitted to the other points (cubic_fit). Without ``sigma`` the noise is its residual,
     without ``offset`` (5 parts) D0's offset is this mode's intercept minus D0.
+    ``pair`` is (perts, parts) with the 2Q helper step (helper_step) as well: that fit gives
+    the second-order c and d, since the pair scheme's (D(2Q) - 2 D(Q) + D0)/Q^2 at the largest
+    Q is built from the helper's D(2Q), and its truncation 6 d Q needs d over that range. b,
+    the first-order window and the noise come from ``perts`` without it.
     Returns None without D0 or with fewer than 5 other amplitudes.
     """
     perts = np.asarray(perts, dtype=float)
@@ -223,11 +256,19 @@ def snr_report(
     if offset is None:
         offset = coef[0] - parts[zero][0]
     delta = float(np.linalg.norm(offset))
-    se = sigma * np.sqrt(np.diag(np.linalg.inv(X.T @ X)))
-    # the norm over 5 parts of pure-noise coefficients is ~ sqrt 5 standard errors
-    floor = SIGNIFICANCE * se * np.sqrt(parts.shape[1])
-    b, c, d = np.linalg.norm(coef[1:], axis=1)
-    c_up, d_up = max(c, floor[2]), max(d, floor[3])
+
+    def norms_and_floor(coef, X):
+        se = sigma * np.sqrt(np.diag(np.linalg.inv(X.T @ X)))
+        # the norm over 5 parts of pure-noise coefficients is ~ sqrt 5 standard errors
+        return np.linalg.norm(coef[1:], axis=1), SIGNIFICANCE * se * np.sqrt(parts.shape[1])
+
+    (b, c1, _d1), floor1 = norms_and_floor(coef, X)
+    if pair is not None:
+        pair_coef, _resid, pair_X = cubic_fit(np.asarray(pair[0], dtype=float), pair[1])
+        (_b2, c, d), floor2 = norms_and_floor(pair_coef, pair_X)
+    else:
+        (_b2, c, d), floor2 = (b, c1, _d1), floor1
+    c1_up, d_up = max(c1, floor1[2]), max(d, floor2[3])
     err1, err2 = np.hypot(np.sqrt(2) * sigma, delta), np.hypot(np.sqrt(6) * sigma, delta)
     # a response that stays within noise + D0 offset even at the largest |Q| is ~ 0
     qmax = float(np.max(np.abs(perts)))
@@ -238,11 +279,11 @@ def snr_report(
         b=float(b),
         c=float(c),
         d=float(d),
-        b_resolved=bool(b > floor[1] and b * qmax > SIGNIFICANCE * err1),
-        c_resolved=bool(c > floor[2] and 2 * c * qmax**2 > SIGNIFICANCE * err2),
-        d_resolved=bool(d > floor[3]),
+        b_resolved=bool(b > floor1[1] and b * qmax > SIGNIFICANCE * err1),
+        c_resolved=bool(c > floor2[2] and 2 * c * qmax**2 > SIGNIFICANCE * err2),
+        d_resolved=bool(d > floor2[3]),
         q_lo1=float(target * err1 / b),
-        q_hi1=float(tol * b / c_up),
+        q_hi1=float(tol * b / c1_up),
         q_lo2=float(np.sqrt(target * err2 / (2 * c))),
         q_hi2=float(tol * c / (3 * d_up)),
         target=target,
@@ -316,7 +357,9 @@ def one_sided_d2(p: np.ndarray, v: np.ndarray) -> float | None:
 PART_LABELS = ("A1", "(xx−yy)/√2", "xy", "xz", "yz")
 
 
-def _plot_finite_differences(axes, perts: np.ndarray, parts: np.ndarray, report: SNRReport) -> None:
+def _plot_finite_differences(
+    axes, perts: np.ndarray, parts: np.ndarray, report: SNRReport, helper: float | None = None
+) -> None:
     """Bottom row: the measured finite differences of each traceless part vs |Q|.
 
     The 5 traceless parts (traceless_parts) hold the E response of E modes too, which
@@ -326,14 +369,19 @@ def _plot_finite_differences(axes, perts: np.ndarray, parts: np.ndarray, report:
     sigma/Q first order, sqrt 6 sigma/Q^2 second order); dashed lines are the Q -> 0
     values b and 2c of the cubic fitted to the perturbed runs. A point drifting off
     its line at large |Q| is truncation; at small |Q| it is D0's offset (growing as
-    1/Q, 1/Q^2) or noise (wide bars).
+    1/Q, 1/Q^2) or noise (wide bars). ``helper`` (helper_step) is the 2Q step: it only enters
+    the pair scheme's D(2Q), not the fit, the first-order points or the central differences.
     """
     f0 = parts[np.isclose(perts, 0.0)][0]
+    pair_perts, pair_parts = perts, parts  # D(2Q) may be the helper step
+    fit = fit_points(perts, helper)
+    perts, parts = perts[fit], parts[fit]
     coef = cubic_fit(perts, parts)[0]  # (4, 5): a, b, c, d per part
     qmax = float(np.max(np.abs(perts)))
     sigma = report.sigma
     shown1 = np.abs(coef[1]) >= 0.02 * np.max(np.abs(coef[1]))
-    shown2 = np.abs(coef[2]) >= 0.02 * np.max(np.abs(coef[2]))
+    pair_coef = cubic_fit(pair_perts, pair_parts)[0]  # second order: c from the fit reaching 2Q (snr_report)
+    shown2 = np.abs(pair_coef[2]) >= 0.02 * np.max(np.abs(pair_coef[2]))
     for k in range(parts.shape[1]):
         color = f"C{k}"
         label = PART_LABELS[k]
@@ -363,16 +411,16 @@ def _plot_finite_differences(axes, perts: np.ndarray, parts: np.ndarray, report:
         for side in (1, -1):
             fq, fv = [], []
             for x in sorted({abs(float(v)) for v in perts if np.sign(v) == side}):
-                one, two = np.isclose(perts, side * x), np.isclose(perts, 2 * side * x)
+                one, two = np.isclose(pair_perts, side * x), np.isclose(pair_perts, 2 * side * x)
                 if one.any() and two.any():
                     fq.append(x)
-                    fv.append((parts[two][0, k] - 2 * parts[one][0, k] + f0[k]) / x**2)
+                    fv.append((pair_parts[two][0, k] - 2 * pair_parts[one][0, k] + f0[k]) / x**2)
             if fq:
                 fq = np.array(fq)
                 axes[1].errorbar(fq * (1.04 if side > 0 else 0.96), fv, yerr=np.sqrt(6) * sigma / fq**2, fmt="s",
                                  color=color, mfc=color if side > 0 else "white", ms=5, capsize=3,
                                  label=f"{label} pair {'+' if side > 0 else '−'}Q, 2Q")
-        axes[1].axhline(2 * coef[2, k], color=color, ls="--", lw=0.8)
+        axes[1].axhline(2 * pair_coef[2, k], color=color, ls="--", lw=0.8)
     for ax, lo, hi, resolved, title in (
         (axes[0], report.q_lo1, report.q_hi1, report.c_resolved, "first order  (D(Q) − D0)/Q"),
         (axes[1], report.q_lo2, report.q_hi2, report.d_resolved, "second order  d²D/dQ² estimates"),
@@ -491,7 +539,7 @@ def load_convergence(npz_path: Path) -> ConvergenceData:
                     tensors[i][izero] = q0
                     patched += 1
             if patched:
-                LOGGER.info(
+                LOGGER.debug(
                     f"borrowed the Q=0 tensor for {patched} mode(s) that lack "
                     "their own pert=0 run (identical relaxed structure)",
                 )
@@ -537,11 +585,14 @@ def plot_pert_convergence(
 
     conv = load_convergence(npz_path)
     modes, perts, tensors, q0_shared = conv.modes, conv.perts, conv.tensors, conv.q0
+    meta = conv.metadata
+    name = "_".join(str(meta[k]) for k in ("defect", "cell") if meta.get(k) is not None)
+    label = " ".join(s for s in (name, meta.get("method_key") or meta.get("method")) if s) or npz_path.stem
 
     wanted = mode if mode else [int(m) for m in modes]
     missing = [m for m in wanted if m not in set(modes.tolist())]
     if missing:
-        LOGGER.warning(f"modes {missing} not in npz")
+        LOGGER.warning(f"modes {missing} not in {npz_path.name}; not plotted")
     if output_path is None:
         output_path = npz_path.with_name(npz_path.stem + "_convergence.png")
 
@@ -549,12 +600,15 @@ def plot_pert_convergence(
     out_files: list[Path] = []
     reports: dict[int, SNRReport] = {}
 
+    helper = helper_step(perts)
     # noise and D0's offset from the convergence runs themselves, pooled over all modes
     offset = None
     noise_source = "--noise"
     if q0_shared is not None:
         frame = principal_frame(q0_shared)
-        finished = [~np.isnan(tensors[i]).any(axis=(1, 2)) for i in range(tensors.shape[0])]
+        # the 2Q helper step is no fit point (helper_step): noise and offset come from the others
+        fit = fit_points(perts, helper)
+        finished = [~np.isnan(tensors[i]).any(axis=(1, 2)) & fit for i in range(tensors.shape[0])]
         p_modes = [perts[ok] for ok in finished]
         parts_modes = [np.stack([traceless_parts(t, frame) for t in tensors[i][ok]]) for i, ok in enumerate(finished)]
         if noise is None:
@@ -571,25 +625,29 @@ def plot_pert_convergence(
         if mode not in set(modes.tolist()):
             continue
         i = int(np.where(modes == mode)[0][0])
+        section(LOGGER, f"{label} mode {mode}")
         # drop unfinished runs (NaN tensors) BEFORE diagonalizing: eigh on a
         # NaN slot raises LinAlgError for the whole mode
         ok0 = ~np.isnan(tensors[i]).any(axis=(1, 2))
         dropped = perts[~ok0]
         if len(dropped):
             LOGGER.warning(
-                f"mode {mode}: dropping {len(dropped)} run(s) with no ZFS tensor "
-                f"(unfinished or failed): {np.array2string(dropped)}",
+                f"mode {mode}: {len(dropped)} run(s) without a ZFS tensor (unfinished or failed) left out: "
+                f"steps {np.array2string(dropped)}",
             )
         if ok0.sum() < 2:
-            LOGGER.warning(f"mode {mode}: fewer than 2 finished runs, skipping")
+            LOGGER.warning(f"mode {mode}: fewer than 2 finished runs; not plotted")
             continue
-        p_all, t_all = perts[ok0], tensors[i][ok0]
+        # the finite-difference panel needs the 2Q helper runs for the pair scheme; every fit
+        # and the D(Q) panels use the other runs only
+        p_full, t_full = perts[ok0], tensors[i][ok0]
+        p_all, t_all = p_full[fit_points(p_full, helper)], t_full[fit_points(p_full, helper)]
         # fixed principal frame from the Q=0 (relaxed) tensor; plot the
         # diagonal components of every tensor rotated into that frame
         izero = int(np.argmin(np.abs(p_all)))
         if not np.isclose(p_all[izero], 0.0):
             LOGGER.warning(
-                f"mode {mode}: warning: no Q=0 tensor; principal frame taken "
+                f"mode {mode}: no Q=0 tensor; principal frame taken "
                 "from the smallest-|Q| perturbation instead",
             )
         R = principal_frame(t_all[izero])
@@ -602,7 +660,7 @@ def plot_pert_convergence(
             p_use = p_all[np.abs(p_all) > 0]
             t_use = t_all[np.abs(p_all) > 0]
             if len(p_use) == 0:
-                LOGGER.warning(f"mode {mode}: --drop-anchor leaves no points, skipping")
+                LOGGER.warning(f"mode {mode}: --drop-anchor leaves no points; not plotted")
                 continue
         vals = np.stack([np.diag(R.T @ t @ R) for t in t_use])
         trace = vals.sum(axis=1)
@@ -616,7 +674,10 @@ def plot_pert_convergence(
         report = None
         if noise is not None and np.isfinite(noise) and np.isclose(p_all, 0.0).any():
             parts = np.stack([traceless_parts(t, R) for t in t_all])
-            report = snr_report(p_all, parts, noise, noise_source, offset, snr_target, trunc_tol)
+            parts_full = np.stack([traceless_parts(t, R) for t in t_full])
+            report = snr_report(
+                p_all, parts, noise, noise_source, offset, snr_target, trunc_tol, pair=(p_full, parts_full)
+            )
         ncols = 2
         nrows = 3 if report is not None else 2
         fig, axes = plt.subplots(
@@ -676,9 +737,7 @@ def plot_pert_convergence(
                             row[-1] = f"{cent:.6g}"
                     if cents:
                         msg += f"\n    central d2 (|Q|:value): {', '.join(cents)} MHz/pert^2"
-            LOGGER.info(20 * "-")
             LOGGER.info(msg)
-            LOGGER.info(20 * "-")
             csv_rows.append(tuple(row))
         for j, title in enumerate(["ax + b", "ax² + bx + c"]):
             axes[0, j].set_title(title)
@@ -687,10 +746,10 @@ def plot_pert_convergence(
             axes[1, j].xaxis.set_major_locator(plt.MaxNLocator(5))
             axes[1, j].set_ylabel("residual (MHz)" + ("\n(grey: ±σ noise)" if report else ""))
         if report is not None:
-            _plot_finite_differences(axes[2], p_all, parts, report)
+            _plot_finite_differences(axes[2], p_full, parts_full, report, helper)
             reports[mode] = report
             qs = sorted({abs(float(x)) for x in p_all if x != 0})
-            LOGGER.info(f"mode {mode}: signal-to-noise\n" + format_snr(report, qs))
+            LOGGER.info("signal-to-noise:\n" + format_snr(report, qs))
         fig.suptitle(f"mode {mode}: $D_\\lambda$" if not deviation else f"mode {mode}: $D_\\lambda - D_0$")
         axes[0, 1].legend(fontsize=7)
         fig.tight_layout()
@@ -698,7 +757,7 @@ def plot_pert_convergence(
         out = output_path.with_name(f"{stem}_mode{mode}{ext}")
         fig.savefig(out, dpi=150)
         out_files.append(out)
-        LOGGER.info(f"  -> {out}")
+        LOGGER.info(f"saved figure: {out}")
         if show:
             plt.show()
 
@@ -710,7 +769,8 @@ def plot_pert_convergence(
             fh.write(",".join(header) + "\n")
             for row in csv_rows:
                 fh.write(",".join(str(v) for v in row) + "\n")
-        LOGGER.info(f"  -> {csv_path}")
+        LOGGER.info(f"saved fit table: {csv_path}")
     if reports:
+        section(LOGGER, f"{label}: safe |Q| window")
         LOGGER.info(common_window(reports))
     return out_files

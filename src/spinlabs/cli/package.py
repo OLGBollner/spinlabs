@@ -6,9 +6,9 @@ the listing with --scan).
 """
 
 import argparse
+import json
 import re
 import shutil
-import warnings
 
 import numpy as np
 from datetime import date
@@ -16,10 +16,11 @@ from pathlib import Path
 from typing import NamedTuple
 
 from spinlabs.cli import add_verbosity_args
-from spinlabs.logging_utils import attach_db_logging
+from spinlabs.logging_utils import attach_db_logging, section
 from spinlabs.models import RawZFSData, normalize_calc_method
+from spinlabs.vasp.trees import tree_displacement
 from spinlabs.registry import ensure_db, register_file
-from spinlabs.pack_convergence import pack_convergence
+from spinlabs.pack_convergence import ConvergenceScan, save_convergence, scan_convergence
 from spinlabs.parsers import parse_zfs_simulation_dataset, split_defect_folder_name
 from spinlabs.vasp.run_checks import BASIS_SOURCE
 from spinlabs.vasp.settings import (
@@ -89,13 +90,14 @@ def build_package_parser(parser: argparse.ArgumentParser) -> None:
         choices=["all", "approx"],
         default=["all", "approx"],
         metavar="METHOD",
-        help="ZFS calculation method(s) to package: all or approx (default: all).",
+        help="ZFS calculation method(s) to package: all and/or approx (default: both).",
     )
     parser.add_argument(
         "--no-mass-weighted",
         action="store_true",
-        help="The perturbed structures were displaced by Q*e instead of Q*e/sqrt(m) (runs made before mass "
-        "weighting was added). Stored as mass_weighted=False; the analysis then corrects the amplitudes.",
+        help="For trees whose job scripts name no displacement (DISPLACEMENT or MASS_WEIGHTED): their "
+        "structures were displaced by Q*e instead of Q*e/sqrt(m) (runs made before mass weighting was added). "
+        "Stored as displacement=unweighted; the analysis then corrects the amplitudes.",
     )
     parser.add_argument(
         "--output-root",
@@ -153,13 +155,15 @@ def _run(args: argparse.Namespace) -> None:
         phonon = _find_phonon_npz(defect_folder)
         if found and phonon is not None:
             phonons[(found[0].defect, found[0].cell_size)] = phonon
+    section(LOGGER, "Summary")
     _print_scan_summary(scanned, phonons)
     _print_mass_weighting(scanned, cli_unweighted=getattr(args, "no_mass_weighted", False))
     if args.scan or not scanned:
         return
     if not getattr(args, "yes", False) and not _confirm("Save the perturbation data to file? (Y/n): "):
-        print("Nothing saved.")
+        LOGGER.info("nothing saved")
         return
+    section(LOGGER, "Save perturbation data")
     _save_raw(scanned, args.output_root, cli_unweighted=getattr(args, "no_mass_weighted", False))
     _save_phonons(phonons, args.output_root)
 
@@ -172,25 +176,23 @@ class _Scanned(NamedTuple):
     calc_method: str
     pert_scale: float
     raw: RawZFSData
-    # MASS_WEIGHTED of the trees' job scripts (True/False), None when they do not say
-    mass_weighted: bool | None = None
+    # Displacement convention of the trees' job scripts (DISPLACEMENTS), None when they do not say
+    displacement: str | None = None
 
 
-_MASS_WEIGHTED_LINE = re.compile(r"^\s*MASS_WEIGHTED\s*=\s*(\S+)", re.M)
+_DISPLACEMENT_TEXT = {
+    "normalized": "step * u/|u| (normalized: same Cartesian step per mode)",
+    "mass_weighted": "Q*e/sqrt(m) (mass-weighted)",
+    "unweighted": "Q*e (not mass-weighted)",
+}
 
 
-def tree_mass_weighted(basis: Path) -> bool | None:
-    """MASS_WEIGHTED from a tree's run_perturbation_*.sh: True (1, the default), False (0), None if absent."""
-    for script in sorted(basis.glob("run_perturbation_*_order.sh")):
-        match = _MASS_WEIGHTED_LINE.search(script.read_text(errors="replace"))
-        if match:
-            return match.group(1).strip("'\"") != "0"
-    return None
-
-
-def _mass_weighted_of(scanned: _Scanned, cli_unweighted: bool) -> bool:
-    """The convention a dataset is saved with: its trees' setting, else the --no-mass-weighted flag."""
-    return scanned.mass_weighted if scanned.mass_weighted is not None else not cli_unweighted
+def _displacement_of(scanned: _Scanned, cli_unweighted: bool) -> str:
+    """The convention a dataset is saved with: its trees' setting, else the --no-mass-weighted flag
+    (trees whose scripts say nothing predate both settings and were mass-weighted)."""
+    if scanned.displacement is not None:
+        return scanned.displacement
+    return "unweighted" if cli_unweighted else "mass_weighted"
 
 
 def _print_mass_weighting(scanned: list[_Scanned], cli_unweighted: bool) -> None:
@@ -200,13 +202,12 @@ def _print_mass_weighting(scanned: list[_Scanned], cli_unweighted: bool) -> None
     print("Displacements:")
     for s in scanned:
         name = f"{s.defect}_{s.cell_size} {s.calc_method} pert {s.pert_scale:g}"
-        weighted = _mass_weighted_of(s, cli_unweighted)
-        source = "trees' MASS_WEIGHTED" if s.mass_weighted is not None else (
+        convention = _displacement_of(s, cli_unweighted)
+        source = "trees' job scripts" if s.displacement is not None else (
             "--no-mass-weighted" if cli_unweighted else "default")
-        print(f"  {name}: {'Q*e/sqrt(m) (mass-weighted)' if weighted else 'Q*e (not mass-weighted)'}  [{source}]")
-        if s.mass_weighted is True and cli_unweighted:
-            print("    !! --no-mass-weighted ignored: the trees' job scripts say MASS_WEIGHTED=1")
-    print()
+        print(f"  {name}: {_DISPLACEMENT_TEXT[convention]}  [{source}]")
+        if s.displacement not in (None, "unweighted") and cli_unweighted:
+            print(f"    !! --no-mass-weighted ignored: the trees' job scripts say {s.displacement}")
 
 
 def _confirm(prompt: str) -> bool:
@@ -230,13 +231,13 @@ def _scan_raw(args: argparse.Namespace, defect_folder: Path, methods: list[str])
     if cell_size is None:
         raise SystemExit(f"Cell size not found in defect folder name: {defect_folder.name} (expected e.g. NV_512)")
 
-    LOGGER.info(f"Defect folder: {defect_folder}")
+    section(LOGGER, f"Scan {defect_folder.name}: {defect_folder}")
 
     def _collect(order: str) -> dict[float, Path]:
         """Map pert_scale -> pert folder for one order, filtered to the requested scales."""
         order_root = defect_folder / _ORDER_DIRS[order]
         if not order_root.is_dir():
-            warnings.warn(f"Order folder not found, skipping: {order_root}")
+            LOGGER.warning(f"{defect_folder.name}: no {order} order folder ({order_root}); {order} order skipped")
             return {}
         perts = {}
         for pert_dir in sorted(order_root.glob("pert_*")):
@@ -251,14 +252,15 @@ def _scan_raw(args: argparse.Namespace, defect_folder: Path, methods: list[str])
         calc_method = normalize_calc_method(method)
         datasets = {o: _collect(o) for o in orders}
         for o in orders:
-            LOGGER.info(f"  {o} order: {len(datasets[o])} perturbation length(s) found in {defect_folder / _ORDER_DIRS[o]}")
+            scales = " ".join(f"{p:g}" for p in datasets[o])
+            LOGGER.info(f"{calc_method} {o} order: {len(datasets[o])} perturbation scale(s) {scales}".rstrip())
         pert_scales = sorted(set().union(*datasets.values()))
         if args.pert is not None:
             missing = [p for p in args.pert if p not in pert_scales]
             for p in missing:
-                warnings.warn(f"Perturbation scale {p:g} not found in {defect_folder.name}; skipping")
+                LOGGER.warning(f"{defect_folder.name}: --pert {p:g} not found in any order folder; skipped")
         if not pert_scales:
-            warnings.warn(f"No perturbation data found in {defect_folder.name} ({calc_method}); skipping")
+            LOGGER.warning(f"{defect_folder.name} {calc_method}: no perturbation data found; skipped")
             continue
         ground = _ground_state_settings(defect_folder, calc_method)
         for pert_scale in pert_scales:
@@ -275,31 +277,30 @@ def _scan_raw(args: argparse.Namespace, defect_folder: Path, methods: list[str])
                 basis = datasets[o][pert_scale] / calc_method
                 if basis.is_dir():
                     trees[_ORDER_DIRS[o]] = tree_settings(basis)
-                    mw = tree_mass_weighted(basis)
-                    if mw is not None:
-                        weighting.add(mw)
+                    convention = tree_displacement(basis)
+                    if convention is not None:
+                        weighting.add(convention)
             if raw is None or not (raw.first_order or raw.second_order):
-                warnings.warn(f"No data parsed for {defect_folder.name} ({calc_method}, pert {pert_scale:g}); skipping")
+                LOGGER.warning(f"{defect_folder.name} {calc_method} pert {pert_scale:g}: no ZFS data parsed; skipped")
                 continue
-            raw.vasp_settings = {
-                "ground_state": ground,
-                "trees": trees,
-                "problems": compare_settings(ground, trees),
-                "start_differences": start_differences(ground, trees),
-            }
+            raw.vasp_settings = _vasp_settings(ground, trees)
             if len(weighting) > 1:
-                warnings.warn(
+                LOGGER.warning(
                     f"{defect_folder.name} {calc_method} pert {pert_scale:g}: first and second order trees use "
-                    "different MASS_WEIGHTED settings; their displacements are not consistent"
+                    f"different displacements ({', '.join(sorted(weighting))}); they are not consistent"
                 )
-            mw = weighting.pop() if len(weighting) == 1 else None
-            found.append(_Scanned(defect, cell_size, calc_method, pert_scale, raw, mw))
+            convention = weighting.pop() if len(weighting) == 1 else None
+            found.append(_Scanned(defect, cell_size, calc_method, pert_scale, raw, convention))
     return found
 
 
 def _ground_state_settings(defect_folder: Path, calc_method: str) -> dict[str, str] | None:
     """VASP settings of the ground-state ZFS run (<defect>/ZFS_hyp or ZFS_occup), or None if absent."""
-    folder = defect_folder / BASIS_SOURCE[calc_method]
+    return _run_folder_settings(defect_folder / BASIS_SOURCE[calc_method])
+
+
+def _run_folder_settings(folder: Path) -> dict[str, str] | None:
+    """VASP settings of one run folder from its INCAR, else its OUTCAR; None if it has neither."""
     if (folder / "INCAR").is_file():
         return read_incar(folder / "INCAR")
     if (folder / "OUTCAR").is_file():
@@ -328,17 +329,17 @@ def _find_phonon_npz(defect_folder: Path) -> Path | None:
     if len(full) == 1:
         return full[0]
     if full:
-        warnings.warn(
-            f"Several phonon .npz files in {defect_folder.name} ({', '.join(p.name for p in full)}); "
+        LOGGER.warning(
+            f"{defect_folder.name}: several phonon .npz files ({', '.join(p.name for p in full)}); "
             f"rename the full spectrum to {PACKAGED_PHONON_NAME} to package it"
         )
     elif candidates:
-        warnings.warn(
-            f"Only symmetry-reduced phonon .npz in {defect_folder.name} "
+        LOGGER.warning(
+            f"{defect_folder.name}: only symmetry-reduced phonon .npz "
             f"({', '.join(p.name for p in candidates)}); phonon data not packaged"
         )
     else:
-        warnings.warn(f"No phonon .npz found in {defect_folder.name}; phonon data not packaged")
+        LOGGER.warning(f"{defect_folder.name}: no phonon .npz found; phonon data not packaged")
     return None
 
 
@@ -349,15 +350,15 @@ def _save_phonons(phonons: dict[tuple[str, int], Path], output_root: Path) -> No
         dest.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(src, dest)
         register_file(ensure_db(), dest, "phonon", defect=defect, cell_size=cell_size)
-        LOGGER.info(f"Copied phonon data {src} -> {dest}")
+        LOGGER.info(f"saved phonon data: {dest} (copied from {src})")
 
 
 def _print_scan_summary(scanned: list[_Scanned], phonons: dict[tuple[str, int], Path] | None = None) -> None:
     if not scanned:
-        print("\nNo perturbation data found.")
+        print("No perturbation data found.")
         return
     header = f"{'defect':<12} {'method':<20} {'pert':>8} {'1st-order modes':>16} {'2nd-order pairs':>16}"
-    print("\nAvailable perturbation data:")
+    print("Available perturbation data:")
     print(header)
     print("-" * len(header))
     for s in scanned:
@@ -379,25 +380,39 @@ def _print_settings(scanned: list[_Scanned]) -> None:
     """Ground-state vs run VASP settings per dataset; every difference is a warning."""
     print("\nVASP settings (ground state vs the runs differenced against it):")
     for s in scanned:
-        settings = s.raw.vasp_settings or {}
-        name = f"{s.defect}_{s.cell_size} {s.calc_method} pert {s.pert_scale:g}"
-        ground, trees = settings.get("ground_state"), settings.get("trees", {})
-        n_runs = sum(t["n_runs"] for t in trees.values())
-        if not n_runs:
-            print(f"  {name}: no run INCAR or OUTCAR found; not checked")
-            continue
-        where = "" if ground is not None else " (no ground-state INCAR/OUTCAR found)"
-        problems = settings.get("problems", [])
-        start = settings.get("start_differences", [])
-        status = "consistent" if not problems else f"{len(problems)} difference(s)"
-        print(f"  {name}: {status}; {summary_line(ground, trees)}{where}")
-        for problem in problems:
-            print(f"    !! {problem}")
-            LOGGER.info(f"{name}: {problem}")  # kept in the run log; printed once above
-        if start:
-            print(f"    starting point only (ISTART/ICHARG, same converged result): {len(start)} difference(s)")
-            for line in start:
-                LOGGER.info(f"{name}: starting point: {line}")
+        _print_settings_of(f"{s.defect}_{s.cell_size} {s.calc_method} pert {s.pert_scale:g}", s.raw.vasp_settings)
+
+
+def _vasp_settings(ground: dict[str, str] | None, trees: dict[str, dict]) -> dict:
+    """The vasp_settings record of one dataset: ground state, trees and their differences."""
+    return {
+        "ground_state": ground,
+        "trees": trees,
+        "problems": compare_settings(ground, trees),
+        "start_differences": start_differences(ground, trees),
+    }
+
+
+def _print_settings_of(name: str, settings: dict | None) -> None:
+    """One dataset's line of the VASP settings check (see _vasp_settings), with its differences."""
+    settings = settings or {}
+    ground, trees = settings.get("ground_state"), settings.get("trees", {})
+    n_runs = sum(t["n_runs"] for t in trees.values())
+    if not n_runs:
+        print(f"  {name}: no run INCAR or OUTCAR found; not checked")
+        return
+    where = "" if ground is not None else " (no ground-state INCAR/OUTCAR found)"
+    problems = settings.get("problems", [])
+    start = settings.get("start_differences", [])
+    status = "consistent" if not problems else f"{len(problems)} difference(s)"
+    print(f"  {name}: {status}; {summary_line(ground, trees)}{where}")
+    for problem in problems:
+        print(f"    !! {problem}")
+        LOGGER.debug(f"{name}: settings: {problem}")  # kept in the DB log; printed once above
+    if start:
+        print(f"    starting point only (ISTART/ICHARG, same converged result): {len(start)} difference(s)")
+        for line in start:
+            LOGGER.debug(f"{name}: starting point: {line}")
 
 
 def _print_shape_flags(scanned: list[_Scanned], phonons: dict[tuple[str, int], Path]) -> None:
@@ -428,7 +443,7 @@ def _print_shape_flags(scanned: list[_Scanned], phonons: dict[tuple[str, int], P
         shown = ", ".join(folder for folder, _ in flags[:15]) + (", ..." if len(flags) > 15 else "")
         print(f"  {name}: {len(flags)} suspicious run folder(s): {shown}")
         for folder, problem in flags:
-            LOGGER.info(f"{name}: runs/{folder}: {problem}")  # per-run reasons with -v
+            LOGGER.debug(f"{name}: runs/{folder}: {problem}")  # per-run reasons with -v
         if len(flags) > 15:
             print("    (every folder and its reason: rerun with -v)")
 
@@ -437,7 +452,8 @@ def _save_raw(scanned: list[_Scanned], output_root: Path, cli_unweighted: bool =
     """Write each scanned dataset to <output_root>/<defect>_<cell>/pert_<p>/<method>/<date>/ and register it."""
     date_dir = date.today().strftime("%Y%m%d")
     for s in scanned:
-        s.raw.mass_weighted = _mass_weighted_of(s, cli_unweighted)
+        s.raw.displacement = _displacement_of(s, cli_unweighted)
+        s.raw.mass_weighted = s.raw.displacement != "unweighted"
         pert_folder = output_root / f"{s.defect}_{s.cell_size}" / f"pert_{s.pert_scale:g}" / s.calc_method / date_dir
         pert_folder.mkdir(parents=True, exist_ok=True)
         save_path = s.raw.save(pert_folder / s.raw._default_name())
@@ -451,7 +467,7 @@ def _save_raw(scanned: list[_Scanned], output_root: Path, cli_unweighted: bool =
             pert_order=([1] if s.raw.has_first_order else []) + ([2] if s.raw.has_second_order else []),
             pert_scale=s.pert_scale,
         )
-        LOGGER.info(f"Saved raw data in: {save_path}")
+        LOGGER.info(f"saved raw ZFS data: {save_path}")
 
 
 _DICT_ORDER_SUFFIXES = {
@@ -482,29 +498,36 @@ def _register_only(data_path: Path) -> None:
     if not data_path.is_dir():
         raise SystemExit(f"Data path not found: {data_path}")
 
+    section(LOGGER, f"Register packaged files: {data_path}")
     conn = ensure_db()
     registered, skipped = 0, 0
     for npz_path in sorted(data_path.rglob("*.npz")):
         if npz_path.name == PACKAGED_PHONON_NAME:
             defect, cell_size = split_defect_folder_name(npz_path.parent.name)
             if cell_size is None:
-                warnings.warn(f"Phonon file outside a <defect>_<cell> folder, skipping: {npz_path}")
+                LOGGER.warning(f"phonon file outside a <defect>_<cell> folder, not registered: {npz_path}")
                 skipped += 1
                 continue
             register_file(conn, npz_path, "phonon", defect=defect, cell_size=cell_size)
-            LOGGER.info(f"Registered: {npz_path} (phonon, {defect}_{cell_size})")
+            LOGGER.debug(f"registered phonon data ({defect}_{cell_size}): {npz_path}")
             registered += 1
             continue
         try:
             with np.load(str(npz_path), allow_pickle=True) as data:
                 keys = set(data.files)
+                if _CONV_KEYS.issubset(keys):
+                    if _register_conv(conn, npz_path, data):
+                        registered += 1
+                    else:
+                        skipped += 1
+                    continue
                 required = {f.name for f in RawZFSData.SCHEMA if not f.optional} | {
                     "defect",
                     "cell_size",
                     "order",
                 }
                 if not required.issubset(keys):
-                    warnings.warn(f"Not a packaged raw ZFS file, skipping: {npz_path.name}")
+                    LOGGER.warning(f"not a packaged ZFS, convergence or phonon file, not registered: {npz_path}")
                     skipped += 1
                     continue
                 defect = str(data["defect"])
@@ -522,15 +545,14 @@ def _register_only(data_path: Path) -> None:
                 else:
                     suffix_orders = _DICT_ORDER_SUFFIXES.get(npz_path.stem.rsplit("_", 1)[-1])
                     if suffix_orders is None:
-                        warnings.warn(
-                            f"{npz_path.name}: no order data and no recognizable "
-                            "filename suffix, skipping"
+                        LOGGER.warning(
+                            f"no order data and no recognizable file name suffix, not registered: {npz_path}"
                         )
                         skipped += 1
                         continue
                     orders = suffix_orders
         except Exception as exc:  # unreadable npz: report and move on
-            warnings.warn(f"Could not read {npz_path.name}: {exc}")
+            LOGGER.warning(f"cannot read {npz_path} ({exc}); not registered")
             skipped += 1
             continue
         register_file(
@@ -543,9 +565,53 @@ def _register_only(data_path: Path) -> None:
             pert_order=orders,
             pert_scale=pert_scale,
         )
-        LOGGER.info(f"Registered: {npz_path} ({defect}_{cell_size}, {calc_method}, order {orders}, pert {pert_scale:g})")
+        LOGGER.debug(
+            f"registered packaged ZFS data ({defect}_{cell_size} {calc_method} order {orders} pert {pert_scale:g}): "
+            f"{npz_path}"
+        )
         registered += 1
-    LOGGER.info(f"Done: {registered} registered, {skipped} skipped")
+    LOGGER.info(f"registered {registered} file(s), skipped {skipped}")
+
+
+_CONV_KEYS = {"modes", "perts", "tensors"}  # what save_convergence writes besides metadata
+
+
+def _register_conv(conn, npz_path: Path, data) -> bool:
+    """Register a convergence npz ('package --conv'); False (with a warning) when it cannot be placed.
+
+    Defect, cell and method come from its metadata, else from the file name
+    <defect>_<cell>_<date>_conv_<folder suffix>.npz that _run_conv writes.
+    """
+    try:
+        meta = json.loads(str(data["metadata"])) if "metadata" in data.files else {}
+    except (TypeError, ValueError):
+        meta = {}
+    name_part, _, suffix = npz_path.stem.partition("_conv_")
+    name_defect, name_cell = split_defect_folder_name(name_part)
+    defect = meta.get("defect") or name_defect
+    cell = meta.get("cell") or name_cell
+    if not defect or cell is None:
+        LOGGER.warning(f"convergence file without defect/cell in its metadata or name, not registered: {npz_path}")
+        return False
+    method = meta.get("method") or _conv_method(meta.get("method_key") or suffix)
+    calc_method = normalize_calc_method(method) if method else None
+    register_file(conn, npz_path, "convergence", defect=defect, cell_size=int(cell), calc_method=calc_method)
+    LOGGER.debug(f"registered convergence data ({defect}_{cell} {calc_method}): {npz_path}")
+    return True
+
+
+def _conv_method(suffix: str) -> str | None:
+    """'all' or 'approx' from a convergence folder suffix, None when it says neither.
+
+    test_all / test_occup, or AE (all electrons) / UE (unpaired electrons) as a token,
+    e.g. AE_mass_weighted.
+    """
+    tokens = {t.lower() for t in re.split(r"[_.\-]", suffix)}
+    if "all" in suffix or "ae" in tokens:
+        return "all"
+    if "occup" in suffix or "ue" in tokens:
+        return "approx"
+    return None
 
 
 def _auto_ground_state(defect_folder: Path, method: str | None) -> Path | None:
@@ -556,15 +622,15 @@ def _auto_ground_state(defect_folder: Path, method: str | None) -> Path | None:
         zfs_folder = "ZFS_occup"
     else:
         LOGGER.warning(
-            "cannot infer ground-state method from folder suffix "
-            "(neither 'all' nor 'occup'); skipping ground state",
+            f"{defect_folder.name}: convergence folder name says neither 'all'/'AE' nor 'occup'/'UE'; "
+            "d0 not stored (pass --ground-state OUTCAR)"
         )
         return None
     candidate = defect_folder / zfs_folder / "OUTCAR"
     if candidate.exists():
-        LOGGER.info(f"ground state: {candidate}")
+        LOGGER.debug(f"ground state: {candidate}")
         return candidate
-    LOGGER.warning(f"no ground-state OUTCAR at {candidate}; skipping ground state")
+    LOGGER.warning(f"no ground-state OUTCAR at {candidate}; d0 not stored (pass --ground-state OUTCAR)")
     return None
 
 
@@ -573,7 +639,7 @@ def _run_conv(args: argparse.Namespace, defect_folder: Path) -> None:
     # packaging. These defaults MUST mirror the argparse defaults below; if
     # one changes, change both, or a matching user value silently skips the
     # warning.
-    defaults = {"orders": "first,second", "pert": None, "method": ["all"]}
+    defaults = {"orders": "first,second", "pert": None, "method": ["all", "approx"]}
     for opt in ("orders", "pert", "method"):
         if getattr(args, opt, defaults[opt]) != defaults[opt]:
             LOGGER.warning(f"--{opt.replace('_', '-')} is ignored with --conv")
@@ -582,24 +648,116 @@ def _run_conv(args: argparse.Namespace, defect_folder: Path) -> None:
     conv_roots = sorted(p for p in defect_folder.glob("convergence*") if p.is_dir())
     if not conv_roots:
         raise SystemExit(f"No convergence* folders found under {defect_folder}")
-    method_map = {"all": "all", "occup": "approx"}
-    for root in conv_roots:
-        LOGGER.info(f"Convergence folder: {root}")
-        suffix = re.sub(r"^convergence[._-]*", "", root.name).lstrip("_-") or "conv"
-        method = next((v for k, v in method_map.items() if k in suffix), None)
-        defect, cell = split_defect_folder_name(defect_folder.name)
-        stem = f"{defect}_{cell}_{date.today():%Y%m%d}_conv_{suffix}"
-        calc_method = normalize_calc_method(method) if method else method
-        date_dir = date.today().strftime("%Y%m%d")
-        leaf = args.output_root / f"{defect}_{cell}" / (calc_method or "conv") / date_dir
+    scanned = [s for s in (_scan_conv(args, defect_folder, root) for root in conv_roots) if s is not None]
+    section(LOGGER, "Summary")
+    _print_conv_summary(scanned)
+    if getattr(args, "scan", False) or not scanned:
+        return
+    if not getattr(args, "yes", False) and not _confirm("Save the convergence data to file? (Y/n): "):
+        LOGGER.info("nothing saved")
+        return
+    section(LOGGER, "Save convergence data")
+    date_dir = date.today().strftime("%Y%m%d")
+    for s in scanned:
+        leaf = args.output_root / f"{s.defect}_{s.cell}" / (s.calc_method or "conv") / date_dir
         leaf.mkdir(parents=True, exist_ok=True)
-        output = leaf / f"{stem}.npz"
-        ground_state = args.ground_state
-        if ground_state == _GS_AUTO:
-            ground_state = _auto_ground_state(defect_folder, method)
-        pack_convergence(
-            root, output, ground_state=ground_state, defect=defect, cell=cell, method=method, method_key=suffix
+        output = leaf / f"{s.defect}_{s.cell}_{date_dir}_conv_{s.suffix}.npz"
+        save_convergence(
+            s.scan, output, ground_state=s.ground_state, defect=s.defect, cell=s.cell, method=s.method,
+            method_key=s.suffix,
         )
-        register_file(
-            ensure_db(), output, "convergence", defect=defect, cell_size=cell, calc_method=calc_method
+        register_file(ensure_db(), output, "convergence", defect=s.defect, cell_size=s.cell, calc_method=s.calc_method)
+
+
+class _ConvScanned(NamedTuple):
+    """One parsed convergence folder, ready to be saved."""
+
+    defect: str
+    cell: int
+    suffix: str  # folder name without 'convergence', e.g. 'test_all'; names the output file
+    method: str | None  # 'all' or 'approx' from the suffix, None when it says neither
+    calc_method: str | None
+    ground_state: Path | None  # OUTCAR stored as d0
+    scan: ConvergenceScan
+    vasp_settings: dict
+
+
+def _scan_conv(args: argparse.Namespace, defect_folder: Path, root: Path) -> _ConvScanned | None:
+    """Parse one convergence* folder and check its settings against the ground state; None if it has no runs."""
+    section(LOGGER, f"Scan convergence folder {defect_folder.name}/{root.name}")
+    suffix = re.sub(r"^convergence[._-]*", "", root.name).lstrip("_-") or "conv"
+    method = _conv_method(suffix)
+    calc_method = normalize_calc_method(method) if method else None
+    defect, cell = split_defect_folder_name(defect_folder.name)
+    try:
+        scan = scan_convergence(root)
+    except ValueError as exc:
+        LOGGER.warning(f"{defect_folder.name}/{root.name}: {exc}; not packaged")
+        return None
+    LOGGER.info(f"{scan.n_runs} run folder(s), {scan.n_finished} with a ZFS tensor")
+    ground_state = args.ground_state
+    if ground_state == _GS_AUTO:
+        ground_state = _auto_ground_state(defect_folder, method)
+    # Settings are checked against the stored d0's run, else the method's ZFS_hyp/ZFS_occup.
+    if ground_state is not None:
+        ground = _run_folder_settings(Path(ground_state).parent)
+    elif calc_method in BASIS_SOURCE:
+        ground = _ground_state_settings(defect_folder, calc_method)
+    else:
+        ground = None
+    settings = _vasp_settings(ground, {"runs": tree_settings(root)})
+    return _ConvScanned(defect, cell, suffix, method, calc_method, ground_state, scan, settings)
+
+
+def _format_steps(perts: list[float]) -> str:
+    """'±0.025 ±0.05' when every size was run at both signs, else the steps as found.
+
+    Q = 0 runs (<mode>_pert_0) are the unperturbed point, not a step, and are left out.
+    """
+    perts = [p for p in perts if p != 0]
+    sizes = sorted({abs(p) for p in perts})
+    if all(s in perts and -s in perts for s in sizes):
+        return " ".join(f"±{s:g}" for s in sizes)
+    return " ".join(f"{p:g}" for p in perts)
+
+
+def _print_conv_summary(scanned: list[_ConvScanned]) -> None:
+    if not scanned:
+        print("No convergence data found.")
+        return
+    columns = ("defect", "folder", "method", "modes", "steps", "finished")
+    rows = [
+        (
+            f"{s.defect}_{s.cell}", s.suffix, s.calc_method or "-", " ".join(map(str, s.scan.modes)),
+            _format_steps(s.scan.perts), f"{s.scan.n_finished}/{s.scan.n_grid}",
         )
+        for s in scanned
+    ]
+    widths = [max(len(c), *(len(r[i]) for r in rows)) for i, c in enumerate(columns)]
+    header = " ".join(c.ljust(w) for c, w in zip(columns, widths)).rstrip()
+    print("Available convergence data:")
+    print(header)
+    print("-" * len(header))
+    for row in rows:
+        print(" ".join(v.ljust(w) for v, w in zip(row, widths)).rstrip())
+    for s in scanned:
+        gaps = s.scan.n_grid - s.scan.n_runs
+        if s.scan.unfinished:
+            shown = ", ".join(s.scan.unfinished[:10]) + (", ..." if len(s.scan.unfinished) > 10 else "")
+            print(f"  !! {s.suffix}: {len(s.scan.unfinished)} run(s) without a ZFS tensor: {shown}")
+        if gaps:
+            print(f"  !! {s.suffix}: {gaps} mode/step combination(s) have no run folder")
+
+    print("\nGround state (stored as d0):")
+    for s in scanned:
+        print(f"  {s.suffix}: {s.ground_state or 'none (d0 not stored)'}")
+
+    print("\nDisplacements:")
+    for s in scanned:
+        convention = s.scan.displacement or "mass_weighted"
+        source = "trees' job scripts" if s.scan.displacement is not None else "default"
+        print(f"  {s.defect}_{s.cell} {s.suffix}: {_DISPLACEMENT_TEXT[convention]}  [{source}]")
+
+    print("\nVASP settings (ground state vs the convergence runs):")
+    for s in scanned:
+        _print_settings_of(f"{s.defect}_{s.cell} {s.suffix}", s.vasp_settings)

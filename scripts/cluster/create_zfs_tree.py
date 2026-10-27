@@ -15,7 +15,7 @@ from spinlabs.logging_utils import configure_logging
 
 
 def main() -> int:
-    configure_logging(verbosity=1)
+    configure_logging()
     ap = argparse.ArgumentParser(description="Create the VASP directory tree for a point-defect calculation.")
     ap.add_argument("input", type=Path, help="input folder with data/ and template/relax/")
     ap.add_argument(

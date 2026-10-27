@@ -104,11 +104,16 @@ def test_pert_filter(tmp_path):
     assert len(list((tmp_path / "data").rglob("*.npz"))) == 1
 
 
-def test_missing_order_folder_warns(tmp_path):
+def _warned(caplog, text):
+    """True when a spinlabs WARNING containing ``text`` was logged."""
+    return any(r.levelname == "WARNING" and text in r.getMessage() for r in caplog.records)
+
+
+def test_missing_order_folder_warns(tmp_path, caplog):
     _tree(tmp_path, orders=("first",))
     with _patch():
-        with pytest.warns(UserWarning):
-            _run(_make_args(tmp_path))
+        _run(_make_args(tmp_path))
+    assert _warned(caplog, "no second order folder")
     assert len(list((tmp_path / "data").rglob("*.npz"))) == 1
 
 
@@ -123,7 +128,7 @@ def test_prompt_yes_saves(tmp_path, monkeypatch, capsys, caplog, answer):
     assert prompts == ["Save the perturbation data to file? (Y/n): "]
     # The scan table is CLI output (stdout); the save confirmation is logged.
     assert "Available perturbation data:" in capsys.readouterr().out
-    assert "Saved raw data in:" in caplog.text
+    assert "saved raw ZFS data:" in caplog.text
     assert len(list((tmp_path / "data").rglob("*.npz"))) == 1
 
 
@@ -179,11 +184,13 @@ def _outcar(path, d_diag, energy=-10.0):
     )
 
 
-def _conv_args(tmp_path, ground_state):
+def _conv_args(tmp_path, ground_state, yes=True, scan=False):
     return argparse.Namespace(
         defect_folder=tmp_path / "NV_512",
         output_root=tmp_path / "data",
         ground_state=ground_state,
+        yes=yes,
+        scan=scan,
     )
 
 
@@ -198,7 +205,7 @@ def test_conv_ground_state_flag_auto_all(tmp_path, caplog, monkeypatch):
     _conv_tree(tmp_path)
     db = _registry(monkeypatch, tmp_path)
     _outcar(tmp_path / "NV_512" / "ZFS_hyp" / "OUTCAR", (1.0, 1.0, 4.0))
-    with caplog.at_level("INFO", logger="spinlabs"):
+    with caplog.at_level("DEBUG", logger="spinlabs"):
         _run_conv(args=_conv_args(tmp_path, Path("__auto__")), defect_folder=tmp_path / "NV_512")
     out = next((tmp_path / "data").rglob("NV_512_*_conv_test_all.npz"))
     data = np.load(out, allow_pickle=True)
@@ -239,6 +246,94 @@ def test_conv_ground_state_explicit_path(tmp_path):
     assert abs(data["d0"][2, 2] - 5.0) < 1e-9
 
 
+def _conv_steps_tree(tmp_path, isym="3"):
+    """convergence_test_all with modes 5 and 7 at +-0.025 and +-0.05, one run unfinished; ZFS_hyp ISYM 2."""
+    root = tmp_path / "NV_512" / "convergence_test_all"
+    for mode in (5, 7):
+        for p in (-0.05, -0.025, 0.025, 0.05):
+            run = root / "runs" / f"{mode}_pert_{p:g}"
+            _outcar(run / "OUTCAR", (1.0, 1.0, 2.0))
+            (run / "INCAR").write_text(f"ENCUT = 520\nISYM = {isym}\n")
+    (root / "runs" / "7_pert_0.05" / "OUTCAR").write_text(" running...\n")
+    (root / "run_convergence.sh").write_text("DISPLACEMENT=${DISPLACEMENT:-normalized}\n")
+    gs = tmp_path / "NV_512" / "ZFS_hyp"
+    _outcar(gs / "OUTCAR", (1.0, 1.0, 4.0))
+    (gs / "INCAR").write_text("ENCUT = 520\nISYM = 2\n")
+    return root
+
+
+def test_ae_ue_folders_find_their_ground_state_and_q0_runs_are_no_steps(tmp_path, capsys):
+    """convergence_AE_* is all bands (ZFS_hyp), convergence_UE_* the unpaired electrons (ZFS_occup).
+
+    Only some modes have their own Q = 0 run: that is no missing run, and 0 is no step.
+    """
+    for folder in ("convergence_AE_mass_weighted", "convergence_UE_mass_weighted"):
+        runs = tmp_path / "NV_512" / folder / "runs"
+        for mode in (55, 1525, 1533):
+            for p in (-0.05, -0.025, 0.025, 0.05):
+                _outcar(runs / f"{mode}_pert_{p:g}" / "OUTCAR", (1.0, 1.0, 2.0))
+        _outcar(runs / "55_pert_0" / "OUTCAR", (1.0, 1.0, 2.0))
+    _outcar(tmp_path / "NV_512" / "ZFS_hyp" / "OUTCAR", (1.0, 1.0, 4.0))
+    _outcar(tmp_path / "NV_512" / "ZFS_occup" / "OUTCAR", (1.0, 1.0, 3.0))
+
+    _run_conv(args=_conv_args(tmp_path, Path("__auto__")), defect_folder=tmp_path / "NV_512")
+    out = capsys.readouterr().out
+    rows = {line.split()[1]: line.split() for line in out.splitlines() if line.startswith("NV_512")}
+    assert rows["AE_mass_weighted"][2] == "all_bands" and rows["UE_mass_weighted"][2] == "defect_band_approx"
+    assert rows["AE_mass_weighted"][-3:] == ["±0.025", "±0.05", "13/13"]  # 3 modes x 4 steps + one Q = 0 run
+    assert "no run folder" not in out
+    assert str(tmp_path / "NV_512" / "ZFS_hyp" / "OUTCAR") in out and str(tmp_path / "NV_512" / "ZFS_occup" / "OUTCAR") in out
+    ue = next((tmp_path / "data").rglob("NV_512_*_conv_UE_mass_weighted.npz"))
+    assert ue.parent.parent.name == "defect_band_approx"
+
+
+def test_conv_scan_prints_summary_and_saves_nothing(tmp_path, capsys):
+    _conv_steps_tree(tmp_path)
+    _run_conv(args=_conv_args(tmp_path, Path("__auto__"), yes=False, scan=True), defect_folder=tmp_path / "NV_512")
+    out = capsys.readouterr().out
+    assert "Available convergence data:" in out
+    row = next(line for line in out.splitlines() if line.startswith("NV_512"))
+    assert row.split() == ["NV_512", "test_all", "all_bands", "5", "7", "±0.025", "±0.05", "7/8"]
+    assert "1 run(s) without a ZFS tensor: 7_pert_0.05" in out
+    assert str(tmp_path / "NV_512" / "ZFS_hyp" / "OUTCAR") in out
+    assert "NV_512 test_all: step * u/|u|" in out and "[trees' job scripts]" in out
+    # the runs' ISYM 3 against the ground state's ISYM 2 is flagged
+    assert "ISYM 3 (ground state 2)" in out and "!!" in out
+    assert not (tmp_path / "data").exists()
+
+
+@pytest.mark.parametrize("answer", ["", "y"])
+def test_conv_prompt_yes_saves(tmp_path, monkeypatch, caplog, answer):
+    _conv_steps_tree(tmp_path)
+    _registry(monkeypatch, tmp_path)
+    monkeypatch.setattr("builtins.input", lambda _prompt: answer)
+    with caplog.at_level("INFO", logger="spinlabs"):
+        _run_conv(args=_conv_args(tmp_path, Path("__auto__"), yes=False), defect_folder=tmp_path / "NV_512")
+    out = next((tmp_path / "data").rglob("NV_512_*_conv_test_all.npz"))
+    assert f"saved convergence data: {out} (7/8 runs finished" in caplog.text
+    data = np.load(out, allow_pickle=True)
+    assert list(data["perts"]) == [-0.05, -0.025, 0.025, 0.05]
+    assert np.isnan(data["tensors"][1, 3]).all() and abs(data["tensors"][0, 0, 2, 2] - 2.0) < 1e-9
+    assert json.loads(str(data["metadata"]))["displacement"] == "normalized"
+
+
+def test_conv_prompt_no_saves_nothing(tmp_path, monkeypatch, caplog):
+    _conv_steps_tree(tmp_path)
+    monkeypatch.setattr("builtins.input", lambda _prompt: "n")
+    with caplog.at_level("INFO", logger="spinlabs"):
+        _run_conv(args=_conv_args(tmp_path, Path("__auto__"), yes=False), defect_folder=tmp_path / "NV_512")
+    assert "nothing saved" in caplog.text
+    assert not (tmp_path / "data").exists()
+
+
+def test_conv_folder_without_runs_is_skipped(tmp_path, capsys):
+    _conv_tree(tmp_path)
+    (tmp_path / "NV_512" / "convergence_test_occup" / "runs").mkdir(parents=True)
+    _run_conv(args=_conv_args(tmp_path, None), defect_folder=tmp_path / "NV_512")
+    assert len(list((tmp_path / "data").rglob("*.npz"))) == 1
+    assert "test_occup" not in capsys.readouterr().out.split("Available convergence data:")[1]
+
+
 def test_multiple_folders_and_methods(tmp_path, monkeypatch):
     _tree(tmp_path)
     db = _registry(monkeypatch, tmp_path)
@@ -261,13 +356,13 @@ def test_multiple_folders_and_methods(tmp_path, monkeypatch):
     assert rows[2] == ("ClV", 128, "all_bands", "[1]", 0.025)
 
 
-def test_missing_pert_warns_and_skips(tmp_path):
+def test_missing_pert_warns_and_skips(tmp_path, caplog):
     _tree(tmp_path, perts=(0.025,))
     args = _make_args(tmp_path)
     args.pert = [0.025, 0.1]
     with _patch():
-        with pytest.warns(UserWarning, match="0.1"):
-            _run(args)
+        _run(args)
+    assert _warned(caplog, "--pert 0.1 not found")
     files = list((tmp_path / "data").rglob("*.npz"))
     assert len(files) == 1
 
@@ -304,7 +399,7 @@ def _order_dicts(n_modes=2, *, first=True, second=True, pert_si=1e10):
     return fo, so
 
 
-def test_register_only(tmp_path):
+def test_register_only(tmp_path, caplog):
     from spinlabs.cli.package import _register_only
     from spinlabs.registry import ensure_db
 
@@ -319,8 +414,8 @@ def test_register_only(tmp_path):
     )
     (root / "stray.npz").write_bytes(b"")  # junk with no metadata
 
-    with pytest.warns(UserWarning, match="stray.npz"):
-        _register_only(root)
+    _register_only(root)
+    assert _warned(caplog, "stray.npz")
 
     conn = ensure_db()
     rows = conn.execute(
@@ -430,12 +525,13 @@ def test_package_finds_differently_named_phonon(tmp_path, monkeypatch):
     assert (tmp_path / "data" / "NV_512" / "phonon_data.npz").read_bytes() == b"full"
 
 
-def test_package_skips_symmetry_reduced_only_phonon(tmp_path, monkeypatch):
+def test_package_skips_symmetry_reduced_only_phonon(tmp_path, monkeypatch, caplog):
     _tree(tmp_path)
     _registry(monkeypatch, tmp_path)
     (tmp_path / "NV_512" / "phonons_sym.npz").write_bytes(b"sym")
-    with _patch(lambda **kw: _raw(order=kw["order"])), pytest.warns(UserWarning, match="symmetry-reduced"):
+    with _patch(lambda **kw: _raw(order=kw["order"])):
         _run(_make_args(tmp_path))
+    assert _warned(caplog, "symmetry-reduced")
     assert not (tmp_path / "data" / "NV_512" / "phonon_data.npz").exists()
 
 
@@ -460,6 +556,29 @@ def test_register_only_registers_packaged_phonon(tmp_path, monkeypatch):
     assert row == ("phonon", "ClV", 128)
 
 
+def test_register_only_registers_convergence_files(tmp_path, monkeypatch):
+    from spinlabs.cli.package import _register_only
+    from spinlabs.registry import find_convergence
+
+    db = _registry(monkeypatch, tmp_path)
+    _conv_steps_tree(tmp_path)
+    _run_conv(args=_conv_args(tmp_path, Path("__auto__")), defect_folder=tmp_path / "NV_512")
+    packed = next((tmp_path / "data").rglob("*_conv_test_all.npz"))
+    # an older pack whose metadata has no method: taken from the file name instead
+    old = tmp_path / "data" / "V_Si_128" / "defect_band_approx" / "20261009" / "V_Si_128_20261009_conv_test_occup.npz"
+    old.parent.mkdir(parents=True)
+    np.savez(old, modes=np.arange(1), perts=np.ones(1), tensors=np.zeros((1, 1, 3, 3)),
+             metadata=np.array(json.dumps({"defect": None, "cell": None})))
+    sqlite3.connect(db).execute("DELETE FROM files").connection.commit()
+
+    _register_only(tmp_path / "data")
+    rows = sqlite3.connect(db).execute("SELECT kind, defect, cell_size, calc_method FROM files ORDER BY defect")
+    assert rows.fetchall() == [("convergence", "NV", 512, "all_bands"), ("convergence", "V_Si", 128,
+                                                                         "defect_band_approx")]
+    conn = sqlite3.connect(db)
+    assert find_convergence(conn, defects=["NV"]) == [packed.resolve()]
+
+
 @pytest.mark.parametrize("no_mass_weighted", [False, True])
 def test_no_mass_weighted_flag_is_stored(tmp_path, monkeypatch, no_mass_weighted):
     _tree(tmp_path)
@@ -472,13 +591,14 @@ def test_no_mass_weighted_flag_is_stored(tmp_path, monkeypatch, no_mass_weighted
     assert RawZFSData.load(path).mass_weighted is (not no_mass_weighted)
 
 
-def test_empty_datasets_are_not_saved(tmp_path, monkeypatch):
+def test_empty_datasets_are_not_saved(tmp_path, monkeypatch, caplog):
     """A pert folder without OUTCARs parses to no tensors; it is skipped, not saved empty."""
     _tree(tmp_path)
     _registry(monkeypatch, tmp_path)
     empty = RawZFSData(defect="NV", cell_size=512, pert_scale=0.025, calc_method="all_bands", order=1)
-    with _patch(lambda **kw: empty), pytest.warns(UserWarning, match="No data parsed"):
+    with _patch(lambda **kw: empty):
         _run(_make_args(tmp_path))
+    assert _warned(caplog, "no ZFS data parsed")
     assert not list((tmp_path / "data").rglob("*.npz"))
 
 
