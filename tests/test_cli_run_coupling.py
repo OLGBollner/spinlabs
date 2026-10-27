@@ -105,6 +105,35 @@ def test_sigma_scan_reports_t1_per_sigma_and_saves_only_the_plot(tmp_path, capsy
     assert registry.ensure_db().execute("SELECT COUNT(*) FROM runs").fetchone() == (0,)
 
 
+def test_sigma_scan_plots_t1_against_temperature_per_sigma(tmp_path, capsys, monkeypatch):
+    """--plot-temperature draws one line per sigma over the --t-range grid; the table stays at --temperature."""
+    import matplotlib.pyplot as plt
+
+    import spinlabs.cli.sigma_scan as scan
+
+    raw_file = _inputs(tmp_path, spin_flip=True)
+    figures = []
+    monkeypatch.setattr(plt, "close", figures.append)  # keep the figure to inspect it
+    plot = tmp_path / "t1_vs_t.png"
+    cli.main(["run", "sigma-scan", "--raw-zfs-file", str(raw_file), "--sigma", "7.5", "1", "0.5",
+              "--temperature", "300", "--init-state", "0", "--plot-temperature", str(plot),
+              "--t-range", "50", "300", "50"])
+
+    out = capsys.readouterr().out
+    assert plot.is_file() and f"saved figure: {plot}" in out
+    rows = [line.split() for line in out.splitlines() if line.strip().startswith(("0.5 ", "1 ", "7.5*"))]
+    assert len(rows) == 3 and all(len(r) == 2 for r in rows)  # the grid adds no columns to the table
+    panel = figures[-1].axes[0]
+    assert len(panel.lines) == 3  # one line per sigma
+    assert list(panel.lines[0].get_xdata()) == [50, 100, 150, 200, 250, 300]
+    bar = figures[-1].axes[-1]
+    assert [t.get_text() for t in bar.get_yticklabels()] == ["0.5", "1", "7.5 (default)"]
+    with pytest.raises(SystemExit, match="--t-range"):
+        scan._run_sigma_scan(cli.build_parser().parse_args(
+            ["run", "sigma-scan", "--raw-zfs-file", str(raw_file), "--plot-temperature", str(plot),
+             "--t-range", "300", "50", "50"]))
+
+
 def test_sigma_scan_without_spin_flip_coupling_reports_infinite_t1(tmp_path, capsys):
     """A1-only responses give no transitions: T1 is infinite, and the plot is skipped with a note."""
     raw_file = _inputs(tmp_path)
