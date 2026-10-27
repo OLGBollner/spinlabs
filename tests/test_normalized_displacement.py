@@ -63,6 +63,38 @@ def test_normalized_step_moves_every_mode_by_the_same_cartesian_length():
         np.testing.assert_allclose(normalized / np.linalg.norm(normalized), weighted / np.linalg.norm(weighted))
 
 
+def _unit_mode(rng, atoms) -> np.ndarray:
+    """A unit eigenvector (3 atoms, 3) moving only ``atoms``."""
+    e = np.zeros((3, 3))
+    e[atoms] = rng.normal(size=(len(atoms), 3))
+    return e / np.linalg.norm(e)
+
+
+@pytest.mark.parametrize("atoms, mass", [([0, 1], 12.011), ([2], 28.0855)], ids=["carbon-only", "silicon-only"])
+def test_a_single_species_mode_is_displaced_alike_normalized_and_unweighted(atoms, mass):
+    """A mode moving one species only has u = e/sqrt(m) with one m, so u/|u| = e: the normalized step and
+    the unweighted step move every atom by the same vector, and the mass-weighted one by that over sqrt(m)."""
+    ref = _structure()
+    eigs = _unit_mode(np.random.default_rng(3), atoms)[None]
+    disp = {conv: _displacement(apply_perturbation(ref, eigs, MASSES, 1, STEP, displacement=conv), ref)
+            for conv in ("normalized", "unweighted", "mass_weighted")}
+    np.testing.assert_allclose(disp["normalized"], disp["unweighted"], atol=1e-12)
+    assert np.linalg.norm(disp["normalized"]) == pytest.approx(STEP)
+    np.testing.assert_allclose(disp["mass_weighted"], disp["unweighted"] / np.sqrt(mass), atol=1e-12)
+
+
+def test_a_mixed_species_mode_is_displaced_differently_normalized_and_unweighted():
+    """With carbon and silicon in one mode, normalizing u = e/sqrt(m) leans the step towards the light atoms."""
+    ref = _structure()
+    eigs = _unit_mode(np.random.default_rng(3), [0, 1, 2])[None]
+    normalized = _displacement(apply_perturbation(ref, eigs, MASSES, 1, STEP, displacement="normalized"), ref)
+    unweighted = _displacement(apply_perturbation(ref, eigs, MASSES, 1, STEP, displacement="unweighted"), ref)
+    assert np.linalg.norm(normalized) == pytest.approx(STEP) and np.linalg.norm(unweighted) == pytest.approx(STEP)
+    assert not np.allclose(normalized, unweighted, atol=1e-6)
+    # the silicon atom moves relatively less, the carbons more
+    assert np.linalg.norm(normalized[2]) < np.linalg.norm(unweighted[2])
+
+
 def test_normal_coordinates_of_a_normalized_pair_are_step_times_n():
     spec, ref = _spectrum(), _structure()
     n = spec.mode_norm_factors()
