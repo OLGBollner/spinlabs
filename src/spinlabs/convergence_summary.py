@@ -5,12 +5,15 @@ size changes. Each pack (one convergence folder, ``spinlabs package --conv``) is
 of two rows:
 
 - first order, |D(Q) - D0| / Q per mode against |Q| (filled +Q, open -Q; not at the 2Q helper
-  step, convergence.helper_step, which only completes the pair scheme), with noise error
-  bars sqrt 2 sigma / Q and the cubic fit's Q -> 0 value b as a line;
+  step, convergence.helper_step, which only completes the pair scheme), with the cubic fit's
+  Q -> 0 value b as a line;
 - second order, the forward difference (D(2Q) - 2 D(Q) + D0) / Q^2 that
   ZFSManager.calculate_second_order_derivatives takes from the i = i pair run (D(2Q)) and the
   first-order run (D(Q)), for every Q whose 2Q was run on the same side (filled +Q, open -Q),
-  with noise error bars sqrt 6 sigma / Q^2 and the fit's 2c as a line.
+  with the fit's 2c as a line.
+
+The points carry no error bars: the uncertainty that decides whether a point is measured is
+the dashed total-error curve (noise and D0's offset), below.
 
 In both rows a band along each mode's line marks its safe |Q|: from where the finite
 difference's SNR (b Q / err1, 2 c Q^2 / err2) reaches the target to where its truncation
@@ -261,13 +264,12 @@ def shade_safe_windows(
     return neglected
 
 
-def plot_signed(ax, rows, marker, color, yerr, alpha, big=9, small=5):
+def plot_signed(ax, rows, marker, color, alpha, big=9, small=5):
     """Points at |Q|; nearly equal at +-Q, so the -Q ring first and a smaller +Q dot inside it."""
     for side, face, ms in ((-1, "white", big), (1, color, small)):
         sel = np.sign(rows[:, 0]) == side
-        q = np.abs(rows[sel, 0])
-        ax.errorbar(q, rows[sel, 1], yerr=yerr(q), fmt=marker, ms=ms, color=color, mfc=face, mew=1.5,
-                    capsize=3, elinewidth=1, alpha=alpha)
+        ax.plot(np.abs(rows[sel, 0]), rows[sel, 1], marker, ls="", ms=ms, color=color, mfc=face, mew=1.5,
+                alpha=alpha)
 
 
 def plot_convergence_summary(
@@ -302,9 +304,9 @@ def plot_convergence_summary(
         for color, (mode, p, first, second, r) in zip(COLORS, rows):
             a1 = 1.0 if r.b_resolved else FAINT
             a2 = 1.0 if r.c_resolved else FAINT
-            plot_signed(first_ax, first, "o", color, lambda x: np.sqrt(2) * sigma / x, a1)
+            plot_signed(first_ax, first, "o", color, a1)
             first_ax.axhline(r.b, color=color, lw=1, alpha=0.7 * a1)
-            plot_signed(second_ax, second, "s", color, lambda x: np.sqrt(6) * sigma / x**2, a2)
+            plot_signed(second_ax, second, "s", color, a2)
             second_ax.axhline(2 * r.c, color=color, lw=1, alpha=0.7 * a2)
         # the quotient's error with D0's offset: points near or below it are not measured
         err1 = float(np.hypot(np.sqrt(2) * sigma, offset))
