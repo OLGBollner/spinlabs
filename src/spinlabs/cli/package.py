@@ -6,6 +6,7 @@ the listing with --scan).
 """
 
 import argparse
+import json
 import re
 import shutil
 import warnings
@@ -512,6 +513,12 @@ def _register_only(data_path: Path) -> None:
         try:
             with np.load(str(npz_path), allow_pickle=True) as data:
                 keys = set(data.files)
+                if _CONV_KEYS.issubset(keys):
+                    if _register_conv(conn, npz_path, data):
+                        registered += 1
+                    else:
+                        skipped += 1
+                    continue
                 required = {f.name for f in RawZFSData.SCHEMA if not f.optional} | {
                     "defect",
                     "cell_size",
@@ -560,6 +567,38 @@ def _register_only(data_path: Path) -> None:
         LOGGER.info(f"Registered: {npz_path} ({defect}_{cell_size}, {calc_method}, order {orders}, pert {pert_scale:g})")
         registered += 1
     LOGGER.info(f"Done: {registered} registered, {skipped} skipped")
+
+
+_CONV_KEYS = {"modes", "perts", "tensors"}  # what save_convergence writes besides metadata
+
+
+def _register_conv(conn, npz_path: Path, data) -> bool:
+    """Register a convergence npz ('package --conv'); False (with a warning) when it cannot be placed.
+
+    Defect, cell and method come from its metadata, else from the file name
+    <defect>_<cell>_<date>_conv_<folder suffix>.npz that _run_conv writes.
+    """
+    try:
+        meta = json.loads(str(data["metadata"])) if "metadata" in data.files else {}
+    except (TypeError, ValueError):
+        meta = {}
+    name_part, _, suffix = npz_path.stem.partition("_conv_")
+    name_defect, name_cell = split_defect_folder_name(name_part)
+    defect = meta.get("defect") or name_defect
+    cell = meta.get("cell") or name_cell
+    if not defect or cell is None:
+        warnings.warn(f"{npz_path.name}: convergence file without defect/cell metadata or file name, skipping")
+        return False
+    method = meta.get("method") or _conv_method(meta.get("method_key") or suffix)
+    calc_method = normalize_calc_method(method) if method else None
+    register_file(conn, npz_path, "convergence", defect=defect, cell_size=int(cell), calc_method=calc_method)
+    LOGGER.info(f"Registered: {npz_path} (convergence, {defect}_{cell}, {calc_method})")
+    return True
+
+
+def _conv_method(suffix: str) -> str | None:
+    """'all' or 'approx' from a convergence folder suffix (test_all, test_occup), None when it says neither."""
+    return next((v for k, v in {"all": "all", "occup": "approx"}.items() if k in suffix), None)
 
 
 def _auto_ground_state(defect_folder: Path, method: str | None) -> Path | None:
@@ -633,7 +672,7 @@ def _scan_conv(args: argparse.Namespace, defect_folder: Path, root: Path) -> _Co
     """Parse one convergence* folder and check its settings against the ground state; None if it has no runs."""
     LOGGER.info(f"Convergence folder: {root}")
     suffix = re.sub(r"^convergence[._-]*", "", root.name).lstrip("_-") or "conv"
-    method = next((v for k, v in {"all": "all", "occup": "approx"}.items() if k in suffix), None)
+    method = _conv_method(suffix)
     calc_method = normalize_calc_method(method) if method else None
     defect, cell = split_defect_folder_name(defect_folder.name)
     try:

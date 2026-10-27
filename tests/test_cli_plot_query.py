@@ -417,6 +417,15 @@ def test_plot_convergence_latest_keeps_each_folder(conv_files, monkeypatch):
     assert sorted(got) == sorted([f["new"], f["mw"]])
 
 
+def test_convergence_latest_goes_by_the_date_in_the_name(tmp_path, monkeypatch):
+    # --register-only registers a whole data folder in path order, not packaging order
+    monkeypatch.setenv("SPINLABS_REGISTRY_DIR", str(tmp_path / "registry"))
+    conn = registry.ensure_db()
+    new = _conv_file(conn, tmp_path / "a", "NV", 512, "all_bands", "20261027", "test_all")
+    _conv_file(conn, tmp_path / "b", "NV", 512, "all_bands", "20261009", "test_all")
+    assert registry.find_convergence(conn, latest=True) == [new]
+
+
 def test_plot_convergence_query_errors(conv_files, monkeypatch, tmp_path):
     with pytest.raises(SystemExit, match="no convergence files"):
         _plot_conv(monkeypatch, ["--query", "--defect", "ClV"])

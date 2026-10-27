@@ -11,6 +11,7 @@ from collections.abc import Iterable, Sequence
 import hashlib
 import json
 import os
+import re
 import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
@@ -590,7 +591,7 @@ def find_convergence(
     """Packaged convergence files ('package --conv') matching the filters, oldest first.
 
     Several values of one filter match any of them. With ``latest`` one file per
-    convergence folder is kept, the newest: files are named
+    convergence folder is kept, the one with the newest date in its name: files are named
     ``<defect>_<cell>_<date>_conv_<folder suffix>.npz``, so the folder is the
     configuration plus the suffix (two folders of one method, e.g. ``test_all`` and
     ``test_all_mass_weighted``, are kept apart).
@@ -605,6 +606,9 @@ def find_convergence(
     rows = [(Path(p), config) for p, *config in conn.execute(sql + " ORDER BY id", params) if Path(p).exists()]
     if not latest:
         return [path for path, _ in rows]
+    # Newest by the packaging date in the name; registration order says little, since
+    # --register-only registers a whole data folder at once. Stable sort: same date -> id order.
+    rows.sort(key=lambda row: re.findall(r"_(\d{8})_conv_", row[0].name)[:1])
     newest: dict[tuple, Path] = {}
     for path, config in rows:
         key = (*config, path.stem.partition("_conv_")[2])

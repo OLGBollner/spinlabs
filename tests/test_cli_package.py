@@ -523,6 +523,29 @@ def test_register_only_registers_packaged_phonon(tmp_path, monkeypatch):
     assert row == ("phonon", "ClV", 128)
 
 
+def test_register_only_registers_convergence_files(tmp_path, monkeypatch):
+    from spinlabs.cli.package import _register_only
+    from spinlabs.registry import find_convergence
+
+    db = _registry(monkeypatch, tmp_path)
+    _conv_steps_tree(tmp_path)
+    _run_conv(args=_conv_args(tmp_path, Path("__auto__")), defect_folder=tmp_path / "NV_512")
+    packed = next((tmp_path / "data").rglob("*_conv_test_all.npz"))
+    # an older pack whose metadata has no method: taken from the file name instead
+    old = tmp_path / "data" / "V_Si_128" / "defect_band_approx" / "20261009" / "V_Si_128_20261009_conv_test_occup.npz"
+    old.parent.mkdir(parents=True)
+    np.savez(old, modes=np.arange(1), perts=np.ones(1), tensors=np.zeros((1, 1, 3, 3)),
+             metadata=np.array(json.dumps({"defect": None, "cell": None})))
+    sqlite3.connect(db).execute("DELETE FROM files").connection.commit()
+
+    _register_only(tmp_path / "data")
+    rows = sqlite3.connect(db).execute("SELECT kind, defect, cell_size, calc_method FROM files ORDER BY defect")
+    assert rows.fetchall() == [("convergence", "NV", 512, "all_bands"), ("convergence", "V_Si", 128,
+                                                                         "defect_band_approx")]
+    conn = sqlite3.connect(db)
+    assert find_convergence(conn, defects=["NV"]) == [packed.resolve()]
+
+
 @pytest.mark.parametrize("no_mass_weighted", [False, True])
 def test_no_mass_weighted_flag_is_stored(tmp_path, monkeypatch, no_mass_weighted):
     _tree(tmp_path)
