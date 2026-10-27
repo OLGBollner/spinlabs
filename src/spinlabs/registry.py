@@ -579,6 +579,40 @@ def find_runs(
     return results
 
 
+def find_convergence(
+    conn: sqlite3.Connection,
+    *,
+    defects: Iterable[str] = (),
+    cell_sizes: Iterable[int | str] = (),
+    calc_methods: Iterable[str] = (),
+    latest: bool = False,
+) -> list[Path]:
+    """Packaged convergence files ('package --conv') matching the filters, oldest first.
+
+    Several values of one filter match any of them. With ``latest`` one file per
+    convergence folder is kept, the newest: files are named
+    ``<defect>_<cell>_<date>_conv_<folder suffix>.npz``, so the folder is the
+    configuration plus the suffix (two folders of one method, e.g. ``test_all`` and
+    ``test_all_mass_weighted``, are kept apart).
+    """
+    sql = "SELECT path, defect, cell_size, calc_method FROM files WHERE kind = 'convergence'"
+    params: list[object] = []
+    for column, values in (("defect", list(defects)), ("cell_size", [int(c) for c in cell_sizes]),
+                           ("calc_method", list(calc_methods))):
+        if values:
+            sql += f" AND {column} IN ({', '.join('?' * len(values))})"
+            params.extend(values)
+    rows = [(Path(p), config) for p, *config in conn.execute(sql + " ORDER BY id", params) if Path(p).exists()]
+    if not latest:
+        return [path for path, _ in rows]
+    newest: dict[tuple, Path] = {}
+    for path, config in rows:
+        key = (*config, path.stem.partition("_conv_")[2])
+        newest.pop(key, None)  # re-insert so the result stays in order of the newest files
+        newest[key] = path
+    return list(newest.values())
+
+
 def find_phonon(
     conn: sqlite3.Connection, defect: str, cell_size: int | str | None
 ) -> list[Path]:

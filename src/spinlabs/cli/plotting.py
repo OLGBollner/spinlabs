@@ -8,8 +8,10 @@ import matplotlib.pyplot as plt
 from spinlabs.cli import add_verbosity_args
 from spinlabs.convergence import SNR_TARGET, TRUNC_TOL, plot_pert_convergence, read_conv_metadata
 from spinlabs.plotter import plot_run_coupling, plot_run_rates, plot_t1
-from spinlabs.registry import ensure_db, find_runs, parse_orders
+from spinlabs.registry import ensure_db, find_convergence, find_runs, parse_orders
 from spinlabs.relaxation_dynamics import INIT_STATES, find_t1_files, normalize_init_state
+
+_METHODS = {"all": "all_bands", "approx": "defect_band_approx"}  # --method values -> registry calc_method
 
 
 def _add_output_args(parser: argparse.ArgumentParser) -> None:
@@ -60,7 +62,8 @@ def build_plot_parser(subparsers: argparse._SubParsersAction) -> None:  # noqa: 
     conv = subparsers.add_parser(
         "convergence", help="Plot ZFS principal components vs perturbation scale from a packed npz"
     )
-    conv.add_argument("npz", type=Path, help="npz from pack_perturbation_runs.py")
+    conv.add_argument("npz", type=Path, nargs="*", help="npz files from 'spinlabs package --conv'")
+    _add_query_args(conv, runs=False)
     conv.add_argument("-m", "--mode", type=int, action="append", help="plot only this mode (repeatable; default: all)")
     conv.add_argument(
         "--quad", action="store_true", help="also fit y = a + b x + c x^2 and report the second-order derivative 2c"
@@ -90,21 +93,46 @@ def build_plot_parser(subparsers: argparse._SubParsersAction) -> None:  # noqa: 
 
 
 def _run_convergence(args: argparse.Namespace) -> None:
-    meta = read_conv_metadata(args.npz)
+    if args.query:
+        if args.npz:
+            raise SystemExit("error: pass either npz paths or --query, not both")
+        files = find_convergence(
+            ensure_db(),
+            defects=args.defect or [],
+            cell_sizes=args.cell_size or [],
+            calc_methods=[_METHODS[m] for m in args.method or []],
+            latest=args.latest,
+        )
+        if not files:
+            raise SystemExit("error: no convergence files in the registry match the query")
+    else:
+        if not args.npz:
+            raise SystemExit("error: provide npz paths, or use --query to select registry files")
+        files = args.npz
+    if len(files) > 1 and (args.output or args.csv):
+        raise SystemExit(f"error: -o/--csv name one file but {len(files)} convergence files were selected")
+    for npz in files:
+        print(f"Convergence file: {npz}")
+        _plot_convergence(args, Path(npz))
+
+
+def _plot_convergence(args: argparse.Namespace, npz: Path) -> None:
+    meta = read_conv_metadata(npz)
     stem = "_".join(str(meta[k]) for k in ("defect", "cell") if meta.get(k) is not None)
-    method = meta.get("method") or meta.get("method_key")
+    # method_key names the folder (test_all vs test_all_mass_weighted); method alone would let them overwrite
+    method = meta.get("method_key") or meta.get("method")
     if method:
         stem = f"{stem}_{method}" if stem else str(method)
     if not stem:
         if not args.output:
             raise SystemExit(
-                f"error: {args.npz} has no defect/cell metadata; "
+                f"error: {npz} has no defect/cell metadata; "
                 "repack it with 'spinlabs package --conv' or pass -o explicitly"
             )
-        stem = args.npz.stem
+        stem = npz.stem
     out = args.output or _default_output(args, "convergence", stem)
     plot_pert_convergence(
-        args.npz,
+        npz,
         output_path=out,
         mode=args.mode,
         quad=args.quad,
@@ -244,13 +272,19 @@ def _run_rates(args: argparse.Namespace) -> None:
     _plot_each_run(args, "rates", plot_run_rates)
 
 
-def _add_query_args(parser: argparse.ArgumentParser) -> None:
-    """Registry-query filters shared by all plot subcommands (same as 'run --query')."""
+def _add_query_args(parser: argparse.ArgumentParser, runs: bool = True) -> None:
+    """Registry-query filters shared by all plot subcommands (same as 'run --query').
+
+    ``runs=False`` (plot convergence) queries packaged convergence files, which have no
+    order, perturbation scale or run directory: only --defect/--cell-size/--method/--latest.
+    """
     parser.add_argument(
         "--query",
         action="store_true",
         help="Plot the completed runs in the registry matching the filters "
-        "(--defect/--cell-size/--method/--order/--pert-scale). Same syntax as 'run --query'",
+        "(--defect/--cell-size/--method/--order/--pert-scale). Same syntax as 'run --query'"
+        if runs
+        else "Plot the convergence files in the registry ('package --conv') matching --defect/--cell-size/--method",
     )
     parser.add_argument("--defect", nargs="+", help="Filter by defect name(s) (e.g. NV ClV)")
     parser.add_argument("--cell-size", nargs="+", type=int, help="Filter by supercell size(s) (e.g. 64 128)")
@@ -260,6 +294,13 @@ def _add_query_args(parser: argparse.ArgumentParser) -> None:
         choices=["all", "approx"],
         help="Filter by calculation method(s): 'all' for all_bands, 'approx' for defect_band_approx",
     )
+    if not runs:
+        parser.add_argument(
+            "--latest",
+            action="store_true",
+            help="With --query, use only the newest file of each convergence folder (defect, cell size, folder)",
+        )
+        return
     parser.add_argument(
         "--order",
         nargs="+",
@@ -291,7 +332,7 @@ def _query_filters(args: argparse.Namespace) -> list[tuple[str, str]]:
     out = []
     out += [("defect", d) for d in args.defect or []]
     out += [("cell", c) for c in args.cell_size or []]
-    out += [("method", {"all": "all_bands", "approx": "defect_band_approx"}[m]) for m in args.method or []]
+    out += [("method", _METHODS[m]) for m in args.method or []]
     if args.order is not None:
         out.append(("order", parse_orders(args.order)))
     out += [("pert", p) for p in args.pert_scale or []]

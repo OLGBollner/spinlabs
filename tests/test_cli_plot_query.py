@@ -370,3 +370,59 @@ def test_latest_keeps_a_first_order_run_when_nothing_more_complete_exists(tmp_pa
     _add_run(conn, tmp_path / "r_1d_old", order=1, started_at="2026-10-01 12:00:00")
     _add_run(conn, tmp_path / "r_1d_new", order=1, started_at="2026-10-09 12:00:00")
     assert [d.name for d in registry.find_runs(conn, [("defect", "NV")], latest=True)] == ["r_1d_new"]
+
+
+# ── plot convergence --query ─────────────────────────────────────────────────
+
+def _conv_file(conn, root, defect, cell, calc_method, day, suffix):
+    path = root / f"{defect}_{cell}" / calc_method / day / f"{defect}_{cell}_{day}_conv_{suffix}.npz"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    np.savez(path, modes=np.arange(1))
+    registry.register_file(conn, path, "convergence", defect=defect, cell_size=cell, calc_method=calc_method)
+    return path.resolve()
+
+
+@pytest.fixture
+def conv_files(tmp_path, monkeypatch):
+    monkeypatch.setenv("SPINLABS_REGISTRY_DIR", str(tmp_path / "registry"))
+    conn = registry.ensure_db()
+    data = tmp_path / "data"
+    return {
+        "old": _conv_file(conn, data, "NV", 512, "all_bands", "20261020", "test_all"),
+        "new": _conv_file(conn, data, "NV", 512, "all_bands", "20261027", "test_all"),
+        "mw": _conv_file(conn, data, "NV", 512, "all_bands", "20261020", "test_all_mass_weighted"),
+        "occup": _conv_file(conn, data, "NV", 512, "defect_band_approx", "20261027", "test_occup"),
+        "div": _conv_file(conn, data, "DiV", 128, "all_bands", "20261027", "test_all"),
+    }
+
+
+def _plot_conv(monkeypatch, argv):
+    """Run 'plot convergence' with plotting stubbed; return the npz files it would plot."""
+    plotted = []
+    monkeypatch.setattr(cli_plot, "_plot_convergence", lambda args, npz: plotted.append(npz))
+    cli_plot._run_convergence(cli.build_parser().parse_args(["plot", "convergence", *argv]))
+    return plotted
+
+
+def test_plot_convergence_query_filters(conv_files, monkeypatch):
+    f = conv_files
+    assert _plot_conv(monkeypatch, ["--query", "--defect", "NV", "--method", "all"]) == [f["old"], f["new"], f["mw"]]
+    assert _plot_conv(monkeypatch, ["--query", "--cell-size", "128"]) == [f["div"]]
+    assert _plot_conv(monkeypatch, ["--query", "--method", "approx"]) == [f["occup"]]
+
+
+def test_plot_convergence_latest_keeps_each_folder(conv_files, monkeypatch):
+    f = conv_files
+    got = _plot_conv(monkeypatch, ["--query", "--defect", "NV", "--method", "all", "--latest"])
+    assert sorted(got) == sorted([f["new"], f["mw"]])
+
+
+def test_plot_convergence_query_errors(conv_files, monkeypatch, tmp_path):
+    with pytest.raises(SystemExit, match="no convergence files"):
+        _plot_conv(monkeypatch, ["--query", "--defect", "ClV"])
+    with pytest.raises(SystemExit, match="either npz paths or --query"):
+        _plot_conv(monkeypatch, [str(conv_files["new"]), "--query"])
+    with pytest.raises(SystemExit, match="-o/--csv name one file"):
+        _plot_conv(monkeypatch, ["--query", "--defect", "NV", "-o", str(tmp_path / "x.png")])
+    with pytest.raises(SystemExit, match="provide npz paths"):
+        _plot_conv(monkeypatch, [])
