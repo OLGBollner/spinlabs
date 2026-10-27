@@ -9,6 +9,7 @@ import pytest
 
 import spinlabs.cli as cli
 import spinlabs.cli.plotting as cli_plot
+import spinlabs.convergence_summary as summary
 from spinlabs.convergence_summary import analyse, column_title
 from spinlabs.pack_convergence import ConvergenceScan, save_convergence
 
@@ -72,6 +73,18 @@ def test_one_output_for_several_defects_is_refused(tmp_path, monkeypatch):
     packs = [_pack(tmp_path / "NV.npz"), _pack(tmp_path / "DiV.npz", defect="DiV", cell="128")]
     with pytest.raises(SystemExit, match="-o names one figure but the files hold 2 defects"):
         _plot(monkeypatch, tmp_path, [*map(str, packs), "-o", str(tmp_path / "x.png")])
+
+
+def test_log_q_axis_is_ticked_at_the_run_step_sizes(tmp_path, monkeypatch):
+    figures = []
+    monkeypatch.setattr(summary.plt, "close", figures.append)  # keep the figure to inspect it
+    summary.plot_convergence_summary([_pack(tmp_path / "NV.npz")], tmp_path / "out.png")
+    rows = figures[0].axes[:3]
+    for ax in rows:
+        assert ax.get_xscale() == "log"
+        assert list(ax.get_xticks()) == pytest.approx([0.025, 0.05, 0.1, 0.2])
+    # the rows share x, so only the bottom one carries the labels
+    assert [t.get_text() for t in rows[-1].get_xticklabels()] == ["0.025", "0.05", "0.1", "0.2"]
 
 
 def test_analyse_measures_the_linear_and_quadratic_terms(tmp_path):

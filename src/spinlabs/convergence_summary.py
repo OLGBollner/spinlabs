@@ -32,6 +32,7 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 import numpy as np
 from matplotlib.lines import Line2D
+from matplotlib.ticker import NullLocator
 
 from spinlabs.convergence import (
     SNR_TARGET,
@@ -127,7 +128,8 @@ def plot_convergence_summary(
 ) -> Path:
     """One figure, one column per pack (e.g. a defect's all-bands and defect-band packs); returns its path."""
     packs = [Path(p) for p in packs]
-    fig, axes = plt.subplots(3, len(packs), figsize=(7.5 * len(packs), 13), squeeze=False, sharex=True)
+    # each column ticks its own pack's step sizes, so only the rows of one column share x
+    fig, axes = plt.subplots(3, len(packs), figsize=(7.5 * len(packs), 13), squeeze=False, sharex="col")
     for col, path in enumerate(packs):
         rows, sigma, offset = analyse(path, modes, noise, target, tol)
         title = column_title(path)
@@ -162,9 +164,13 @@ def plot_convergence_summary(
         snr_ax.axhline(target, color="0.35", ls="--", lw=1)
         snr_ax.annotate(f"SNR ≥ {target:g}", (0.0, target), xycoords=("axes fraction", "data"),
                         xytext=(4, 4), textcoords="offset points", fontsize=10, color="0.35")
+        # log |Q| axis ticked at the step sizes that were run, not at decades
+        run_steps = np.unique(np.round(steps, 12))
         for ax in (first_ax, second_ax, snr_ax):
             ax.set_xscale("log")
             ax.set_yscale("log")
+            ax.set_xticks(run_steps, [f"{s:g}" for s in run_steps])
+            ax.xaxis.set_minor_locator(NullLocator())
             ax.grid(True, which="major", color="0.9", linewidth=0.6)
         # shade SNR >= target behind the curves, keeping the limits the curves set
         ylo, yhi = snr_ax.get_ylim()
