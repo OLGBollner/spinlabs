@@ -20,7 +20,7 @@ from spinlabs.logging_utils import attach_db_logging
 from spinlabs.models import RawZFSData, normalize_calc_method
 from spinlabs.vasp.trees import tree_displacement
 from spinlabs.registry import ensure_db, register_file
-from spinlabs.pack_convergence import pack_convergence
+from spinlabs.pack_convergence import ConvergenceScan, save_convergence, scan_convergence
 from spinlabs.parsers import parse_zfs_simulation_dataset, split_defect_folder_name
 from spinlabs.vasp.run_checks import BASIS_SOURCE
 from spinlabs.vasp.settings import (
@@ -281,12 +281,7 @@ def _scan_raw(args: argparse.Namespace, defect_folder: Path, methods: list[str])
             if raw is None or not (raw.first_order or raw.second_order):
                 warnings.warn(f"No data parsed for {defect_folder.name} ({calc_method}, pert {pert_scale:g}); skipping")
                 continue
-            raw.vasp_settings = {
-                "ground_state": ground,
-                "trees": trees,
-                "problems": compare_settings(ground, trees),
-                "start_differences": start_differences(ground, trees),
-            }
+            raw.vasp_settings = _vasp_settings(ground, trees)
             if len(weighting) > 1:
                 warnings.warn(
                     f"{defect_folder.name} {calc_method} pert {pert_scale:g}: first and second order trees use "
@@ -299,7 +294,11 @@ def _scan_raw(args: argparse.Namespace, defect_folder: Path, methods: list[str])
 
 def _ground_state_settings(defect_folder: Path, calc_method: str) -> dict[str, str] | None:
     """VASP settings of the ground-state ZFS run (<defect>/ZFS_hyp or ZFS_occup), or None if absent."""
-    folder = defect_folder / BASIS_SOURCE[calc_method]
+    return _run_folder_settings(defect_folder / BASIS_SOURCE[calc_method])
+
+
+def _run_folder_settings(folder: Path) -> dict[str, str] | None:
+    """VASP settings of one run folder from its INCAR, else its OUTCAR; None if it has neither."""
     if (folder / "INCAR").is_file():
         return read_incar(folder / "INCAR")
     if (folder / "OUTCAR").is_file():
@@ -379,25 +378,39 @@ def _print_settings(scanned: list[_Scanned]) -> None:
     """Ground-state vs run VASP settings per dataset; every difference is a warning."""
     print("\nVASP settings (ground state vs the runs differenced against it):")
     for s in scanned:
-        settings = s.raw.vasp_settings or {}
-        name = f"{s.defect}_{s.cell_size} {s.calc_method} pert {s.pert_scale:g}"
-        ground, trees = settings.get("ground_state"), settings.get("trees", {})
-        n_runs = sum(t["n_runs"] for t in trees.values())
-        if not n_runs:
-            print(f"  {name}: no run INCAR or OUTCAR found; not checked")
-            continue
-        where = "" if ground is not None else " (no ground-state INCAR/OUTCAR found)"
-        problems = settings.get("problems", [])
-        start = settings.get("start_differences", [])
-        status = "consistent" if not problems else f"{len(problems)} difference(s)"
-        print(f"  {name}: {status}; {summary_line(ground, trees)}{where}")
-        for problem in problems:
-            print(f"    !! {problem}")
-            LOGGER.info(f"{name}: {problem}")  # kept in the run log; printed once above
-        if start:
-            print(f"    starting point only (ISTART/ICHARG, same converged result): {len(start)} difference(s)")
-            for line in start:
-                LOGGER.info(f"{name}: starting point: {line}")
+        _print_settings_of(f"{s.defect}_{s.cell_size} {s.calc_method} pert {s.pert_scale:g}", s.raw.vasp_settings)
+
+
+def _vasp_settings(ground: dict[str, str] | None, trees: dict[str, dict]) -> dict:
+    """The vasp_settings record of one dataset: ground state, trees and their differences."""
+    return {
+        "ground_state": ground,
+        "trees": trees,
+        "problems": compare_settings(ground, trees),
+        "start_differences": start_differences(ground, trees),
+    }
+
+
+def _print_settings_of(name: str, settings: dict | None) -> None:
+    """One dataset's line of the VASP settings check (see _vasp_settings), with its differences."""
+    settings = settings or {}
+    ground, trees = settings.get("ground_state"), settings.get("trees", {})
+    n_runs = sum(t["n_runs"] for t in trees.values())
+    if not n_runs:
+        print(f"  {name}: no run INCAR or OUTCAR found; not checked")
+        return
+    where = "" if ground is not None else " (no ground-state INCAR/OUTCAR found)"
+    problems = settings.get("problems", [])
+    start = settings.get("start_differences", [])
+    status = "consistent" if not problems else f"{len(problems)} difference(s)"
+    print(f"  {name}: {status}; {summary_line(ground, trees)}{where}")
+    for problem in problems:
+        print(f"    !! {problem}")
+        LOGGER.info(f"{name}: {problem}")  # kept in the run log; printed once above
+    if start:
+        print(f"    starting point only (ISTART/ICHARG, same converged result): {len(start)} difference(s)")
+        for line in start:
+            LOGGER.info(f"{name}: starting point: {line}")
 
 
 def _print_shape_flags(scanned: list[_Scanned], phonons: dict[tuple[str, int], Path]) -> None:
@@ -583,24 +596,111 @@ def _run_conv(args: argparse.Namespace, defect_folder: Path) -> None:
     conv_roots = sorted(p for p in defect_folder.glob("convergence*") if p.is_dir())
     if not conv_roots:
         raise SystemExit(f"No convergence* folders found under {defect_folder}")
-    method_map = {"all": "all", "occup": "approx"}
-    for root in conv_roots:
-        LOGGER.info(f"Convergence folder: {root}")
-        suffix = re.sub(r"^convergence[._-]*", "", root.name).lstrip("_-") or "conv"
-        method = next((v for k, v in method_map.items() if k in suffix), None)
-        defect, cell = split_defect_folder_name(defect_folder.name)
-        stem = f"{defect}_{cell}_{date.today():%Y%m%d}_conv_{suffix}"
-        calc_method = normalize_calc_method(method) if method else method
-        date_dir = date.today().strftime("%Y%m%d")
-        leaf = args.output_root / f"{defect}_{cell}" / (calc_method or "conv") / date_dir
+    scanned = [s for s in (_scan_conv(args, defect_folder, root) for root in conv_roots) if s is not None]
+    _print_conv_summary(scanned)
+    if getattr(args, "scan", False) or not scanned:
+        return
+    if not getattr(args, "yes", False) and not _confirm("Save the convergence data to file? (Y/n): "):
+        print("Nothing saved.")
+        return
+    date_dir = date.today().strftime("%Y%m%d")
+    for s in scanned:
+        leaf = args.output_root / f"{s.defect}_{s.cell}" / (s.calc_method or "conv") / date_dir
         leaf.mkdir(parents=True, exist_ok=True)
-        output = leaf / f"{stem}.npz"
-        ground_state = args.ground_state
-        if ground_state == _GS_AUTO:
-            ground_state = _auto_ground_state(defect_folder, method)
-        pack_convergence(
-            root, output, ground_state=ground_state, defect=defect, cell=cell, method=method, method_key=suffix
+        output = leaf / f"{s.defect}_{s.cell}_{date_dir}_conv_{s.suffix}.npz"
+        save_convergence(
+            s.scan, output, ground_state=s.ground_state, defect=s.defect, cell=s.cell, method=s.method,
+            method_key=s.suffix,
         )
-        register_file(
-            ensure_db(), output, "convergence", defect=defect, cell_size=cell, calc_method=calc_method
+        register_file(ensure_db(), output, "convergence", defect=s.defect, cell_size=s.cell, calc_method=s.calc_method)
+        print(f"Saved: {output}")
+
+
+class _ConvScanned(NamedTuple):
+    """One parsed convergence folder, ready to be saved."""
+
+    defect: str
+    cell: int
+    suffix: str  # folder name without 'convergence', e.g. 'test_all'; names the output file
+    method: str | None  # 'all' or 'approx' from the suffix, None when it says neither
+    calc_method: str | None
+    ground_state: Path | None  # OUTCAR stored as d0
+    scan: ConvergenceScan
+    vasp_settings: dict
+
+
+def _scan_conv(args: argparse.Namespace, defect_folder: Path, root: Path) -> _ConvScanned | None:
+    """Parse one convergence* folder and check its settings against the ground state; None if it has no runs."""
+    LOGGER.info(f"Convergence folder: {root}")
+    suffix = re.sub(r"^convergence[._-]*", "", root.name).lstrip("_-") or "conv"
+    method = next((v for k, v in {"all": "all", "occup": "approx"}.items() if k in suffix), None)
+    calc_method = normalize_calc_method(method) if method else None
+    defect, cell = split_defect_folder_name(defect_folder.name)
+    try:
+        scan = scan_convergence(root)
+    except ValueError as exc:
+        LOGGER.warning(f"{root.name}: {exc}; skipping")
+        return None
+    ground_state = args.ground_state
+    if ground_state == _GS_AUTO:
+        ground_state = _auto_ground_state(defect_folder, method)
+    # Settings are checked against the stored d0's run, else the method's ZFS_hyp/ZFS_occup.
+    if ground_state is not None:
+        ground = _run_folder_settings(Path(ground_state).parent)
+    elif calc_method in BASIS_SOURCE:
+        ground = _ground_state_settings(defect_folder, calc_method)
+    else:
+        ground = None
+    settings = _vasp_settings(ground, {"runs": tree_settings(root)})
+    return _ConvScanned(defect, cell, suffix, method, calc_method, ground_state, scan, settings)
+
+
+def _format_steps(perts: list[float]) -> str:
+    """'±0.025 ±0.05' when every size was run at both signs, else the steps as found."""
+    sizes = sorted({abs(p) for p in perts})
+    if all(s in perts and -s in perts for s in sizes):
+        return " ".join(f"±{s:g}" for s in sizes)
+    return " ".join(f"{p:g}" for p in perts)
+
+
+def _print_conv_summary(scanned: list[_ConvScanned]) -> None:
+    if not scanned:
+        print("\nNo convergence data found.")
+        return
+    columns = ("defect", "folder", "method", "modes", "steps", "finished")
+    rows = [
+        (
+            f"{s.defect}_{s.cell}", s.suffix, s.calc_method or "-", " ".join(map(str, s.scan.modes)),
+            _format_steps(s.scan.perts), f"{s.scan.n_finished}/{s.scan.n_grid}",
         )
+        for s in scanned
+    ]
+    widths = [max(len(c), *(len(r[i]) for r in rows)) for i, c in enumerate(columns)]
+    header = " ".join(c.ljust(w) for c, w in zip(columns, widths)).rstrip()
+    print("\nAvailable convergence data:")
+    print(header)
+    print("-" * len(header))
+    for row in rows:
+        print(" ".join(v.ljust(w) for v, w in zip(row, widths)).rstrip())
+    for s in scanned:
+        gaps = s.scan.n_grid - s.scan.n_runs
+        if s.scan.unfinished:
+            shown = ", ".join(s.scan.unfinished[:10]) + (", ..." if len(s.scan.unfinished) > 10 else "")
+            print(f"  !! {s.suffix}: {len(s.scan.unfinished)} run(s) without a ZFS tensor: {shown}")
+        if gaps:
+            print(f"  !! {s.suffix}: {gaps} mode/step combination(s) have no run folder")
+
+    print("\nGround state (stored as d0):")
+    for s in scanned:
+        print(f"  {s.suffix}: {s.ground_state or 'none (d0 not stored)'}")
+
+    print("\nDisplacements:")
+    for s in scanned:
+        convention = s.scan.displacement or "mass_weighted"
+        source = "trees' job scripts" if s.scan.displacement is not None else "default"
+        print(f"  {s.defect}_{s.cell} {s.suffix}: {_DISPLACEMENT_TEXT[convention]}  [{source}]")
+
+    print("\nVASP settings (ground state vs the convergence runs):")
+    for s in scanned:
+        _print_settings_of(f"{s.defect}_{s.cell} {s.suffix}", s.vasp_settings)
+    print()

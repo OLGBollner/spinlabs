@@ -15,6 +15,7 @@ import argparse
 import json
 import re
 import sys
+from dataclasses import dataclass, field
 from datetime import date
 from pathlib import Path
 
@@ -51,22 +52,38 @@ def infer_defect_cell(folder: Path) -> tuple[str | None, str | None]:
     return None, None
 
 
-def pack_convergence(
-    run_root: Path,
-    output: Path,
-    ground_state: Path | None = None,
-    defect: str | None = None,
-    cell: str | None = None,
-    method: str | None = None,
-    method_key: str | None = None,
-) -> Path:
-    """Pack runs/<mode>_pert_<p>/OUTCAR under one root into one .npz."""
+@dataclass
+class ConvergenceScan:
+    """Parsed convergence runs of one root, before anything is written."""
+
+    run_root: Path
+    modes: list[int]
+    perts: list[float]
+    tensors: np.ndarray  # (n_modes, n_perts, 3, 3), MHz; NaN where a run has no tensor
+    energies: np.ndarray  # (n_modes, n_perts), eV
+    n_runs: int  # run folders with an OUTCAR
+    unfinished: list[str] = field(default_factory=list)  # run folders whose OUTCAR has no ZFS tensor
+    n_missing_energy: int = 0
+    displacement: str | None = None  # the job script's DISPLACEMENT, None when it says nothing
+
+    @property
+    def n_finished(self) -> int:
+        return self.n_runs - len(self.unfinished)
+
+    @property
+    def n_grid(self) -> int:
+        """Size of the mode x step grid; more than n_runs when some run folders are missing."""
+        return len(self.modes) * len(self.perts)
+
+
+def scan_convergence(run_root: Path) -> ConvergenceScan:
+    """Parse runs/<mode>_pert_<p>/OUTCAR under one root; ValueError when there is nothing to parse."""
     run_root = Path(run_root)
     if not (run_root / "runs").is_dir():
-        sys.exit(f"Error: no runs/ under {run_root}")
-    runs = [t for t in discover_runs(run_root)]
+        raise ValueError(f"no runs/ under {run_root}")
+    runs = discover_runs(run_root)
     if not runs:
-        sys.exit(f"Error: no runs/*/OUTCAR found under {run_root}")
+        raise ValueError(f"no runs/*/OUTCAR found under {run_root}")
 
     modes = sorted({m for m, _, _ in runs})
     perts = sorted({p for _, p, _ in runs})
@@ -75,12 +92,13 @@ def pack_convergence(
     mode_idx = {m: i for i, m in enumerate(modes)}
     pert_idx = {p: i for i, p in enumerate(perts)}
 
-    n_missing = n_empty = 0
+    unfinished = []
+    n_missing = 0
     for mode, pert, outcar in runs:
         tensor = parse_outcar_zfs(outcar)
         if tensor is None or bool(np.isnan(tensor.matrix).all()):
             LOGGER.warning(f"no ZFS tensor in {outcar} (run unfinished?)")
-            n_empty += 1
+            unfinished.append(outcar.parent.name)
             continue
         i, j = mode_idx[mode], pert_idx[pert]
         tensors[i, j] = tensor.matrix
@@ -89,7 +107,21 @@ def pack_convergence(
             energies[i, j] = energy
         else:
             n_missing += 1
+    return ConvergenceScan(
+        run_root, modes, perts, tensors, energies, len(runs), unfinished, n_missing, tree_displacement(run_root)
+    )
 
+
+def save_convergence(
+    scan: ConvergenceScan,
+    output: Path,
+    ground_state: Path | None = None,
+    defect: str | None = None,
+    cell: str | None = None,
+    method: str | None = None,
+    method_key: str | None = None,
+) -> Path:
+    """Write a scanned root to one .npz (with the ground-state tensor as 'd0' when given)."""
     extra: dict = {}
     if ground_state is not None:
         d0 = parse_outcar_zfs(ground_state)
@@ -102,7 +134,7 @@ def pack_convergence(
         LOGGER.info(f"ground-state tensor from {ground_state}\n{extra['d0']}")
 
     if defect is None or cell is None:
-        inf_d, inf_c = infer_defect_cell(run_root)
+        inf_d, inf_c = infer_defect_cell(scan.run_root)
         defect = defect or inf_d
         cell = cell or inf_c
     metadata = {
@@ -110,30 +142,49 @@ def pack_convergence(
         "cell": cell,
         "created": f"{date.today():%Y-%m-%d}",
         "ground_state": str(ground_state) if ground_state is not None else None,
-        "n_runs": len(runs),
+        "n_runs": scan.n_runs,
         "method": method,
         "method_key": method_key,
         # how the steps displaced the atoms (spinlabs.models.DISPLACEMENTS): normalized steps are
         # Cartesian lengths in Angstrom, the others Q in Angstrom*sqrt(amu)
-        "displacement": tree_displacement(run_root) or "mass_weighted",
+        "displacement": scan.displacement or "mass_weighted",
     }
     np.savez_compressed(
         output,
-        modes=np.array(modes, dtype=int),
-        perts=np.array(perts, dtype=float),
-        tensors=tensors,  # (n_modes, n_perts, 3, 3), MHz
-        energies=energies,  # (n_modes, n_perts), eV
+        modes=np.array(scan.modes, dtype=int),
+        perts=np.array(scan.perts, dtype=float),
+        tensors=scan.tensors,  # (n_modes, n_perts, 3, 3), MHz
+        energies=scan.energies,  # (n_modes, n_perts), eV
         metadata=np.array(json.dumps(metadata)),
         **extra,
     )
-    n_done = tensors.size // 9 - n_empty
     LOGGER.info(f"metadata: {json.dumps(metadata)}")
     LOGGER.info(
-        f"Packed {n_done}/{tensors.size // 9} runs ({n_empty} unfinished, {n_missing} without energy) -> {output}"
+        f"Packed {scan.n_finished}/{scan.n_grid} runs ({len(scan.unfinished)} unfinished, "
+        f"{scan.n_missing_energy} without energy) -> {output}"
     )
-    LOGGER.info(f"modes: {modes}")
-    LOGGER.info(f"perts: {perts}")
+    LOGGER.info(f"modes: {scan.modes}")
+    LOGGER.info(f"perts: {scan.perts}")
     return Path(output)
+
+
+def pack_convergence(
+    run_root: Path,
+    output: Path,
+    ground_state: Path | None = None,
+    defect: str | None = None,
+    cell: str | None = None,
+    method: str | None = None,
+    method_key: str | None = None,
+) -> Path:
+    """Pack runs/<mode>_pert_<p>/OUTCAR under one root into one .npz."""
+    try:
+        scan = scan_convergence(run_root)
+    except ValueError as exc:
+        sys.exit(f"Error: {exc}")
+    return save_convergence(
+        scan, output, ground_state=ground_state, defect=defect, cell=cell, method=method, method_key=method_key
+    )
 
 
 def build_parser(parser: argparse.ArgumentParser) -> None:

@@ -179,11 +179,13 @@ def _outcar(path, d_diag, energy=-10.0):
     )
 
 
-def _conv_args(tmp_path, ground_state):
+def _conv_args(tmp_path, ground_state, yes=True, scan=False):
     return argparse.Namespace(
         defect_folder=tmp_path / "NV_512",
         output_root=tmp_path / "data",
         ground_state=ground_state,
+        yes=yes,
+        scan=scan,
     )
 
 
@@ -237,6 +239,67 @@ def test_conv_ground_state_explicit_path(tmp_path):
     out = next((tmp_path / "data").rglob("NV_512_*_conv_*.npz"))
     data = np.load(out, allow_pickle=True)
     assert abs(data["d0"][2, 2] - 5.0) < 1e-9
+
+
+def _conv_steps_tree(tmp_path, isym="3"):
+    """convergence_test_all with modes 5 and 7 at +-0.025 and +-0.05, one run unfinished; ZFS_hyp ISYM 2."""
+    root = tmp_path / "NV_512" / "convergence_test_all"
+    for mode in (5, 7):
+        for p in (-0.05, -0.025, 0.025, 0.05):
+            run = root / "runs" / f"{mode}_pert_{p:g}"
+            _outcar(run / "OUTCAR", (1.0, 1.0, 2.0))
+            (run / "INCAR").write_text(f"ENCUT = 520\nISYM = {isym}\n")
+    (root / "runs" / "7_pert_0.05" / "OUTCAR").write_text(" running...\n")
+    (root / "run_convergence.sh").write_text("DISPLACEMENT=${DISPLACEMENT:-normalized}\n")
+    gs = tmp_path / "NV_512" / "ZFS_hyp"
+    _outcar(gs / "OUTCAR", (1.0, 1.0, 4.0))
+    (gs / "INCAR").write_text("ENCUT = 520\nISYM = 2\n")
+    return root
+
+
+def test_conv_scan_prints_summary_and_saves_nothing(tmp_path, capsys):
+    _conv_steps_tree(tmp_path)
+    _run_conv(args=_conv_args(tmp_path, Path("__auto__"), yes=False, scan=True), defect_folder=tmp_path / "NV_512")
+    out = capsys.readouterr().out
+    assert "Available convergence data:" in out
+    row = next(line for line in out.splitlines() if line.startswith("NV_512"))
+    assert row.split() == ["NV_512", "test_all", "all_bands", "5", "7", "±0.025", "±0.05", "7/8"]
+    assert "1 run(s) without a ZFS tensor: 7_pert_0.05" in out
+    assert str(tmp_path / "NV_512" / "ZFS_hyp" / "OUTCAR") in out
+    assert "NV_512 test_all: step * u/|u|" in out and "[trees' job scripts]" in out
+    # the runs' ISYM 3 against the ground state's ISYM 2 is flagged
+    assert "ISYM 3 (ground state 2)" in out and "!!" in out
+    assert not (tmp_path / "data").exists()
+
+
+@pytest.mark.parametrize("answer", ["", "y"])
+def test_conv_prompt_yes_saves(tmp_path, monkeypatch, capsys, answer):
+    _conv_steps_tree(tmp_path)
+    _registry(monkeypatch, tmp_path)
+    monkeypatch.setattr("builtins.input", lambda _prompt: answer)
+    _run_conv(args=_conv_args(tmp_path, Path("__auto__"), yes=False), defect_folder=tmp_path / "NV_512")
+    out = next((tmp_path / "data").rglob("NV_512_*_conv_test_all.npz"))
+    assert f"Saved: {out}" in capsys.readouterr().out
+    data = np.load(out, allow_pickle=True)
+    assert list(data["perts"]) == [-0.05, -0.025, 0.025, 0.05]
+    assert np.isnan(data["tensors"][1, 3]).all() and abs(data["tensors"][0, 0, 2, 2] - 2.0) < 1e-9
+    assert json.loads(str(data["metadata"]))["displacement"] == "normalized"
+
+
+def test_conv_prompt_no_saves_nothing(tmp_path, monkeypatch, capsys):
+    _conv_steps_tree(tmp_path)
+    monkeypatch.setattr("builtins.input", lambda _prompt: "n")
+    _run_conv(args=_conv_args(tmp_path, Path("__auto__"), yes=False), defect_folder=tmp_path / "NV_512")
+    assert "Nothing saved." in capsys.readouterr().out
+    assert not (tmp_path / "data").exists()
+
+
+def test_conv_folder_without_runs_is_skipped(tmp_path, capsys):
+    _conv_tree(tmp_path)
+    (tmp_path / "NV_512" / "convergence_test_occup" / "runs").mkdir(parents=True)
+    _run_conv(args=_conv_args(tmp_path, None), defect_folder=tmp_path / "NV_512")
+    assert len(list((tmp_path / "data").rglob("*.npz"))) == 1
+    assert "test_occup" not in capsys.readouterr().out.split("Available convergence data:")[1]
 
 
 def test_multiple_folders_and_methods(tmp_path, monkeypatch):
