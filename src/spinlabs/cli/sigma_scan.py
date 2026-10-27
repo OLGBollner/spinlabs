@@ -147,7 +147,8 @@ def _table(manager, t1, temps, states, has_second, default_sigma) -> str:
     lines = [
         _label(manager),
         f"  second order: {'yes' if has_second else 'no (one-phonon processes only)'}; "
-        f"inconsistent second-order entries excluded: {len(manager.inconsistent_pairs)}",
+        f"inconsistent second-order entries "
+        f"{'excluded' if manager.exclude_inconsistent_pairs else 'kept'}: {len(manager.inconsistent_pairs)}",
         "  T1 in ms:",
         head,
     ]
