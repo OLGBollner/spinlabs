@@ -7,7 +7,7 @@ import matplotlib.pyplot as plt
 
 from spinlabs.cli import add_verbosity_args
 from spinlabs.convergence import SNR_TARGET, TRUNC_TOL, plot_pert_convergence, read_conv_metadata
-from spinlabs.convergence_summary import plot_convergence_summary
+from spinlabs.convergence_summary import WEAK_FRACTION, plot_convergence_summary
 from spinlabs.plotter import plot_run_coupling, plot_run_rates, plot_t1
 from spinlabs.registry import ensure_db, find_convergence, find_runs, parse_orders
 from spinlabs.relaxation_dynamics import INIT_STATES, find_t1_files, normalize_init_state
@@ -100,6 +100,12 @@ def build_plot_parser(subparsers: argparse._SubParsersAction) -> None:  # noqa: 
     conv.add_argument(
         "--trunc-tol", type=float, default=TRUNC_TOL, help=f"allowed relative truncation error (default {TRUNC_TOL:g})"
     )
+    conv.add_argument(
+        "--weak-fraction", type=float, default=WEAK_FRACTION,
+        help="summary: modes whose coefficient (b, or 2c) is below this fraction of the strongest mode's do not "
+        f"narrow the |Q| safe for all modes (default {WEAK_FRACTION:g}; 0 keeps every mode with SNR >= target "
+        "at some step)",
+    )
     _add_output_args(conv)
     conv.set_defaults(func=_run_convergence)
 
@@ -151,7 +157,8 @@ def _plot_convergence_summaries(args: argparse.Namespace, files: list[Path]) -> 
         packs = [npz for _, npz in sorted(entries, key=lambda e: e[0])]
         out = args.output or _default_output(args, "convergence", f"{name}_convergence_summary")
         plot_convergence_summary(
-            packs, out, noise=args.noise, target=args.snr_target, tol=args.trunc_tol, dpi=args.dpi, show=args.show
+            packs, out, noise=args.noise, target=args.snr_target, tol=args.trunc_tol,
+            weak_fraction=args.weak_fraction, dpi=args.dpi, show=args.show,
         )
 
 

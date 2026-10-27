@@ -14,8 +14,10 @@ of two rows:
 In both rows a band along each mode's line marks its safe |Q|: from where the finite
 difference's SNR (b Q / err1, 2 c Q^2 / err2) reaches the target to where its truncation
 error (c Q / b, 3 d Q / c) reaches the tolerance. The shaded column is the |Q| safe for every
-mode of the pack (convergence.common_window), leaving out a mode whose finite difference stays
-below the SNR target at every measured step: its coupling is too weak to matter (its band is faint).
+mode of the pack (convergence.common_window), leaving out weak modes, whose coupling matters
+too little to narrow it (their bands are faint): a mode whose finite difference stays below the
+SNR target at every measured step, or whose coefficient is below a fraction (default
+WEAK_FRACTION) of the strongest mode's in that order.
 
 Every norm is over the 5 traceless parts (convergence.traceless_parts), as the fit and the
 SNR use them. The grey dashed curve in a quotient row is the error of that quotient with
@@ -60,6 +62,9 @@ FAINT = 0.4  # alpha of an unresolved coefficient's lines and points
 BAND_WIDTH, BAND_ALPHA = 10, 0.25  # a mode's safe |Q| band along its fit line
 COMMON_COLOR = "#e5f4e4"  # the |Q| column safe for every mode
 _ORDER_NAMES = {1: "first order", 2: "second order"}
+# A mode whose coefficient (b, or 2c) is below this fraction of the strongest mode's in the same order
+# does not narrow the |Q| safe for all modes
+WEAK_FRACTION = 0.05
 
 
 def quotients(p, parts, p0):
@@ -191,32 +196,46 @@ def below_target_everywhere(r, measured, order: int) -> bool:
     return bool(np.all(1 / relative_error < r.target))
 
 
-def shade_safe_windows(ax, rows, order: int, xlim: tuple[float, float], name: str) -> list[int]:
+def _coefficient(r, order: int) -> float:
+    """The quantity the order's finite difference estimates: b, or 2c."""
+    return r.b if order == 1 else 2 * r.c
+
+
+def shade_safe_windows(
+    ax, rows, order: int, xlim: tuple[float, float], name: str, weak_fraction: float = WEAK_FRACTION
+) -> list[int]:
     """Each mode's safe |Q| as a band along its fit line, and the |Q| safe for every mode as a column.
 
     As convergence.common_window: the column runs from the largest lower end to the smallest
     known upper end; a mode whose upper end is not limited by these amplitudes reaches the axis.
-    A mode below the SNR target at every measured step (below_target_everywhere) is left out of
-    the column and its band drawn faint. Returns those neglected modes.
+    Weak modes are left out of the column and their bands drawn faint: below the SNR target at
+    every measured step (below_target_everywhere), or with a coefficient under ``weak_fraction``
+    of the strongest resolved mode's (0 turns this off). Returns those neglected modes.
     """
+    strongest = max((_coefficient(r, order) for *_, r in rows if safe_window(r, order)), default=0.0)
     los, his, neglected = [], [], []
     for color, (mode, _p, first, second, r) in zip(COLORS, rows):
         window = safe_window(r, order)
         if window is None:
             continue
         lo, hi, known = window
-        weak = below_target_everywhere(r, (first if order == 1 else second)[:, 0], order)
+        level = _coefficient(r, order)
+        if below_target_everywhere(r, (first if order == 1 else second)[:, 0], order):
+            reason = f"below SNR {r.target:g} at every measured step"
+        elif level < weak_fraction * strongest:
+            reason = f"coefficient {level:.3g} is {level / strongest:.1%} of the strongest ({strongest:.3g})"
+        else:
+            reason = None
+        weak = reason is not None
         if weak:
             neglected.append(mode)
-            LOGGER.info(f"{name}: mode {mode} is below SNR {r.target:g} at every measured step; left out of the "
-                        "|Q| safe for all modes")
+            LOGGER.info(f"{name}: mode {mode} {reason}; left out of the |Q| safe for all modes")
         else:
             los.append(lo)
             if known:
                 his.append(hi)
         start, end = max(lo, xlim[0]), min(hi, xlim[1]) if known else xlim[1]
         if start < end:
-            level = r.b if order == 1 else 2 * r.c
             ax.plot([start, end], [level, level], lw=BAND_WIDTH, alpha=BAND_ALPHA * (FAINT if weak else 1),
                     color=color, solid_capstyle="butt", zorder=1)
         else:
@@ -242,9 +261,13 @@ def plot_signed(ax, rows, marker, color, yerr, alpha, big=9, small=5):
 
 
 def plot_convergence_summary(
-    packs, output, *, modes=None, noise=None, target=SNR_TARGET, tol=TRUNC_TOL, dpi=200, show=False
+    packs, output, *, modes=None, noise=None, target=SNR_TARGET, tol=TRUNC_TOL, weak_fraction=WEAK_FRACTION,
+    dpi=200, show=False,
 ) -> Path:
-    """One figure, one column per pack (e.g. a defect's all-bands and defect-band packs); returns its path."""
+    """One figure, one column per pack (e.g. a defect's all-bands and defect-band packs); returns its path.
+
+    ``weak_fraction``: see shade_safe_windows.
+    """
     packs = [Path(p) for p in packs]
     # each column ticks its own pack's step sizes, so only the rows of one column share x
     fig, axes = plt.subplots(2, len(packs), figsize=(7.5 * len(packs), 9.5), squeeze=False, sharex="col")
@@ -285,7 +308,7 @@ def plot_convergence_summary(
             ax.grid(True, which="major", color="0.9", linewidth=0.6)
             ax.set_xlim(q[0], q[-1])
         neglected = {
-            order: shade_safe_windows(ax, rows, order, (q[0], q[-1]), f"{title} {_ORDER_NAMES[order]}")
+            order: shade_safe_windows(ax, rows, order, (q[0], q[-1]), f"{title} {_ORDER_NAMES[order]}", weak_fraction)
             for ax, order in ((first_ax, 1), (second_ax, 2))
         }
         first_ax.set_title(f"{title}: σ = {sigma:.2g} MHz, D0 offset {offset:.2g} MHz", fontsize=12)
@@ -305,8 +328,10 @@ def plot_convergence_summary(
                 Patch(color=COMMON_COLOR, label="safe |Q| for all modes"),
             ]
             if neglected[order]:
-                handles.insert(1, Line2D([], [], lw=BAND_WIDTH, alpha=BAND_ALPHA * FAINT, color="0.35",
-                                         solid_capstyle="butt", label=f"left out: SNR < {target:g} at every step"))
+                handles.insert(1, Line2D(
+                    [], [], lw=BAND_WIDTH, alpha=BAND_ALPHA * FAINT, color="0.35", solid_capstyle="butt",
+                    label=f"weak mode, left out: SNR < {target:g} at every\nstep or < {weak_fraction:.0%} of the strongest",
+                ))
             return handles
         modes_legend = first_ax.legend(handles=mode_handles, loc="lower right", fontsize=10)
         first_ax.add_artist(modes_legend)

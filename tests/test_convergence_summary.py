@@ -128,7 +128,7 @@ def test_legend_falls_back_to_mode_numbers_without_phonon_data(tmp_path, monkeyp
     assert "no registered phonon data for NV_512" in caplog.text
 
 
-def _row(mode, lo, hi, *, snr=100.0, resolved=True, next_resolved=True):
+def _row(mode, lo, hi, *, snr=100.0, b=10.0, resolved=True, next_resolved=True):
     """A summary row with the SNR report fields shade_safe_windows reads, for the first order.
 
     The finite difference has SNR ``snr`` at each measured step (0.025 and 0.05, at +-Q).
@@ -136,7 +136,7 @@ def _row(mode, lo, hi, *, snr=100.0, resolved=True, next_resolved=True):
     from types import SimpleNamespace
 
     report = SimpleNamespace(
-        b=10.0, c=1.0, q_lo1=lo, q_hi1=hi, b_resolved=resolved, c_resolved=next_resolved, target=3.0,
+        b=b, c=1.0, q_lo1=lo, q_hi1=hi, b_resolved=resolved, c_resolved=next_resolved, target=3.0,
         first_order=lambda q: (np.full(np.shape(q), 1 / snr), np.zeros(np.shape(q))),
     )
     first = np.array([[q, 10.0] for q in (-0.05, -0.025, 0.025, 0.05)])
@@ -162,6 +162,22 @@ def test_safe_windows_are_banded_per_mode_and_shaded_where_all_overlap(caplog):
     assert neglected == [13]
     # largest lower end and smallest known upper end of the modes kept: mode 13's 0.08 does not count
     assert "safe |Q| for all modes 0.05 .. 0.1" in caplog.text
+    plt.close(fig)
+
+
+@pytest.mark.parametrize("fraction, neglected, window", [
+    (0.05, [7], "0.02 .. 0.1"),  # mode 7 is 3% of the strongest: left out
+    (0.0, [], "0.08 .. 0.1"),  # cutoff off: mode 7's window counts
+])
+def test_relative_cutoff_leaves_weak_modes_out(caplog, fraction, neglected, window):
+    import matplotlib.pyplot as plt
+
+    rows = [_row(5, 0.02, 0.1, b=100.0), _row(7, 0.08, 0.3, b=3.0)]  # both well above the SNR target
+    fig, ax = plt.subplots()
+    with caplog.at_level("INFO", logger="spinlabs"):
+        got = summary.shade_safe_windows(ax, rows, 1, (0.01, 0.3), "DiV_128 all bands first order", fraction)
+    assert got == neglected
+    assert f"safe |Q| for all modes {window}" in caplog.text
     plt.close(fig)
 
 
