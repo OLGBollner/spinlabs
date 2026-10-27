@@ -4,7 +4,8 @@ It shows how the finite differences spinlabs takes from the ZFS tensor behave as
 size changes. Each pack (one convergence folder, ``spinlabs package --conv``) is one column
 of two rows:
 
-- first order, |D(Q) - D0| / Q per mode against |Q| (filled +Q, open -Q), with noise error
+- first order, |D(Q) - D0| / Q per mode against |Q| (filled +Q, open -Q; not at the 2Q helper
+  step, convergence.helper_step, which only completes the pair scheme), with noise error
   bars sqrt 2 sigma / Q and the cubic fit's Q -> 0 value b as a line;
 - second order, the forward difference (D(2Q) - 2 D(Q) + D0) / Q^2 that
   ZFSManager.calculate_second_order_derivatives takes from the i = i pair run (D(2Q)) and the
@@ -43,6 +44,8 @@ from spinlabs.convergence import (
     SNR_TARGET,
     TRUNC_TOL,
     d0_offset,
+    fit_points,
+    helper_step,
     load_convergence,
     pooled_noise,
     principal_frame,
@@ -96,23 +99,31 @@ def analyse(path, modes=None, noise=None, target=SNR_TARGET, tol=TRUNC_TOL):
     finished = [~np.isnan(t).any(axis=(1, 2)) for t in conv.tensors]
     perts = [conv.perts[ok] for ok in finished]
     parts = [np.stack([traceless_parts(t, frame) for t in tensors[ok]]) for tensors, ok in zip(conv.tensors, finished)]
-    sigma, dof = pooled_noise(perts, parts)
+    # the 2Q helper step only completes the second-order pair scheme: the noise, the offset and
+    # the Taylor fit (snr_report) use the other runs
+    helper = helper_step(conv.perts)
+    fit = [fit_points(p, helper) for p in perts]
+    fit_perts = [p[f] for p, f in zip(perts, fit)]
+    fit_parts = [x[f] for x, f in zip(parts, fit)]
+    sigma, dof = pooled_noise(fit_perts, fit_parts)
     source = f"pooled, {dof} dof"
     if noise is not None:
         sigma, source = noise, "--noise"
-    offset = d0_offset(perts, parts, p0)
+    offset = d0_offset(fit_perts, fit_parts, p0)
     missing = sorted(set(modes or []) - {int(m) for m in conv.modes})
     if missing:
         LOGGER.warning(f"modes {missing} not in {path.name}; not plotted")
     rows = []
-    for mode, p, mode_parts in zip(conv.modes, perts, parts):
+    for mode, p, mode_parts, f in zip(conv.modes, perts, parts, fit):
         if modes and int(mode) not in modes:
             continue
-        report = snr_report(p, mode_parts, sigma, source, offset, target, tol)
+        report = snr_report(p[f], mode_parts[f], sigma, source, offset, target, tol, pair=(p, mode_parts))
         if report is None:
             LOGGER.warning(f"{path.name} mode {mode}: too few finished amplitudes for an SNR estimate; not plotted")
             continue
-        rows.append((int(mode), p, *quotients(p, mode_parts, p0), report))
+        first, second = quotients(p, mode_parts, p0)  # second needs the helper's D(2Q)
+        first = first[fit_points(first[:, 0], helper)]  # the helper is no first-order point
+        rows.append((int(mode), p[f], first, second, report))
     return rows, sigma, float(np.linalg.norm(offset))
 
 

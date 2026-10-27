@@ -97,9 +97,9 @@ def test_log_q_axis_is_ticked_at_the_run_step_sizes(tmp_path, monkeypatch):
     rows = figures[0].axes[:2]
     for ax in rows:
         assert ax.get_xscale() == "log"
-        assert list(ax.get_xticks()) == pytest.approx([0.025, 0.05, 0.1, 0.2])
+        assert list(ax.get_xticks()) == pytest.approx([0.025, 0.05, 0.1])  # 0.2 is the 2Q helper
     # the rows share x, so only the bottom one carries the labels
-    assert [t.get_text() for t in rows[-1].get_xticklabels()] == ["0.025", "0.05", "0.1", "0.2"]
+    assert [t.get_text() for t in rows[-1].get_xticklabels()] == ["0.025", "0.05", "0.1"]
 
 
 def _legend_texts(fig):
@@ -203,3 +203,35 @@ def test_analyse_measures_the_linear_and_quadratic_terms(tmp_path):
     assert report.b_resolved and report.c_resolved
     assert sigma < 0.1 and offset < 0.1
     assert column_title(tmp_path / "NV.npz") == "NV_512 all bands"
+
+
+def test_the_2q_helper_is_no_first_order_point_but_completes_the_pair_scheme(tmp_path):
+    rows = analyse(_pack(tmp_path / "NV.npz"))[0]
+    _mode, p, first, second, _report = rows[0]
+    assert 0.2 not in np.abs(p) and 0.2 not in np.abs(first[:, 0])  # left out of the fit and first order
+    assert sorted(set(np.abs(second[:, 0]))) == pytest.approx([0.025, 0.05, 0.1])  # 0.1 uses D(0.2)
+
+
+def test_second_order_coefficients_come_from_the_fit_reaching_2q():
+    """b from the runs without the 2Q helper; c and d from the runs with it (snr_report's pair)."""
+    from spinlabs.convergence import snr_report
+
+    perts = np.array([-0.2, -0.1, -0.05, -0.025, 0.0, 0.025, 0.05, 0.1, 0.2])
+    unit = np.array([1.0, 0.0, 0.0, 0.0, 0.0])
+    parts = np.outer(5.0 * perts + 40.0 * perts**2 + 30.0 * perts**3, unit)
+    fit = ~np.isclose(np.abs(perts), 0.2)
+    report = snr_report(perts[fit], parts[fit], 1e-4, "", np.zeros(5), pair=(perts, parts))
+    assert report.b == pytest.approx(5.0, rel=1e-6)
+    assert (report.c, report.d) == pytest.approx((40.0, 30.0), rel=1e-6)
+
+
+@pytest.mark.parametrize("steps, helper", [
+    ([0.025, 0.05, 0.1, 0.2], 0.2),  # 0.2 is the 2Q partner of 0.1
+    ([0.025, 0.05, 0.1, 0.3], None),  # 0.3 is no double of a run step
+    ([0.025, 0.05, 0.1], None),  # leaving 0.1 out would leave 2 step sizes: kept
+])
+def test_helper_step(steps, helper):
+    from spinlabs.convergence import helper_step
+
+    perts = np.array(sorted([-s for s in steps] + [0.0] + steps))
+    assert helper_step(perts) == helper
