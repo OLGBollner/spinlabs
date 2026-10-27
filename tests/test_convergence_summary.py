@@ -87,6 +87,47 @@ def test_log_q_axis_is_ticked_at_the_run_step_sizes(tmp_path, monkeypatch):
     assert [t.get_text() for t in rows[-1].get_xticklabels()] == ["0.025", "0.05", "0.1", "0.2"]
 
 
+def _legend_texts(fig):
+    """Every legend label of the figure's first axes (the mode legend is kept as an extra artist)."""
+    ax = fig.axes[0]
+    legends = [a for a in ax.get_children() if isinstance(a, matplotlib.legend.Legend)]
+    return [t.get_text() for legend in legends for t in legend.get_texts()]
+
+
+def _plot_summary(tmp_path, monkeypatch):
+    figures = []
+    monkeypatch.setattr(summary.plt, "close", figures.append)
+    summary.plot_convergence_summary([_pack(tmp_path / "NV.npz")], tmp_path / "out.png")
+    return figures[0]
+
+
+def test_legend_names_each_mode_with_its_symmetry(tmp_path, monkeypatch):
+    from spinlabs.models import PhononSpectrum
+    from spinlabs.parsers import save_phonon_npz
+    from spinlabs.registry import ensure_db, register_file
+
+    n = 9  # modes 5 and 7 are the 5th and 7th of the full spectrum
+    labels = ["A1", "A1", "Ex", "Ey", "Ex", "Ey", "A1", "A2", "A1"]
+    spectrum = PhononSpectrum(
+        frequencies_mev=np.linspace(10.0, 90.0, n), eigenvectors=np.eye(n).reshape(n, 3, 3),
+        atom_frac_coords=np.zeros((3, 3)), atom_symbols=["C"] * 3, atomic_masses=np.full(3, 12.011),
+        lattice=np.eye(3) * 3.57, symmetries=labels, original_indices=np.arange(n),
+    )
+    phonon = tmp_path / "data" / "NV_512" / "phonon_data.npz"
+    phonon.parent.mkdir(parents=True)
+    save_phonon_npz(spectrum, phonon)
+    register_file(ensure_db(), phonon, "phonon", defect="NV", cell_size=512)
+
+    texts = _legend_texts(_plot_summary(tmp_path, monkeypatch))
+    assert "5: Ex" in texts and "7: A1" in texts
+
+
+def test_legend_falls_back_to_mode_numbers_without_phonon_data(tmp_path, monkeypatch, caplog):
+    texts = _legend_texts(_plot_summary(tmp_path, monkeypatch))
+    assert "5" in texts and "7" in texts
+    assert "no registered phonon data for NV_512" in caplog.text
+
+
 def test_analyse_measures_the_linear_and_quadratic_terms(tmp_path):
     rows, sigma, offset = analyse(_pack(tmp_path / "NV.npz"))
     assert [mode for mode, *_ in rows] == [5, 7]

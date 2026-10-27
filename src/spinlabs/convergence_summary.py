@@ -114,6 +114,51 @@ def column_title(path) -> str:
     return f"{title} [{key}]" if key and key not in STANDARD_KEYS else title
 
 
+def _registered_symmetries(defect: str, cell: int, n_needed: int) -> tuple[tuple[str, ...], Path] | None:
+    """Symmetry labels of the first registered full phonon spectrum of defect_cell with n_needed modes or more."""
+    from spinlabs.parsers import parse_phonon_data
+    from spinlabs.registry import ensure_db, find_phonon
+    from spinlabs.symmetry import classify_and_pair
+
+    for path in find_phonon(ensure_db(), defect, cell):
+        spectrum = parse_phonon_data(path)
+        if spectrum.n_modes < n_needed:
+            continue
+        if spectrum.symmetries is None:
+            classify_and_pair(spectrum)
+        return tuple(str(s) for s in spectrum.symmetries), path
+    return None
+
+
+def mode_symmetries(path, modes, cache: dict | None = None) -> dict[int, str]:
+    """Symmetry label per mode (1-based numbers in the full spectrum) from the defect's registered phonon data.
+
+    Empty, with a warning, when the pack names no defect/cell or no registered spectrum covers the modes.
+    ``cache`` keeps parsed spectra between the packs of one figure (a defect's columns share one).
+    """
+    cache = {} if cache is None else cache
+    meta = load_convergence(path).metadata
+    name = f"{meta.get('defect')}_{meta.get('cell')}"
+    if not modes:
+        return {}
+    if meta.get("defect") is None or meta.get("cell") is None:
+        LOGGER.warning(f"{Path(path).name} names no defect/cell; legend without mode symmetries")
+        return {}
+    key = (str(meta["defect"]), int(meta["cell"]), max(modes))
+    if key not in cache:
+        cache[key] = _registered_symmetries(*key)
+    found = cache[key]
+    if found is None:
+        LOGGER.warning(
+            f"no registered phonon data for {name} covers modes up to {max(modes)}; legend without mode symmetries "
+            "(package the defect folder to register its phonon_data.npz)"
+        )
+        return {}
+    labels, source = found
+    LOGGER.debug(f"mode symmetries of {name} from {source}")
+    return {m: labels[m - 1] for m in modes}
+
+
 def plot_signed(ax, rows, marker, color, yerr, alpha, big=9, small=5):
     """Points at |Q|; nearly equal at +-Q, so the -Q ring first and a smaller +Q dot inside it."""
     for side, face, ms in ((-1, "white", big), (1, color, small)):
@@ -130,6 +175,7 @@ def plot_convergence_summary(
     packs = [Path(p) for p in packs]
     # each column ticks its own pack's step sizes, so only the rows of one column share x
     fig, axes = plt.subplots(3, len(packs), figsize=(7.5 * len(packs), 13), squeeze=False, sharex="col")
+    spectra: dict = {}  # registered phonon symmetries, parsed once per figure
     for col, path in enumerate(packs):
         rows, sigma, offset = analyse(path, modes, noise, target, tol)
         title = column_title(path)
@@ -140,6 +186,7 @@ def plot_convergence_summary(
             )
             rows = rows[:len(COLORS)]
         LOGGER.info(f"{title}: {len(rows)} modes, noise sigma {sigma:.3g} MHz, D0 offset {offset:.3g} MHz ({path})")
+        symmetries = mode_symmetries(path, [r[0] for r in rows], spectra)
         first_ax, second_ax, snr_ax = axes[:, col]
         steps = np.concatenate([np.abs(p[~np.isclose(p, 0.0)]) for _, p, *_ in rows]) if rows else np.array([0.01, 0.3])
         q = np.geomspace(steps.min() / 2, steps.max() * 1.5, 200)
@@ -181,8 +228,11 @@ def plot_convergence_summary(
         second_ax.set_ylabel(r"second order $\|D(2Q) - 2D(Q) + D_0\| / Q^2$ (MHz/Q²)")
         snr_ax.set_ylabel("SNR of the finite difference")
         snr_ax.set_xlabel("|Q| (step size)")
-        mode_handles = [Line2D([], [], marker="o", ls="", color=c, ms=7, label=f"mode {m}") for c, (m, *_) in
-                        zip(COLORS, rows)]
+        # "<mode>: <symmetry>", or the bare mode number when the symmetry is unknown
+        mode_handles = [
+            Line2D([], [], marker="o", ls="", color=c, ms=7, label=f"{m}: {symmetries[m]}" if m in symmetries else f"{m}")
+            for c, (m, *_) in zip(COLORS, rows)
+        ]
         error_handle = Line2D([], [], ls="--", color="0.35", label="error incl. D0 offset")
         modes_legend = first_ax.legend(handles=mode_handles, loc="lower right", fontsize=10)
         first_ax.add_artist(modes_legend)
