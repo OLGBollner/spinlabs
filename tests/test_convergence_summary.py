@@ -128,28 +128,40 @@ def test_legend_falls_back_to_mode_numbers_without_phonon_data(tmp_path, monkeyp
     assert "no registered phonon data for NV_512" in caplog.text
 
 
-def _report(lo, hi, *, resolved=True, next_resolved=True):
-    """The SNR report fields shade_safe_windows reads, for the first order."""
+def _row(mode, lo, hi, *, snr=100.0, resolved=True, next_resolved=True):
+    """A summary row with the SNR report fields shade_safe_windows reads, for the first order.
+
+    The finite difference has SNR ``snr`` at each measured step (0.025 and 0.05, at +-Q).
+    """
     from types import SimpleNamespace
 
-    return SimpleNamespace(b=10.0, c=1.0, q_lo1=lo, q_hi1=hi, b_resolved=resolved, c_resolved=next_resolved)
+    report = SimpleNamespace(
+        b=10.0, c=1.0, q_lo1=lo, q_hi1=hi, b_resolved=resolved, c_resolved=next_resolved, target=3.0,
+        first_order=lambda q: (np.full(np.shape(q), 1 / snr), np.zeros(np.shape(q))),
+    )
+    first = np.array([[q, 10.0] for q in (-0.05, -0.025, 0.025, 0.05)])
+    return mode, None, first, None, report
 
 
 def test_safe_windows_are_banded_per_mode_and_shaded_where_all_overlap(caplog):
     import matplotlib.pyplot as plt
 
     rows = [
-        (5, None, None, None, _report(0.02, 0.1)),
-        (7, None, None, None, _report(0.05, 0.2)),
-        (9, None, None, None, _report(0.01, 0.03, next_resolved=False)),  # upper end not limited
-        (11, None, None, None, _report(0.001, 1.0, resolved=False)),  # b ~ 0: no window, no limit
+        _row(5, 0.02, 0.1),
+        _row(7, 0.05, 0.2),
+        _row(9, 0.01, 0.03, next_resolved=False),  # upper end not limited
+        _row(11, 0.001, 1.0, resolved=False),  # b ~ 0: no window, no limit
+        _row(13, 0.08, 0.3, snr=2.0),  # below SNR 3 at every measured step: left out
     ]
     fig, ax = plt.subplots()
     with caplog.at_level("INFO", logger="spinlabs"):
-        summary.shade_safe_windows(ax, rows, 1, (0.01, 0.3), "NV_512 all bands first order")
-    bands = [line.get_xdata() for line in ax.lines if line.get_linewidth() == summary.BAND_WIDTH]
-    assert [list(b) for b in bands] == [[0.02, 0.1], [0.05, 0.2], [0.01, 0.3]]  # mode 9 reaches the axis
-    assert "safe |Q| for all modes 0.05 .. 0.1" in caplog.text  # largest lower end, smallest known upper end
+        neglected = summary.shade_safe_windows(ax, rows, 1, (0.01, 0.3), "NV_512 all bands first order")
+    bands = [line for line in ax.lines if line.get_linewidth() == summary.BAND_WIDTH]
+    assert [list(b.get_xdata()) for b in bands] == [[0.02, 0.1], [0.05, 0.2], [0.01, 0.3], [0.08, 0.3]]
+    assert bands[-1].get_alpha() < bands[0].get_alpha()  # the left-out mode is drawn faint
+    assert neglected == [13]
+    # largest lower end and smallest known upper end of the modes kept: mode 13's 0.08 does not count
+    assert "safe |Q| for all modes 0.05 .. 0.1" in caplog.text
     plt.close(fig)
 
 

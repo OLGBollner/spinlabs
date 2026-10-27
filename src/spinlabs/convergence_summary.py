@@ -14,7 +14,8 @@ of two rows:
 In both rows a band along each mode's line marks its safe |Q|: from where the finite
 difference's SNR (b Q / err1, 2 c Q^2 / err2) reaches the target to where its truncation
 error (c Q / b, 3 d Q / c) reaches the tolerance. The shaded column is the |Q| safe for every
-mode of the pack (convergence.common_window).
+mode of the pack (convergence.common_window), leaving out a mode whose finite difference stays
+below the SNR target at every measured step: its coupling is too weak to matter (its band is faint).
 
 Every norm is over the 5 traceless parts (convergence.traceless_parts), as the fit and the
 SNR use them. The grey dashed curve in a quotient row is the error of that quotient with
@@ -177,36 +178,58 @@ def safe_window(r, order: int) -> tuple[float, float, bool] | None:
     return (r.q_lo2, r.q_hi2, r.d_resolved) if r.c_resolved else None
 
 
-def shade_safe_windows(ax, rows, order: int, xlim: tuple[float, float], name: str) -> None:
+def below_target_everywhere(r, measured, order: int) -> bool:
+    """Whether a mode's finite difference stays under the SNR target at every step that was measured.
+
+    Such a mode is within noise at all these amplitudes: its coupling is too weak to matter next to
+    the measured ones, so it does not get to narrow the |Q| safe for all modes.
+    """
+    q = np.unique(np.abs(np.asarray(measured, dtype=float)))
+    if not len(q):
+        return False
+    relative_error = r.first_order(q)[0] if order == 1 else r.second_order(q)[0]
+    return bool(np.all(1 / relative_error < r.target))
+
+
+def shade_safe_windows(ax, rows, order: int, xlim: tuple[float, float], name: str) -> list[int]:
     """Each mode's safe |Q| as a band along its fit line, and the |Q| safe for every mode as a column.
 
     As convergence.common_window: the column runs from the largest lower end to the smallest
     known upper end; a mode whose upper end is not limited by these amplitudes reaches the axis.
+    A mode below the SNR target at every measured step (below_target_everywhere) is left out of
+    the column and its band drawn faint. Returns those neglected modes.
     """
-    los, his = [], []
-    for color, (mode, _p, _first, _second, r) in zip(COLORS, rows):
+    los, his, neglected = [], [], []
+    for color, (mode, _p, first, second, r) in zip(COLORS, rows):
         window = safe_window(r, order)
         if window is None:
             continue
         lo, hi, known = window
-        los.append(lo)
-        if known:
-            his.append(hi)
+        weak = below_target_everywhere(r, (first if order == 1 else second)[:, 0], order)
+        if weak:
+            neglected.append(mode)
+            LOGGER.info(f"{name}: mode {mode} is below SNR {r.target:g} at every measured step; left out of the "
+                        "|Q| safe for all modes")
+        else:
+            los.append(lo)
+            if known:
+                his.append(hi)
         start, end = max(lo, xlim[0]), min(hi, xlim[1]) if known else xlim[1]
         if start < end:
             level = r.b if order == 1 else 2 * r.c
-            ax.plot([start, end], [level, level], lw=BAND_WIDTH, alpha=BAND_ALPHA, color=color,
-                    solid_capstyle="butt", zorder=1)
+            ax.plot([start, end], [level, level], lw=BAND_WIDTH, alpha=BAND_ALPHA * (FAINT if weak else 1),
+                    color=color, solid_capstyle="butt", zorder=1)
         else:
             LOGGER.info(f"{name}: mode {mode} has no safe |Q| ({lo:.3g} .. {hi:.3g})")
     if not los:
-        return
+        return neglected
     lo, hi = max(los), min(his, default=xlim[1])
     if lo < hi:
         ax.axvspan(max(lo, xlim[0]), min(hi, xlim[1]), color=COMMON_COLOR, zorder=0, lw=0)
         LOGGER.info(f"{name}: safe |Q| for all modes {lo:.3g} .. {hi:.3g}" + ("" if his else " (upper end not limited)"))
     else:
         LOGGER.info(f"{name}: no |Q| is safe for all modes ({lo:.3g} .. {hi:.3g})")
+    return neglected
 
 
 def plot_signed(ax, rows, marker, color, yerr, alpha, big=9, small=5):
@@ -261,8 +284,10 @@ def plot_convergence_summary(
             ax.xaxis.set_minor_locator(NullLocator())
             ax.grid(True, which="major", color="0.9", linewidth=0.6)
             ax.set_xlim(q[0], q[-1])
-        for ax, order in ((first_ax, 1), (second_ax, 2)):
-            shade_safe_windows(ax, rows, order, (q[0], q[-1]), f"{title} {_ORDER_NAMES[order]}")
+        neglected = {
+            order: shade_safe_windows(ax, rows, order, (q[0], q[-1]), f"{title} {_ORDER_NAMES[order]}")
+            for ax, order in ((first_ax, 1), (second_ax, 2))
+        }
         first_ax.set_title(f"{title}: σ = {sigma:.2g} MHz, D0 offset {offset:.2g} MHz", fontsize=12)
         first_ax.set_ylabel(r"first order $\|D(Q) - D_0\| / Q$ (MHz/Q)")
         second_ax.set_ylabel(r"second order $\|D(2Q) - 2D(Q) + D_0\| / Q^2$ (MHz/Q²)")
@@ -273,11 +298,16 @@ def plot_convergence_summary(
             for c, (m, *_) in zip(COLORS, rows)
         ]
         error_handle = Line2D([], [], ls="--", color="0.35", label="error incl. D0 offset")
-        window_handles = [
-            Line2D([], [], lw=BAND_WIDTH, alpha=BAND_ALPHA, color="0.35", solid_capstyle="butt",
-                   label=f"mode's safe |Q| (SNR ≥ {target:g}, truncation ≤ {tol:.0%})"),
-            Patch(color=COMMON_COLOR, label="safe |Q| for all modes"),
-        ]
+        def window_handles(order):
+            handles = [
+                Line2D([], [], lw=BAND_WIDTH, alpha=BAND_ALPHA, color="0.35", solid_capstyle="butt",
+                       label=f"mode's safe |Q| (SNR ≥ {target:g}, truncation ≤ {tol:.0%})"),
+                Patch(color=COMMON_COLOR, label="safe |Q| for all modes"),
+            ]
+            if neglected[order]:
+                handles.insert(1, Line2D([], [], lw=BAND_WIDTH, alpha=BAND_ALPHA * FAINT, color="0.35",
+                                         solid_capstyle="butt", label=f"left out: SNR < {target:g} at every step"))
+            return handles
         modes_legend = first_ax.legend(handles=mode_handles, loc="lower right", fontsize=10)
         first_ax.add_artist(modes_legend)
         first_ax.legend(handles=[
@@ -285,14 +315,14 @@ def plot_convergence_summary(
             Line2D([], [], marker="o", ls="", color="0.35", mfc="white", label="−Q"),
             Line2D([], [], ls="-", color="0.35", label="b (fit, Q → 0)"),
             error_handle,
-            *window_handles,
+            *window_handles(1),
         ], loc="lower left", fontsize=10)
         second_ax.legend(handles=[
             Line2D([], [], marker="s", ls="", color="0.35", mfc="0.35", label="+Q"),
             Line2D([], [], marker="s", ls="", color="0.35", mfc="white", label="−Q"),
             Line2D([], [], ls="-", color="0.35", label="2c (fit, Q → 0)"),
             error_handle,
-            *window_handles,
+            *window_handles(2),
         ], loc="lower left", fontsize=10)
     fig.tight_layout()
     output = Path(output)
