@@ -601,8 +601,17 @@ def _register_conv(conn, npz_path: Path, data) -> bool:
 
 
 def _conv_method(suffix: str) -> str | None:
-    """'all' or 'approx' from a convergence folder suffix (test_all, test_occup), None when it says neither."""
-    return next((v for k, v in {"all": "all", "occup": "approx"}.items() if k in suffix), None)
+    """'all' or 'approx' from a convergence folder suffix, None when it says neither.
+
+    test_all / test_occup, or AE (all electrons) / UE (unpaired electrons) as a token,
+    e.g. AE_mass_weighted.
+    """
+    tokens = {t.lower() for t in re.split(r"[_.\-]", suffix)}
+    if "all" in suffix or "ae" in tokens:
+        return "all"
+    if "occup" in suffix or "ue" in tokens:
+        return "approx"
+    return None
 
 
 def _auto_ground_state(defect_folder: Path, method: str | None) -> Path | None:
@@ -613,7 +622,7 @@ def _auto_ground_state(defect_folder: Path, method: str | None) -> Path | None:
         zfs_folder = "ZFS_occup"
     else:
         LOGGER.warning(
-            f"{defect_folder.name}: convergence folder name says neither 'all' nor 'occup'; "
+            f"{defect_folder.name}: convergence folder name says neither 'all'/'AE' nor 'occup'/'UE'; "
             "d0 not stored (pass --ground-state OUTCAR)"
         )
         return None
@@ -701,7 +710,11 @@ def _scan_conv(args: argparse.Namespace, defect_folder: Path, root: Path) -> _Co
 
 
 def _format_steps(perts: list[float]) -> str:
-    """'±0.025 ±0.05' when every size was run at both signs, else the steps as found."""
+    """'±0.025 ±0.05' when every size was run at both signs, else the steps as found.
+
+    Q = 0 runs (<mode>_pert_0) are the unperturbed point, not a step, and are left out.
+    """
+    perts = [p for p in perts if p != 0]
     sizes = sorted({abs(p) for p in perts})
     if all(s in perts and -s in perts for s in sizes):
         return " ".join(f"±{s:g}" for s in sizes)

@@ -65,6 +65,7 @@ class ConvergenceScan:
     unfinished: list[str] = field(default_factory=list)  # run folders whose OUTCAR has no ZFS tensor
     n_missing_energy: int = 0
     displacement: str | None = None  # the job script's DISPLACEMENT, None when it says nothing
+    n_zero_runs: int = 0  # <mode>_pert_0 run folders (the unperturbed point, shared by every mode)
 
     @property
     def n_finished(self) -> int:
@@ -72,8 +73,13 @@ class ConvergenceScan:
 
     @property
     def n_grid(self) -> int:
-        """Size of the mode x step grid; more than n_runs when some run folders are missing."""
-        return len(self.modes) * len(self.perts)
+        """Runs expected: every mode at every nonzero step, plus the Q = 0 runs there are.
+
+        Not every mode needs its own Q = 0 run (convergence.load_convergence shares one), so a
+        missing one is no gap. More than n_runs when some run folders are missing.
+        """
+        nonzero = [p for p in self.perts if p != 0]
+        return len(self.modes) * len(nonzero) + self.n_zero_runs
 
 
 def scan_convergence(run_root: Path) -> ConvergenceScan:
@@ -108,7 +114,8 @@ def scan_convergence(run_root: Path) -> ConvergenceScan:
         else:
             n_missing += 1
     return ConvergenceScan(
-        run_root, modes, perts, tensors, energies, len(runs), unfinished, n_missing, tree_displacement(run_root)
+        run_root, modes, perts, tensors, energies, len(runs), unfinished, n_missing, tree_displacement(run_root),
+        n_zero_runs=sum(1 for _, p, _ in runs if p == 0),
     )
 
 

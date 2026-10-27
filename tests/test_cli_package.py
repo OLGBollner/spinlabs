@@ -262,6 +262,31 @@ def _conv_steps_tree(tmp_path, isym="3"):
     return root
 
 
+def test_ae_ue_folders_find_their_ground_state_and_q0_runs_are_no_steps(tmp_path, capsys):
+    """convergence_AE_* is all bands (ZFS_hyp), convergence_UE_* the unpaired electrons (ZFS_occup).
+
+    Only some modes have their own Q = 0 run: that is no missing run, and 0 is no step.
+    """
+    for folder in ("convergence_AE_mass_weighted", "convergence_UE_mass_weighted"):
+        runs = tmp_path / "NV_512" / folder / "runs"
+        for mode in (55, 1525, 1533):
+            for p in (-0.05, -0.025, 0.025, 0.05):
+                _outcar(runs / f"{mode}_pert_{p:g}" / "OUTCAR", (1.0, 1.0, 2.0))
+        _outcar(runs / "55_pert_0" / "OUTCAR", (1.0, 1.0, 2.0))
+    _outcar(tmp_path / "NV_512" / "ZFS_hyp" / "OUTCAR", (1.0, 1.0, 4.0))
+    _outcar(tmp_path / "NV_512" / "ZFS_occup" / "OUTCAR", (1.0, 1.0, 3.0))
+
+    _run_conv(args=_conv_args(tmp_path, Path("__auto__")), defect_folder=tmp_path / "NV_512")
+    out = capsys.readouterr().out
+    rows = {line.split()[1]: line.split() for line in out.splitlines() if line.startswith("NV_512")}
+    assert rows["AE_mass_weighted"][2] == "all_bands" and rows["UE_mass_weighted"][2] == "defect_band_approx"
+    assert rows["AE_mass_weighted"][-3:] == ["±0.025", "±0.05", "13/13"]  # 3 modes x 4 steps + one Q = 0 run
+    assert "no run folder" not in out
+    assert str(tmp_path / "NV_512" / "ZFS_hyp" / "OUTCAR") in out and str(tmp_path / "NV_512" / "ZFS_occup" / "OUTCAR") in out
+    ue = next((tmp_path / "data").rglob("NV_512_*_conv_UE_mass_weighted.npz"))
+    assert ue.parent.parent.name == "defect_band_approx"
+
+
 def test_conv_scan_prints_summary_and_saves_nothing(tmp_path, capsys):
     _conv_steps_tree(tmp_path)
     _run_conv(args=_conv_args(tmp_path, Path("__auto__"), yes=False, scan=True), defect_folder=tmp_path / "NV_512")
