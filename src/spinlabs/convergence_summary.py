@@ -37,7 +37,6 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 import numpy as np
 from matplotlib.lines import Line2D
-from matplotlib.patches import Patch
 from matplotlib.ticker import NullLocator
 
 from spinlabs.convergence import (
@@ -307,10 +306,9 @@ def plot_convergence_summary(
             ax.xaxis.set_minor_locator(NullLocator())
             ax.grid(True, which="major", color="0.9", linewidth=0.6)
             ax.set_xlim(q[0], q[-1])
-        neglected = {
-            order: shade_safe_windows(ax, rows, order, (q[0], q[-1]), f"{title} {_ORDER_NAMES[order]}", weak_fraction)
-            for ax, order in ((first_ax, 1), (second_ax, 2))
-        }
+        # the shading is explained in the figure text, not the legend
+        for ax, order in ((first_ax, 1), (second_ax, 2)):
+            shade_safe_windows(ax, rows, order, (q[0], q[-1]), f"{title} {_ORDER_NAMES[order]}", weak_fraction)
         first_ax.set_title(f"{title}: σ = {sigma:.2g} MHz, D0 offset {offset:.2g} MHz", fontsize=12)
         first_ax.set_ylabel(r"first order $\|D(Q) - D_0\| / Q$ (MHz/Q)")
         second_ax.set_ylabel(r"second order $\|D(2Q) - 2D(Q) + D_0\| / Q^2$ (MHz/Q²)")
@@ -321,18 +319,6 @@ def plot_convergence_summary(
             for c, (m, *_) in zip(COLORS, rows)
         ]
         error_handle = Line2D([], [], ls="--", color="0.35", label="error incl. D0 offset")
-        def window_handles(order):
-            handles = [
-                Line2D([], [], lw=BAND_WIDTH, alpha=BAND_ALPHA, color="0.35", solid_capstyle="butt",
-                       label=f"mode's safe |Q| (SNR ≥ {target:g}, truncation ≤ {tol:.0%})"),
-                Patch(color=COMMON_COLOR, label="safe |Q| for all modes"),
-            ]
-            if neglected[order]:
-                handles.insert(1, Line2D(
-                    [], [], lw=BAND_WIDTH, alpha=BAND_ALPHA * FAINT, color="0.35", solid_capstyle="butt",
-                    label=f"weak mode, left out: SNR < {target:g} at every\nstep or < {weak_fraction:.0%} of the strongest",
-                ))
-            return handles
         modes_legend = first_ax.legend(handles=mode_handles, loc="lower right", fontsize=10)
         first_ax.add_artist(modes_legend)
         first_ax.legend(handles=[
@@ -340,14 +326,12 @@ def plot_convergence_summary(
             Line2D([], [], marker="o", ls="", color="0.35", mfc="white", label="−Q"),
             Line2D([], [], ls="-", color="0.35", label="b (fit, Q → 0)"),
             error_handle,
-            *window_handles(1),
         ], loc="lower left", fontsize=10)
         second_ax.legend(handles=[
             Line2D([], [], marker="s", ls="", color="0.35", mfc="0.35", label="+Q"),
             Line2D([], [], marker="s", ls="", color="0.35", mfc="white", label="−Q"),
             Line2D([], [], ls="-", color="0.35", label="2c (fit, Q → 0)"),
             error_handle,
-            *window_handles(2),
         ], loc="lower left", fontsize=10)
     fig.tight_layout()
     output = Path(output)
