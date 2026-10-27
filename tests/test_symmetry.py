@@ -50,13 +50,66 @@ class TestPointGroupDetection:
 # ---------------------------------------------------------------------------
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+# The two small cells are committed as ordinary git blobs (~1.5 MB total), so
+# CI gets real DFT data with zero LFS bandwidth.
+SMALL_CELLS = {
+    "NV_64": REPO_ROOT / "NV_64" / "phonon_data.npz",
+    "ClV_128": REPO_ROOT / "ClV_128" / "phonon_data.npz",
+}
+# NV_512 (19 MB) stays in LFS and is only used for whole-cell numbers (mode
+# counts, legacy labels). Those tests skip when the file is an LFS pointer.
 NV_PATH = REPO_ROOT / "NV_512" / "phonon_data.npz"
-CLV_PATH = REPO_ROOT / "ClV_128" / "phonon_data.npz"
+# Whole frequency clusters cut from NV_512, including the only genuinely
+# mixed A1/Ey pair (313/315); a plain git blob, so CI always has it.
+# Rebuild with scripts/make_nv512_test_subset.py.
+NV_SUBSET_PATH = REPO_ROOT / "NV_512" / "phonon_data_subset.npz"
+CLV_PATH = SMALL_CELLS["ClV_128"]
+CELL_PATHS = {**SMALL_CELLS, "NV_512": NV_PATH}
+
+# Pinned per-cell inventories: total modes, modes left after
+# filter_sym_pairs(), then per-label counts of the filtered spectrum.
+INVENTORY = {
+    "NV_64": {"n_modes": 189, "filtered": 126, "Ex": 63, "A1": 39, "A2": 24},
+    "ClV_128": {"n_modes": 381, "filtered": 254, "Ex": 127, "A1": 79, "A2": 48},
+    # 511 atoms -> 1533 raw modes = A1(287) + A2(224) + 2E(511).
+    "NV_512": {"n_modes": 1533, "filtered": 1022, "Ex": 511, "A1": 287, "A2": 224},
+}
 
 
-@pytest.mark.parametrize("path", [NV_PATH, CLV_PATH])
+def _real_phonon(path):
+    """Return the path if real data is present. Only the LFS-tracked NV_512
+    file may be absent (skip); the committed blobs must be there (fail)."""
+    p = Path(path)
+    missing = None
+    if not p.is_file() or p.stat().st_size < 1024:
+        missing = f"real phonon data not available: {p}"
+    else:
+        with p.open("rb") as fh:
+            if fh.read(64).startswith(b"version https://git-lfs"):
+                missing = f"LFS pointer, data not pulled: {p}"
+    if missing is None:
+        return p
+    if p == NV_PATH:
+        pytest.skip(missing)
+    pytest.fail(missing)
+
+
+def _mode(spec, original):
+    """Position of full-run mode number ``original`` in ``spec``."""
+    if spec.original_indices is None:
+        return original
+    return int(np.flatnonzero(spec.original_indices == original)[0])
+
+
+CELL_CASES = [pytest.param(path, id=name) for name, path in SMALL_CELLS.items()] + [
+    pytest.param(NV_SUBSET_PATH, id="NV_512_subset"),
+    pytest.param(NV_PATH, id="NV_512"),
+]
+
+
+@pytest.mark.parametrize("path", CELL_CASES)
 def test_matches_legacy_c3v_labels(path):
-    spec = parse_phonon_npz(path)
+    spec = parse_phonon_npz(_real_phonon(path))
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         legacy = spec.analyze_c3v_symmetry()
@@ -65,8 +118,9 @@ def test_matches_legacy_c3v_labels(path):
     assert match / len(legacy) > 0.95, f"only {match}/{len(legacy)} labels match"
 
 
-def test_e_pairs_are_detected_as_degenerate():
-    spec = parse_phonon_npz(NV_PATH)
+@pytest.mark.parametrize("path", CELL_CASES)
+def test_e_pairs_are_detected_as_degenerate(path):
+    spec = parse_phonon_npz(_real_phonon(path))
     labels, groups = classify_modes(spec)
     # In C3v, E modes come in degenerate pairs; Ex/Ey partners share a
     # degeneracy group (same parent irrep, same frequency).
@@ -75,11 +129,12 @@ def test_e_pairs_are_detected_as_degenerate():
     assert all(len(g) >= 2 for g in e_groups)
 
 
-def test_ex_ey_share_degeneracy_group():
-    spec = parse_phonon_npz(CLV_PATH)
+@pytest.mark.parametrize("path", CELL_CASES)
+def test_ex_ey_share_degeneracy_group(path):
+    spec = parse_phonon_npz(_real_phonon(path))
     labels, groups = classify_modes(spec)
-    # ClV-128 has clean Ex/Ey pairs: every Ex must sit in a 2-member group
-    # with its Ey partner at the same frequency.
+    # Both cells have clean Ex/Ey pairs: every Ex must sit in a 2-member
+    # group with its Ey partner at the same frequency.
     for i, lab in enumerate(labels):
         if lab == "Ex":
             g = next(g for g in groups if i in g)
@@ -87,10 +142,11 @@ def test_ex_ey_share_degeneracy_group():
             assert partners == {"Ey"}
 
 
-def test_accidental_degeneracies_do_not_merge():
+@pytest.mark.parametrize("path", CELL_CASES)
+def test_accidental_degeneracies_do_not_merge(path):
     # Two modes of different parent irreps at the same frequency must not
     # land in the same degeneracy group.
-    spec = parse_phonon_npz(NV_PATH)
+    spec = parse_phonon_npz(_real_phonon(path))
     labels, groups = classify_modes(spec)
     for g in groups:
         parents = {_parent_label(labels[j]) for j in g}
@@ -173,23 +229,76 @@ def test_filter_rejects_broken_original_indices():
         check_original_indices(np.array([0.0, 1.0]), n_modes=2)
 
 
-def test_filter_original_indices_valid_on_real_data():
-    spec = parse_phonon_npz(NV_PATH)
+@pytest.mark.parametrize("cell", sorted(INVENTORY))
+def test_filter_original_indices_valid_on_real_data(cell):
+    spec = parse_phonon_npz(_real_phonon(CELL_PATHS[cell]))
     red = spec.filter_sym_pairs()
     check_original_indices(red.original_indices, red.n_modes, n_full=spec.n_modes)
-    labels = [str(s) for s in red.symmetries]
-    c = Counter(labels)
-    # Group-theoretic invariant for NV-512: 511 atoms -> 1533 raw modes
-    # = A1(287) + A2(224) + 2E(511); after filtering, no Ey survives.
+    c = Counter(str(s) for s in red.symmetries)
+    want = INVENTORY[cell]
+    # Group-theoretic invariant: every mode is A1 + A2 + 2E, and after
+    # filtering no Ey survives (one E partner per pair is dropped).
+    assert spec.n_modes == want["n_modes"]
     assert c["Ey"] == 0
-    assert c["Ex"] == 511
-    assert c["A1"] == 287 and c["A2"] == 224
-    assert red.n_modes == 1022
+    assert c["Ex"] == want["Ex"]
+    assert c["A1"] == want["A1"] and c["A2"] == want["A2"]
+    assert red.n_modes == want["filtered"]
 
 
 # ---------------------------------------------------------------------------
 # Symmetrization of accidentally mixed near-degenerate modes
 # ---------------------------------------------------------------------------
+
+
+def _accidental_a1_e_clusters(spec, tol_mev=0.01):
+    """Frequency clusters, as symmetrize_degenerate_groups forms them, that hold
+    an A1 together with an Ex/Ey pair: accidental 1D/2D degeneracies."""
+    from spinlabs.symmetry import _build_clusters
+
+    labels = [str(s) for s in spec.symmetries]
+    clusters = _build_clusters(np.asarray(spec.frequencies_mev, dtype=float), tol_mev)
+    return [c for c in clusters if {"A1", "Ex", "Ey"} <= {labels[j] for j in c}]
+
+
+def _class_chars_ok(chars, label):
+    """Characters on E/C3/C3^2 match the label's irrep: A1 -> (1,1,1),
+    E -> (1,-0.5,-0.5)."""
+    want3 = np.array([1.0, 1.0, 1.0]) if label == "A1" else np.array([1.0, -0.5, -0.5])
+    return np.allclose(chars[:3], want3, atol=0.05)
+
+
+# NV_512 subset first: it carries the mixed pair and is always present.
+MIXED_CASES = [
+    pytest.param(NV_SUBSET_PATH, id="NV_512_subset"),
+    pytest.param(NV_PATH, id="NV_512"),
+]
+
+
+@pytest.mark.parametrize("path", MIXED_CASES)
+def test_symmetrize_accidental_a1_e_degeneracies(path):
+    """Real accidental A1/E degeneracies: at least one mode starts mixed, and
+    after symmetrization every mode has its label's class characters."""
+    from spinlabs.symmetry import (
+        symmetrize_degenerate_groups,
+        defect_frame_operations,
+        _mode_characters,
+    )
+
+    spec = parse_phonon_npz(_real_phonon(path))
+    clusters = _accidental_a1_e_clusters(spec)
+    assert clusters, "no accidental A1/E degeneracy found in this cell"
+    members = [i for c in clusters for i in c]
+    labels = [str(s) for s in spec.symmetries]
+    before = _mode_characters(spec, defect_frame_operations(spec))
+    # Guard against a vacuous pass: the input must actually be mixed.
+    assert any(not _class_chars_ok(before[i], labels[i]) for i in members if labels[i] != "A2")
+
+    sym = symmetrize_degenerate_groups(spec)
+    chars = _mode_characters(sym, defect_frame_operations(sym))
+    new_labels = [str(s) for s in sym.symmetries]
+    for i in members:
+        if new_labels[i] != "A2":
+            assert _class_chars_ok(chars[i], new_labels[i]), (i, new_labels[i], chars[i])
 
 
 def test_symmetrize_mixed_a1_e_pair_on_nv512():
@@ -204,19 +313,20 @@ def test_symmetrize_mixed_a1_e_pair_on_nv512():
         _mode_characters,
     )
 
-    spec = parse_phonon_npz(NV_PATH)
+    spec = parse_phonon_npz(_real_phonon(NV_SUBSET_PATH))
     labels = [str(s) for s in spec.symmetries]
-    assert labels[313] == "Ey" and labels[314] == "Ex" and labels[315] == "A1"
+    i313, i314, i315 = (_mode(spec, m) for m in (313, 314, 315))
+    assert labels[i313] == "Ey" and labels[i314] == "Ex" and labels[i315] == "A1"
+    before = _mode_characters(spec, defect_frame_operations(spec))
+    assert not _class_chars_ok(before[i313], "Ey") and not _class_chars_ok(before[i315], "A1")
 
     sym = symmetrize_degenerate_groups(spec)
     ops = defect_frame_operations(sym)
     chars = _mode_characters(sym, ops)
     new_labels = [str(s) for s in sym.symmetries]
-    for i in (313, 314, 315):
+    for i in (i313, i314, i315):
         c = chars[i]
-        # class characters: A1 -> (1,1,1); E -> (1, -0.5, -0.5) for E/C3/C3^2
-        want3 = np.array([1.0, 1.0, 1.0]) if new_labels[i] == "A1" else np.array([1.0, -0.5, -0.5])
-        assert np.allclose(c[:3], want3, atol=0.05), (i, new_labels[i], c)
+        assert _class_chars_ok(c, new_labels[i]), (i, new_labels[i], c)
         if new_labels[i] in ("Ex", "Ey"):
             # mirror characters are cos(2 phi_k): absolute values must form
             # the same multiset as the pure reference mode's, and the sublabel
@@ -224,13 +334,15 @@ def test_symmetrize_mixed_a1_e_pair_on_nv512():
             assert sorted(np.abs(c[3:]).round(3)) == sorted([0.5, 0.5, 1.0]), (i, c)
             assert (c[3] > 0) == (new_labels[i] == "Ex"), (i, new_labels[i], c)
     # unchanged elsewhere: pure modes stay put
-    assert np.allclose(sym.eigenvectors[309], spec.eigenvectors[309], atol=1e-8)
+    i309 = _mode(spec, 309)
+    assert np.allclose(sym.eigenvectors[i309], spec.eigenvectors[i309], atol=1e-8)
 
 
-def test_symmetrize_is_fixpoint_on_pure_groups():
+@pytest.mark.parametrize("path", CELL_CASES)
+def test_symmetrize_is_fixpoint_on_pure_groups(path):
     from spinlabs.symmetry import symmetrize_degenerate_groups
 
-    spec = parse_phonon_npz(CLV_PATH)
+    spec = parse_phonon_npz(_real_phonon(path))
     sym = symmetrize_degenerate_groups(spec)
     # every vector either unchanged or reassigned within its group; total
     # label multiset must be preserved
@@ -240,13 +352,18 @@ def test_symmetrize_is_fixpoint_on_pure_groups():
 
 
 def test_symmetrize_recover_artificial_mixing():
-    """Rotate a known-pure A1/Ey pair by theta, symmetrize, check recovery."""
+    """Rotate a known-pure A1/Ey pair by theta, symmetrize, check recovery.
+
+    Uses the NV_512 pair that recovers exactly (modes 313/315). On NV_64 and
+    ClV_128 the same rotation is only partially undone, so this
+    exact-recovery claim is not asserted there.
+    """
     from spinlabs.symmetry import symmetrize_degenerate_groups
     import dataclasses
 
-    spec = parse_phonon_npz(NV_PATH)
+    spec = parse_phonon_npz(_real_phonon(NV_SUBSET_PATH))
     pure = symmetrize_degenerate_groups(spec)  # ground-truth pure states
-    ia, ie = 315, 313  # A1 and Ey slots
+    ia, ie = _mode(spec, 315), _mode(spec, 313)  # A1 and Ey slots
     theta = 0.35
     va = pure.eigenvectors[ia].copy()
     ve = pure.eigenvectors[ie].copy()

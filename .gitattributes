@@ -1,2 +1,8 @@
 *.npz filter=lfs diff=lfs merge=lfs -text
 scripts/derivatives/*.npz filter=lfs diff=lfs merge=lfs -text
+# Small real cells used by the test suite: kept as ordinary git blobs so CI
+# needs no LFS bandwidth. Only the big NV_512 data stays in LFS; its test
+# subset (scripts/make_nv512_test_subset.py) is a plain blob too.
+NV_64/phonon_data.npz -filter -diff -merge -text
+ClV_128/phonon_data.npz -filter -diff -merge -text
+NV_512/phonon_data_subset.npz -filter -diff -merge -text
