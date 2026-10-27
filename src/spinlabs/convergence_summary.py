@@ -279,8 +279,11 @@ def plot_convergence_summary(
     ``weak_fraction``: see shade_safe_windows.
     """
     packs = [Path(p) for p in packs]
-    # each column ticks its own pack's step sizes, so only the rows of one column share x
-    fig, axes = plt.subplots(2, len(packs), figsize=(7.5 * len(packs), 9.5), squeeze=False, sharex="col")
+    # each column ticks its own pack's step sizes, so only the rows of one column share x; a row shares
+    # y across the columns, so the packs (e.g. all bands and defect band) compare on one scale
+    fig, axes = plt.subplots(
+        2, len(packs), figsize=(7.5 * len(packs), 9.5), squeeze=False, sharex="col", sharey="row"
+    )
     spectra: dict = {}  # registered phonon symmetries, parsed once per figure
     for col, path in enumerate(packs):
         rows, sigma, offset = analyse(path, modes, noise, target, tol)
@@ -321,8 +324,9 @@ def plot_convergence_summary(
         for ax, order in ((first_ax, 1), (second_ax, 2)):
             shade_safe_windows(ax, rows, order, (q[0], q[-1]), f"{title} {_ORDER_NAMES[order]}", weak_fraction)
         first_ax.set_title(f"{title}: σ = {sigma:.2g} MHz, D0 offset {offset:.2g} MHz", fontsize=12)
-        first_ax.set_ylabel(r"first order $\|D(Q) - D_0\| / Q$ (MHz/Q)")
-        second_ax.set_ylabel(r"second order $\|D(2Q) - 2D(Q) + D_0\| / Q^2$ (MHz/Q²)")
+        if col == 0:  # the rows share y: one label per row
+            first_ax.set_ylabel(r"first order $\|D(Q) - D_0\| / Q$ (MHz/Q)")
+            second_ax.set_ylabel(r"second order $\|D(2Q) - 2D(Q) + D_0\| / Q^2$ (MHz/Q²)")
         second_ax.set_xlabel("|Q| (step size)")
         # "<mode>: <symmetry>", or the bare mode number when the symmetry is unknown
         mode_handles = [
