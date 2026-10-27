@@ -22,8 +22,13 @@ def mode_numbers(phonon: Path) -> list[int]:
         return list(range(1, int(data["freqs"].shape[0]) + 1))
 
 
-def mode_table(phonon: Path) -> list[tuple[int, float, str]]:
-    """(mode number, frequency in cm^-1, symmetry label) per mode; labels are classified if the npz has none."""
+def mode_table(phonon: Path) -> list[tuple[int, float, str, float, float]]:
+    """(mode number, frequency in cm^-1, symmetry label, <r>, P(2 shells)) per mode.
+
+    Labels are classified if the npz has none. <r> (Angstrom) and P(2 shells) say how near the defect
+    the mode lives (PhononSpectrum.mean_defect_distance, .defect_participation); NaN when the defect
+    centre cannot be found.
+    """
     from spinlabs.parsers import parse_phonon_npz
     from spinlabs.symmetry import classify_and_pair
 
@@ -38,14 +43,27 @@ def mode_table(phonon: Path) -> list[tuple[int, float, str]]:
         raise ValueError(
             f"{len(labels)} symmetry labels for {len(numbers)} modes; re-run sym_analysis.py to regenerate this npz"
         )
-    return [(n, float(f), str(label)) for n, f, label in zip(numbers, freqs, labels)]
+    try:
+        mean_r, near = spectrum.mean_defect_distance, spectrum.defect_participation
+    except (ValueError, TypeError) as exc:  # no or several defects found: the table still lists the modes
+        print(f"note: defect localisation not computed ({exc})", file=sys.stderr)
+        mean_r = near = np.full(len(numbers), np.nan)
+    return [
+        (n, float(f), str(label), float(r), float(p))
+        for n, f, label, r, p in zip(numbers, freqs, labels, mean_r, near)
+    ]
 
 
 def main(argv: list[str] | None = None) -> int:
     """``get_n_modes.py <phonon.npz> [--sym]``: the mode numbers on one line, or a table with --sym."""
     ap = argparse.ArgumentParser(prog="get_n_modes.py", description=__doc__.splitlines()[0])
     ap.add_argument("phonon", type=Path, help="phonon .npz the tree runs from")
-    ap.add_argument("--sym", action="store_true", help="print mode, frequency and symmetry per line")
+    ap.add_argument(
+        "--sym",
+        action="store_true",
+        help="print mode, frequency, symmetry and how near the defect it lives (<r> in Angstrom and the "
+        "fraction of its weight within the first two neighbour shells) per line",
+    )
     args = ap.parse_args(argv)
     if args.phonon.suffix != ".npz":
         ap.error(f"not an .npz file: {args.phonon}")
@@ -57,7 +75,7 @@ def main(argv: list[str] | None = None) -> int:
     except ValueError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
-    print("mode freq[cm-1] sym")
-    for n, freq, label in table:
-        print(f"{n} {freq:.2f} {label}")
+    print("mode freq[cm-1] sym r_mean[A] P_2shell")
+    for n, freq, label, mean_r, near in table:
+        print(f"{n} {freq:.2f} {label} {mean_r:.2f} {near:.3f}")
     return 0
