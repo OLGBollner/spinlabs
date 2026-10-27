@@ -52,7 +52,7 @@ def _capture_records():
     return Capture
 
 
-def test_configure_logging_default_console_level_is_warning():
+def test_configure_logging_default_console_level_is_info():
     get_logger()
     configure_logging()
     # The logger itself stays at DEBUG so DB logging sees the full stream;
@@ -61,7 +61,7 @@ def test_configure_logging_default_console_level_is_warning():
 
     assert sh is not None and sh in logger.handlers
     assert logger.level == logging.DEBUG
-    assert sh.level == logging.WARNING
+    assert sh.level == logging.INFO
 
 
 def test_configure_logging_verbosity_count_and_quiet():
@@ -70,15 +70,33 @@ def test_configure_logging_verbosity_count_and_quiet():
     get_logger()
 
     configure_logging(verbosity=0)
-    assert lu._stream_handler.level == logging.WARNING
-    configure_logging(verbosity=1)
     assert lu._stream_handler.level == logging.INFO
-    configure_logging(verbosity=2)
+    configure_logging(verbosity=1)
     assert lu._stream_handler.level == logging.DEBUG
     configure_logging(verbosity=5)  # extra -v caps at DEBUG
     assert lu._stream_handler.level == logging.DEBUG
     configure_logging(quiet=True)
-    assert lu._stream_handler.level == logging.ERROR
+    assert lu._stream_handler.level == logging.WARNING
+
+
+def test_console_layout_sections_indent_and_prefixes(capsys):
+    from spinlabs.logging_utils import section
+
+    configure_logging()
+    log = get_logger("spinlabs.test")
+    log.info("before any chapter")
+    section(log, "Plot convergence: NV_512 test_all")
+    log.info("saved figure: a.png\nsecond line")
+    log.warning("mode 7: fewer than 2 finished runs, skipping")
+    log.error("plot failed")
+    log.debug("hidden at the default level")
+    assert capsys.readouterr().out == (
+        "before any chapter\n"
+        "\n== Plot convergence: NV_512 test_all ==\n"
+        "  saved figure: a.png\n  second line\n"
+        "  warning: mode 7: fewer than 2 finished runs, skipping\n"
+        "  error: plot failed\n"
+    )
 
 
 def test_configure_logging_does_not_stack_handlers():
@@ -113,8 +131,8 @@ def test_pipeline_uses_logging_not_print(tmp_path, dummy_coupling_file, capsys):
 
     messages = [r.getMessage() for r in Capture.records if r.name.startswith("spinlabs")]
     assert messages, "expected pipeline log records"
-    assert any("Initialized run" in m for m in messages)
-    assert any("Run successfully completed" in m for m in messages)
+    assert any(m.startswith("run folder: ") for m in messages)
+    assert any(m.startswith("run finished: ") for m in messages)
     # Nothing may be printed to stdout anymore.
     assert capsys.readouterr().out == ""
 
@@ -136,7 +154,7 @@ def test_pipeline_logs_persist_to_registry(tmp_path, dummy_coupling_file, _isola
 
     conn = sqlite3.connect(tmp_path / ".spinlabs" / "registry.db")
     rows = reg.list_run_logs(conn)
-    assert any("Initialized run" in r["message"] for r in rows)
+    assert any(r["message"].startswith("run folder: ") for r in rows)
     assert any(r["level"] == "INFO" for r in rows)
 
 
@@ -227,7 +245,7 @@ def test_set_db_run_id_safe_without_handler():
 
 
 def test_console_level_independent_of_db_capture(tmp_path):
-    """DEBUG records are captured to the DB even when the console shows WARNING."""
+    """DEBUG records are captured to the DB even when the console shows only INFO."""
     import spinlabs.logging_utils as lu
     import spinlabs.registry as reg
     from spinlabs.logging_utils import (
@@ -237,9 +255,9 @@ def test_console_level_independent_of_db_capture(tmp_path):
         get_logger,
     )
 
-    configure_logging(verbosity=0)  # console: WARNING
+    configure_logging(verbosity=0)  # console: INFO
     assert lu._stream_handler is not None
-    assert lu._stream_handler.level == logging.WARNING
+    assert lu._stream_handler.level == logging.INFO
     attach_db_logging(reg.ensure_db())
     get_logger()
     logger.debug("dbg-only message")

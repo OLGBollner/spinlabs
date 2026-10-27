@@ -24,7 +24,7 @@ from spinlabs.logging_utils import configure_logging  # noqa: E402
 
 
 def main() -> int:
-    configure_logging(verbosity=1)
+    configure_logging()
     ap = argparse.ArgumentParser(
         description="Plot ZFS principal components vs perturbation scale with linear-fit residuals"
     )

@@ -505,7 +505,7 @@ class PhononSpectrum:
 
         self.original_indices = original_indices
         LOGGER.info(
-            f"Inferred original_indices for legacy phonon file by amplitude-frequency "
+            f"inferred original_indices for a legacy phonon file by amplitude-frequency "
             f"rank matching (corr={c:.5f}, q0^2={q0_2:.3e}). "
             "Regenerate the phonon npz with explicit original_indices for a principled mapping."
         )
@@ -567,7 +567,7 @@ class PhononSpectrum:
                 if detected is not None:
                     defect_frac = detected
                 else:
-                    LOGGER.warning("Could not identify defect centre, no shift applied.")
+                    LOGGER.warning("could not identify the defect centre; no shift applied")
                     return frac_atoms, np.zeros(3)
         else:
             defect_pos = np.asarray(defect_pos, dtype=float)
@@ -1414,7 +1414,7 @@ class RawZFSData:
             obj.vasp_settings = _merge_vasp_settings(obj.vasp_settings, fields.get("vasp_settings"))
         for p, (_, scaled_now) in zip(paths, scaled_pairs):
             if apply_corrections and scaled_now:
-                LOGGER.info(f"Applied spin correction scaling: {SPIN_CORRECTION_SCALE:g} (x3/2) [{p.name}]")
+                LOGGER.info(f"applied spin correction (defect_band_approx, x{SPIN_CORRECTION_SCALE:g}): {p}")
         return obj.to_unit("J")
 
     def _apply_spin_correction(self) -> None:
@@ -1441,7 +1441,7 @@ class RawZFSData:
         self.first_order = scaled["first_order"]
         self.second_order = scaled["second_order"]
         self.spin_correction_applied = True
-        LOGGER.info(f"Applied spin correction scaling: {SPIN_CORRECTION_SCALE:g} (x3/2)")
+        LOGGER.info(f"applied spin correction (defect_band_approx, x{SPIN_CORRECTION_SCALE:g})")
 
 
 @dataclass

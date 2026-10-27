@@ -35,12 +35,12 @@ def discover_runs(run_root: Path) -> list[tuple[int, float, Path]]:
     for outcar in sorted(Path(run_root).glob("runs/*/OUTCAR")):
         m = re.fullmatch(r"(\d+)_pert_(.+)", outcar.parent.name)
         if not m:
-            LOGGER.warning(f"skipping unrecognised run dir {outcar.parent.name}")
+            LOGGER.warning(f"run folder name is not <mode>_pert_<step>, skipped: {outcar.parent}")
             continue
         try:
             runs.append((int(m.group(1)), float(m.group(2)), outcar))
         except ValueError:
-            LOGGER.warning(f"skipping unparsable run dir {outcar.parent.name}")
+            LOGGER.warning(f"cannot read the step of run folder {outcar.parent}; skipped")
     return sorted(runs, key=lambda r: (r[0], r[1]))
 
 
@@ -97,7 +97,7 @@ def scan_convergence(run_root: Path) -> ConvergenceScan:
     for mode, pert, outcar in runs:
         tensor = parse_outcar_zfs(outcar)
         if tensor is None or bool(np.isnan(tensor.matrix).all()):
-            LOGGER.warning(f"no ZFS tensor in {outcar} (run unfinished?)")
+            LOGGER.debug(f"no ZFS tensor (unfinished or failed run): {outcar}")
             unfinished.append(outcar.parent.name)
             continue
         i, j = mode_idx[mode], pert_idx[pert]
@@ -131,7 +131,7 @@ def save_convergence(
         e0 = parse_outcar_energy(ground_state)
         if e0 is not None:
             extra["d0_energy"] = np.float64(e0)
-        LOGGER.info(f"ground-state tensor from {ground_state}\n{extra['d0']}")
+        LOGGER.debug(f"ground-state tensor (d0) from {ground_state}:\n{extra['d0']}")
 
     if defect is None or cell is None:
         inf_d, inf_c = infer_defect_cell(scan.run_root)
@@ -158,13 +158,11 @@ def save_convergence(
         metadata=np.array(json.dumps(metadata)),
         **extra,
     )
-    LOGGER.info(f"metadata: {json.dumps(metadata)}")
     LOGGER.info(
-        f"Packed {scan.n_finished}/{scan.n_grid} runs ({len(scan.unfinished)} unfinished, "
-        f"{scan.n_missing_energy} without energy) -> {output}"
+        f"saved convergence data: {output} ({scan.n_finished}/{scan.n_grid} runs finished, "
+        f"{scan.n_missing_energy} without energy)"
     )
-    LOGGER.info(f"modes: {scan.modes}")
-    LOGGER.info(f"perts: {scan.perts}")
+    LOGGER.debug(f"convergence metadata: {json.dumps(metadata)}; modes {scan.modes}; steps {scan.perts}")
     return Path(output)
 
 
@@ -213,7 +211,7 @@ def run(args: argparse.Namespace) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
-    configure_logging(verbosity=1)
+    configure_logging()
     parser = argparse.ArgumentParser(
         description="Parse runs/<mode>_pert_<p>/OUTCAR files and pack ZFS tensors + energies into one .npz"
     )

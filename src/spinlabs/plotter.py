@@ -225,7 +225,7 @@ def plot_transition_rates_stacked(
             else:
                 out_file = p.parent / f"{stem}_{trans_key}{p.suffix}"
             fig.savefig(out_file, dpi=300)
-            LOGGER.info(f"Saved stacked rate figure to: {out_file}")
+            LOGGER.info(f"saved figure: {out_file}")
 
         figures.append((fig, ax))
 
@@ -316,7 +316,7 @@ def plot_run_coupling(
     """
     coupling_file = run_dir / "spin_phonon_coupling.npz"
     if not coupling_file.exists():
-        LOGGER.warning(f"Skipping coupling plot: {coupling_file} not found.")
+        LOGGER.warning(f"no {coupling_file.name} in {run_dir}; coupling plot skipped")
         return []
 
     data = SpinPhononCouplingData.load(coupling_file)
@@ -332,7 +332,7 @@ def plot_run_coupling(
     )
     out_file1 = out_dir / f"coupling_spectral_1d.{fmt}"
     fig1.savefig(out_file1, dpi=dpi, bbox_inches="tight")
-    LOGGER.info(f"  [✓] Saved 1D coupling plot -> {out_file1}")
+    LOGGER.info(f"saved figure: {out_file1}")
 
     # Backward compatible alias
     out_file_alias = out_dir / f"coupling_spectral.{fmt}"
@@ -366,7 +366,7 @@ def plot_run_coupling(
         )
         out_file2 = out_dir / f"coupling_spectral_2d.{fmt}"
         fig2.savefig(out_file2, dpi=dpi, bbox_inches="tight")
-        LOGGER.info(f"  [✓] Saved 2D coupling plot -> {out_file2}")
+        LOGGER.info(f"saved figure: {out_file2}")
         figures.append(fig2)
 
     return _finish_run_figures(figures, title and f"Coupling: {title}", show)
@@ -381,12 +381,11 @@ def plot_run_rates(
     """
     rates_file = run_dir / "transition_rates.npz"
     if not rates_file.exists():
-        LOGGER.warning(f"Skipping transition rates plot: {rates_file} not found.")
+        LOGGER.warning(f"no {rates_file.name} in {run_dir}; transition rate plots skipped")
         return []
 
     out_base = out_dir / f"transition_rates.{fmt}"
     figures = [fig for fig, _ in plot_transition_rates_stacked(rates_file, output_path=out_base)]
-    LOGGER.info(f"  [✓] Saved transition rate plots in -> {out_dir}")
     return _finish_run_figures(figures, title and f"Rates: {title}", show)
 
 
@@ -394,12 +393,11 @@ def plot_run_t1(run_dir: Path, out_dir: Path, fmt: str, dpi: int, show: bool):
     """Plots T_1 relaxation times vs temperature, one curve per initial state."""
     t1_files = find_t1_files(run_dir)
     if not t1_files:
-        LOGGER.warning(f"Skipping T1 plot: no t1_relaxation*.npz in {run_dir}.")
+        LOGGER.warning(f"no t1_relaxation*.npz in {run_dir}; T1 plot skipped")
         return
 
     out_file = out_dir / f"t1_vs_temperature.{fmt}"
     plot_t1(t1_files, output_path=out_file, plain_name=True)
-    LOGGER.info(f"  [✓] Saved T1 plot -> {out_file}")
 
 
 _CALC_METHOD_LABELS = {"all_bands": "", "defect_band_approx": "decontaminated", "defect_band": "decontaminated"}
@@ -500,7 +498,7 @@ def plot_t1(
         curves.append((temperatures[valid], t1_fit[valid], head or path.stem, details))
 
     if not curves:
-        LOGGER.warning("No valid T1 data found in the provided files.")
+        LOGGER.warning("no finite T1 values in the given files; nothing plotted")
         plt.close(fig)
         return fig, ax
 
@@ -529,7 +527,7 @@ def plot_t1(
         if meta and meta not in p.stem and not plain_name:
             p = p.with_name(f"{p.stem}_{meta}{p.suffix}")
         fig.savefig(p, dpi=300, bbox_inches="tight")
-        LOGGER.info(f"Saved T1 figure to: {p}")
+        LOGGER.info(f"saved figure: {p}")
 
     if show:
         plt.show()
@@ -611,5 +609,5 @@ class ZFSPlotter:
                 )
                 Path("figures").mkdir(exist_ok=True)
                 fig.savefig(f"figures/{out_name}")
-                LOGGER.info(f"Saved figure in figures/{out_name}")
+                LOGGER.info(f"saved figure: figures/{out_name}")
                 plt.close(fig)

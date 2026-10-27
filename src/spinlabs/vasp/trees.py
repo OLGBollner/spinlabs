@@ -13,7 +13,7 @@ from spinlabs.parsers import parse_phonon_data, save_phonon_npz
 from spinlabs.vasp.modes import mode_numbers
 from spinlabs.symmetry import classify_and_pair, filter_degenerate_partners, symmetrize_degenerate_groups
 
-from spinlabs.logging_utils import get_logger
+from spinlabs.logging_utils import get_logger, section
 
 LOGGER = get_logger(__name__)
 
@@ -249,10 +249,10 @@ def resolve_sym_phonon(out: Path, phonon: Path) -> Path:
     filtered = filter_degenerate_partners(symmetrized)
     target = data / f"phonon_data_sym{filtered.n_modes}.npz"
     if target.is_file():
-        LOGGER.info(f"  using existing symmetrised phonon file {target}")
+        LOGGER.info(f"symmetrised phonon data (existing file): {target}")
         return target
     save_phonon_npz(filtered, target)
-    LOGGER.info(f"  symmetrised phonon data saved to {target} ({filtered.n_modes} of {spectrum.n_modes} modes)")
+    LOGGER.info(f"saved symmetrised phonon data: {target} ({filtered.n_modes} of {spectrum.n_modes} modes)")
     return target
 
 
@@ -297,14 +297,14 @@ def build_zfs_tree(inp: Path, run_dirs: list[str] | tuple[str, ...] = RUN_STAGES
     if out.exists():
         raise FileExistsError(f"output directory {out} already exists, refusing to overwrite")
 
-    LOGGER.info(f"Creating {out}/ from {inp}")
+    section(LOGGER, f"Create ZFS tree {out} from {inp}")
     shutil.copytree(data_src, out / "data")
 
     for stage in run_dirs:
         dst = out / stage
         shutil.copytree(relax_src, dst)
         shutil.copy2(struct_file, dst / "POSCAR")
-        LOGGER.info(f"  {stage}/  <- template/relax + POSCAR")
+        LOGGER.info(f"created {dst} (template/relax + POSCAR)")
     return out
 
 
@@ -339,7 +339,7 @@ def prepare_basis(
 
     def fail(msg: str) -> None:
         failures.append(msg)
-        LOGGER.error(f"  FAIL: {msg}")
+        LOGGER.error(f"{dst}: {msg}")
 
     inp = dst / "input"
     inp.mkdir(parents=True, exist_ok=True)
@@ -366,7 +366,7 @@ def prepare_basis(
                 warnings.append(warning)
         incar_path.write_text(patch_restart_incar(incar))
         for warning in warnings:
-            LOGGER.warning(f"  WARN: {warning}")
+            LOGGER.warning(f"{dst}: {warning}")
     else:
         fail("no INCAR in the ZFS source folder -- cannot make it restart-ready")
 
@@ -417,7 +417,7 @@ def prepare_basis(
 
     if per_sim is not None:
         LOGGER.info(
-            f"    time: {per_sim:.0f} s/sim x {n_tasks} tasks / "
+            f"{dst.name} wall time: {per_sim:.0f} s/sim x {n_tasks} tasks / "
             f"{n_array_jobs} array jobs = {per_job:.0f} s/job "
             f"-> {sbatch_time(per_job)}"
         )
@@ -460,7 +460,8 @@ def build_perturbation_tree(
 
     phonon = resolve_sym_phonon(out, phonon)
     n_modes = n_modes_from_phonon(phonon)
-    LOGGER.info(f"=== {defect}: phonon {phonon} ({n_modes} modes, {displacement} displacements) -> {out} ===")
+    section(LOGGER, f"Perturbation trees {defect}: {n_modes} modes, {displacement} displacements")
+    LOGGER.info(f"phonon data: {phonon}")
     for order in ("first_order", "second_order"):
         for basis, src in sources.items():
             for p in pert:
@@ -523,11 +524,11 @@ def _make_room(dst: Path, force: bool) -> bool:
     """Whether to (re)create dst: an existing folder is kept unless ``force``."""
     if dst.exists():
         if not force:
-            LOGGER.info(f"  note: {dst} already exists -- skipping")
+            LOGGER.info(f"exists, kept (--force rebuilds it): {dst}")
             return False
-        LOGGER.info(f"  overwriting {dst}")
+        LOGGER.info(f"rebuilding: {dst}")
         shutil.rmtree(dst)
-    LOGGER.info(f"  creating {dst}")
+    LOGGER.info(f"building: {dst}")
     return True
 
 
@@ -607,7 +608,7 @@ def build_convergence_tree(
         raise ValueError(f"modes {missing} are not in {phonon} (its modes: {min(known)}..{max(known)})")
     failures: list[str] = []
     n_modes = n_modes_from_phonon(phonon)
-    LOGGER.info(f"=== {out.name}: convergence of modes {modes} at steps {steps} ({displacement}) ===")
+    section(LOGGER, f"Convergence folders {out.name}: modes {modes}, steps {steps}, {displacement} displacements")
     for basis, src in zfs_sources(out).items():
         dst = out / CONVERGENCE_FOLDER[basis]
         if not _make_room(dst, force):

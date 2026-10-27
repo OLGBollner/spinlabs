@@ -74,7 +74,7 @@ def response_point_group(spectrum) -> str | None:
         symbol = detect_point_group_from_spectrum(spectrum).symbol
         if symbol in CANONICAL_OPERATIONS:
             return symbol
-        LOGGER.info(f"ZFS response check: point group {symbol} has no canonical operations; using the mode labels")
+        LOGGER.debug(f"ZFS response check: point group {symbol} has no canonical operations; using the mode labels")
     except SymmetryDetectionError:
         pass
     labels = {_parent_label(str(s)) for s in (spectrum.symmetries or [])}

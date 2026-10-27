@@ -32,7 +32,7 @@ import numpy as np
 
 from spinlabs.models import ZFSTensor
 
-from spinlabs.logging_utils import get_logger
+from spinlabs.logging_utils import get_logger, section
 
 LOGGER = get_logger(__name__)
 
@@ -491,7 +491,7 @@ def load_convergence(npz_path: Path) -> ConvergenceData:
                     tensors[i][izero] = q0
                     patched += 1
             if patched:
-                LOGGER.info(
+                LOGGER.debug(
                     f"borrowed the Q=0 tensor for {patched} mode(s) that lack "
                     "their own pert=0 run (identical relaxed structure)",
                 )
@@ -537,11 +537,14 @@ def plot_pert_convergence(
 
     conv = load_convergence(npz_path)
     modes, perts, tensors, q0_shared = conv.modes, conv.perts, conv.tensors, conv.q0
+    meta = conv.metadata
+    name = "_".join(str(meta[k]) for k in ("defect", "cell") if meta.get(k) is not None)
+    label = " ".join(s for s in (name, meta.get("method_key") or meta.get("method")) if s) or npz_path.stem
 
     wanted = mode if mode else [int(m) for m in modes]
     missing = [m for m in wanted if m not in set(modes.tolist())]
     if missing:
-        LOGGER.warning(f"modes {missing} not in npz")
+        LOGGER.warning(f"modes {missing} not in {npz_path.name}; not plotted")
     if output_path is None:
         output_path = npz_path.with_name(npz_path.stem + "_convergence.png")
 
@@ -571,17 +574,18 @@ def plot_pert_convergence(
         if mode not in set(modes.tolist()):
             continue
         i = int(np.where(modes == mode)[0][0])
+        section(LOGGER, f"{label} mode {mode}")
         # drop unfinished runs (NaN tensors) BEFORE diagonalizing: eigh on a
         # NaN slot raises LinAlgError for the whole mode
         ok0 = ~np.isnan(tensors[i]).any(axis=(1, 2))
         dropped = perts[~ok0]
         if len(dropped):
             LOGGER.warning(
-                f"mode {mode}: dropping {len(dropped)} run(s) with no ZFS tensor "
-                f"(unfinished or failed): {np.array2string(dropped)}",
+                f"mode {mode}: {len(dropped)} run(s) without a ZFS tensor (unfinished or failed) left out: "
+                f"steps {np.array2string(dropped)}",
             )
         if ok0.sum() < 2:
-            LOGGER.warning(f"mode {mode}: fewer than 2 finished runs, skipping")
+            LOGGER.warning(f"mode {mode}: fewer than 2 finished runs; not plotted")
             continue
         p_all, t_all = perts[ok0], tensors[i][ok0]
         # fixed principal frame from the Q=0 (relaxed) tensor; plot the
@@ -589,7 +593,7 @@ def plot_pert_convergence(
         izero = int(np.argmin(np.abs(p_all)))
         if not np.isclose(p_all[izero], 0.0):
             LOGGER.warning(
-                f"mode {mode}: warning: no Q=0 tensor; principal frame taken "
+                f"mode {mode}: no Q=0 tensor; principal frame taken "
                 "from the smallest-|Q| perturbation instead",
             )
         R = principal_frame(t_all[izero])
@@ -602,7 +606,7 @@ def plot_pert_convergence(
             p_use = p_all[np.abs(p_all) > 0]
             t_use = t_all[np.abs(p_all) > 0]
             if len(p_use) == 0:
-                LOGGER.warning(f"mode {mode}: --drop-anchor leaves no points, skipping")
+                LOGGER.warning(f"mode {mode}: --drop-anchor leaves no points; not plotted")
                 continue
         vals = np.stack([np.diag(R.T @ t @ R) for t in t_use])
         trace = vals.sum(axis=1)
@@ -676,9 +680,7 @@ def plot_pert_convergence(
                             row[-1] = f"{cent:.6g}"
                     if cents:
                         msg += f"\n    central d2 (|Q|:value): {', '.join(cents)} MHz/pert^2"
-            LOGGER.info(20 * "-")
             LOGGER.info(msg)
-            LOGGER.info(20 * "-")
             csv_rows.append(tuple(row))
         for j, title in enumerate(["ax + b", "ax² + bx + c"]):
             axes[0, j].set_title(title)
@@ -690,7 +692,7 @@ def plot_pert_convergence(
             _plot_finite_differences(axes[2], p_all, parts, report)
             reports[mode] = report
             qs = sorted({abs(float(x)) for x in p_all if x != 0})
-            LOGGER.info(f"mode {mode}: signal-to-noise\n" + format_snr(report, qs))
+            LOGGER.info("signal-to-noise:\n" + format_snr(report, qs))
         fig.suptitle(f"mode {mode}: $D_\\lambda$" if not deviation else f"mode {mode}: $D_\\lambda - D_0$")
         axes[0, 1].legend(fontsize=7)
         fig.tight_layout()
@@ -698,7 +700,7 @@ def plot_pert_convergence(
         out = output_path.with_name(f"{stem}_mode{mode}{ext}")
         fig.savefig(out, dpi=150)
         out_files.append(out)
-        LOGGER.info(f"  -> {out}")
+        LOGGER.info(f"saved figure: {out}")
         if show:
             plt.show()
 
@@ -710,7 +712,8 @@ def plot_pert_convergence(
             fh.write(",".join(header) + "\n")
             for row in csv_rows:
                 fh.write(",".join(str(v) for v in row) + "\n")
-        LOGGER.info(f"  -> {csv_path}")
+        LOGGER.info(f"saved fit table: {csv_path}")
     if reports:
+        section(LOGGER, f"{label}: safe |Q| window")
         LOGGER.info(common_window(reports))
     return out_files

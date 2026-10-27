@@ -162,11 +162,11 @@ class TestZFSManager:
             manager._check_symmetry(a1_change, ["A1"], 5, kind="displacement")
             manager._check_symmetry(e_change, ["A1", "Ex"], (5, 6), kind="derivative")
             manager._check_symmetry(a1_change, ["A1", "Ex"], (5, 6), kind="derivative")  # O(q D''') terms
-            assert "Symmetry mismatch" not in caplog.text
+            assert "symmetry mismatch" not in caplog.text
             manager._check_symmetry(a1_change + e_change, ["A1"], 7, kind="displacement")
             manager._check_symmetry(e_change, ["A1", "A1"], (8, 9), kind="derivative")
-        assert "Symmetry mismatch at index 7" in caplog.text
-        assert "Symmetry mismatch at index (8, 9): modes A1/A1 allow only A1 in this derivative" in caplog.text
+        assert "symmetry mismatch in run folder 8" in caplog.text
+        assert "symmetry mismatch in run folder 9_10: modes A1/A1 allow only A1 in this derivative" in caplog.text
 
     def test_second_order_content_outside_the_exact_product_is_summarised(self, setup_system, caplog):
         manager, _, _ = setup_system
@@ -174,10 +174,10 @@ class TestZFSManager:
         a1_only = np.diag([-1.0, -1.0, 2.0])
         manager.zfs_tensors_2d = {(0, 1): self._second_order_entry(manager, a1_only, ("A1", "Ex"))}
         manager.treated_modes = {0, 1}
-        with caplog.at_level("INFO", logger="spinlabs"):
+        with caplog.at_level("DEBUG", logger="spinlabs"):
             manager.calculate_second_order_derivatives(np.zeros((4, 3, 3)))
-        assert "Symmetry mismatch" not in caplog.text
-        assert "Second-order symmetry: 1 of 1 entries hold content outside Gi x Gj" in caplog.text
+        assert "symmetry mismatch" not in caplog.text
+        assert "second-order symmetry: 1 of 1 entries hold content outside Gi x Gj" in caplog.text
 
     def test_twin_inherits_a_diagonal_coupling_only_when_it_has_none(self, setup_system):
         manager, spectrum, gs_zfs = setup_system
@@ -206,7 +206,7 @@ class TestZFSManager:
         with caplog.at_level("WARNING", logger="spinlabs"):
             d2D, V_00, V_pm, V_0pm = manager.calculate_second_order_derivatives(np.zeros((4, 3, 3)))
         assert not np.any(d2D[1, 3]) and V_pm[1, 3] == 0 and V_0pm[1, 3] == 0 and V_00[1, 3] == 0
-        assert "Skipped 1 second-order entries with a mode that has no first-order derivative" in caplog.text
+        assert "1 second-order entries skipped: a mode has no first-order derivative" in caplog.text
         assert "2_4" in caplog.text
 
     def test_raw_data_in_mhz_is_ingested_in_joules(self, setup_system):

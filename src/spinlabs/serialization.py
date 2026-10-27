@@ -22,10 +22,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, Optional, Sequence, Tuple, Type, Union
-import warnings
 from pathlib import Path
 
 import numpy as np
+
+from spinlabs.logging_utils import get_logger
+
+LOGGER = get_logger(__name__)
 
 
 class SchemaError(ValueError):
@@ -332,7 +335,4 @@ def warn_unknown_keys(
             known.add(f"{spec.key}_unit")
     unknown = [k for k in data_files if k not in known]
     if unknown:
-        warnings.warn(
-            f"unknown keys in file (newer schema or hand-made file): {unknown}",
-            stacklevel=3,
-        )
+        LOGGER.warning(f"unknown keys in an npz file (newer schema or hand-made file), ignored: {unknown}")

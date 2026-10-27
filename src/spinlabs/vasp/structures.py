@@ -14,6 +14,9 @@ from pymatgen.io.vasp.inputs import Poscar
 
 from spinlabs.models import PhononSpectrum, displacement_convention
 from spinlabs.parsers import parse_phonon_data
+from spinlabs.logging_utils import get_logger
+
+LOGGER = get_logger(__name__)
 
 
 def load_poscar(poscar_file: str | Path) -> Structure:
@@ -400,9 +403,9 @@ def apply_perturbation(
     for j in range(len(structure)):
         perturbed.sites[j].coords = structure.sites[j].coords + disp[j]
 
-    print(
-        f"Mode {mode_index} ({displacement}): total displacement {np.linalg.norm(disp):.6f} Å, "
-        f"max atomic displacement {np.max(np.linalg.norm(disp, axis=1)):.6f} Å"
+    LOGGER.info(
+        f"mode {mode_index} ({displacement}): total displacement {np.linalg.norm(disp):.6f} A, "
+        f"max atomic displacement {np.max(np.linalg.norm(disp, axis=1)):.6f} A"
     )
     return perturbed
 
@@ -432,10 +435,10 @@ def apply_combined_perturbation(
     for j in range(len(structure)):
         perturbed.sites[j].coords = structure.sites[j].coords + disp[j]
 
-    print(
-        f"Applied combined perturbation: Mode {mode_i} + Mode {mode_j}, step {amplitude} ({displacement}); "
-        f"total displacements {np.linalg.norm(disp_i):.6f} Å and {np.linalg.norm(disp_j):.6f} Å, max atomic "
-        f"{np.max(np.linalg.norm(disp_i, axis=1)):.6f} Å and {np.max(np.linalg.norm(disp_j, axis=1)):.6f} Å"
+    LOGGER.info(
+        f"modes {mode_i} + {mode_j}, step {amplitude} ({displacement}): "
+        f"total displacements {np.linalg.norm(disp_i):.6f} A and {np.linalg.norm(disp_j):.6f} A, max atomic "
+        f"{np.max(np.linalg.norm(disp_i, axis=1)):.6f} A and {np.max(np.linalg.norm(disp_j, axis=1)):.6f} A"
     )
     return perturbed
 

@@ -132,7 +132,7 @@ def collect_t1_rows(
     for run_dir in run_dirs:
         t1_files = find_t1_files(run_dir)
         if not t1_files:
-            LOGGER.warning(f"Skipping {run_dir}: no t1_relaxation*.npz")
+            LOGGER.warning(f"no t1_relaxation*.npz in {run_dir}; run left out")
             continue
         run_defect, run_cell, run_method, pert, run_states, run_orders = meta.get(str(run_dir)) or by_name.get(
             run_dir.name, (None,) * 6
@@ -149,7 +149,7 @@ def collect_t1_rows(
             method = run_method or _npz_str(data, "calc_method")
             init_state = _npz_str(data, "init_state") or _single_state(run_states, npz)
             if not (defect and method and init_state):
-                LOGGER.warning(f"Skipping {npz}: missing defect/method/initial state metadata")
+                LOGGER.warning(f"no defect/method/initial state metadata in {npz}; left out")
                 continue
             cell = int(cell) if cell is not None else None
             orders = _run_orders(run_orders, data)
@@ -320,16 +320,16 @@ def collect_d_rows(paths: list[Path]) -> list[dict]:
                 data = RawZFSData.load(str(npz_path))
             except Exception as error:
                 LOGGER.warning(
-                    f"Cannot load {npz_path} ({error.__class__.__name__}, possibly a git-lfs pointer stub), skipping"
+                    f"cannot load {npz_path} ({error.__class__.__name__}, a git-lfs pointer stub?); left out"
                 )
                 continue
             zfs = data.ground_state_zfs
             if zfs is None:
-                LOGGER.warning(f"No ground-state ZFS in {npz_path}, skipping")
+                LOGGER.warning(f"no ground-state ZFS in {npz_path}; left out")
                 continue
             column = _method_column(npz_path, data.calc_method)
             if column is None:
-                LOGGER.warning(f"Unknown method in {npz_path.name}, skipping")
+                LOGGER.warning(f"unknown calculation method in {npz_path}; left out")
                 continue
             rows.append({
                 "defect": data.defect or infer_defect(npz_path.parent),
@@ -378,13 +378,13 @@ def collect_outcar_rows(folder: Path) -> list[dict]:
         try:
             zfs = parse_outcar_zfs(outcar)
         except Exception as error:
-            LOGGER.warning(f"Cannot parse {outcar} ({error.__class__.__name__}), skipping")
+            LOGGER.warning(f"cannot parse {outcar} ({error.__class__.__name__}); left out")
             continue
         if zfs is None:
-            LOGGER.warning(f"No ZFS block in {outcar}, skipping")
+            LOGGER.warning(f"no ZFS block in {outcar}; left out")
             continue
         if corrected:
-            LOGGER.debug(f"Applied spin correction scaling: {SPIN_CORRECTION_SCALE}")
+            LOGGER.debug(f"applied spin correction (defect_band_approx, x{SPIN_CORRECTION_SCALE:g}): {outcar}")
             zfs = apply_spin_correction(zfs)
         rows.append({
             "defect": infer_defect(defect_root),
@@ -425,7 +425,7 @@ def merge_rows(d_rows: list[dict], t1_rows: list[T1Row] = ()) -> list[dict]:
         elif abs(previous - row["d_mhz"]) > CONFLICT_TOL_MHZ:
             name = " ".join(filter(None, (row["defect"], row["cell"])))
             LOGGER.warning(
-                f"Conflicting {column} D for {name}: {previous:.3f} MHz ({entry['sources'][column]}) "
+                f"conflicting {column} D for {name}: {previous:.3f} MHz ({entry['sources'][column]}) "
                 f"vs {row['d_mhz']:.3f} MHz ({row['source']}); keeping the first"
             )
     for t1_row in t1_rows:

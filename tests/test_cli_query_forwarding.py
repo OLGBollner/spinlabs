@@ -244,7 +244,7 @@ def test_multiple_filter_values_rejected_without_query(flag):
         args.func(args)
 
 
-def test_query_continues_past_a_failing_dataset_and_reports_it(monkeypatch, capsys):
+def test_query_continues_past_a_failing_dataset_and_reports_it(monkeypatch, caplog):
     paths = [f"/data/NV_{c}_raw_zfs_data_all_bands_12d.npz" for c in (64, 216, 512)]
     calls = []
 
@@ -259,13 +259,15 @@ def test_query_continues_past_a_failing_dataset_and_reports_it(monkeypatch, caps
     _matches(monkeypatch, *paths)
     args = _parse(["--query"])
 
-    with pytest.raises(SystemExit, match=r"1 dataset\(s\) failed:\n  /data/NV_216_raw_zfs_data_all_bands_12d.npz"):
+    with caplog.at_level("INFO", logger="spinlabs"), pytest.raises(
+        SystemExit, match=r"1 dataset\(s\) failed:\n  /data/NV_216_raw_zfs_data_all_bands_12d.npz"
+    ):
         args.func(args)
 
     assert calls == paths  # the dataset after the failure still ran
-    out = capsys.readouterr().out
-    assert "[2/3] /data/NV_216_raw_zfs_data_all_bands_12d.npz" in out
-    assert "Done: 2 of 3 dataset(s) analyzed." in out
+    assert "Dataset 2/3: /data/NV_216_raw_zfs_data_all_bands_12d.npz" in caplog.text
+    assert "dataset 2/3 failed: /data/NV_216" in caplog.text
+    assert "analyzed 2 of 3 dataset(s)" in caplog.text
 
 
 def test_query_forwards_sigma(captured, monkeypatch):

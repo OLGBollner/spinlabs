@@ -10,6 +10,9 @@ from spinlabs.convergence import SNR_TARGET, TRUNC_TOL, plot_pert_convergence, r
 from spinlabs.plotter import plot_run_coupling, plot_run_rates, plot_t1
 from spinlabs.registry import ensure_db, find_convergence, find_runs, parse_orders
 from spinlabs.relaxation_dynamics import INIT_STATES, find_t1_files, normalize_init_state
+from spinlabs.logging_utils import get_logger, section
+
+LOGGER = get_logger(__name__)
 
 _METHODS = {"all": "all_bands", "approx": "defect_band_approx"}  # --method values -> registry calc_method
 
@@ -111,8 +114,8 @@ def _run_convergence(args: argparse.Namespace) -> None:
         files = args.npz
     if len(files) > 1 and (args.output or args.csv):
         raise SystemExit(f"error: -o/--csv name one file but {len(files)} convergence files were selected")
-    for npz in files:
-        print(f"Convergence file: {npz}")
+    for n, npz in enumerate(files, start=1):
+        section(LOGGER, f"Plot convergence {n}/{len(files)}: {npz}", major=True)
         _plot_convergence(args, Path(npz))
 
 
@@ -257,6 +260,7 @@ def _plot_each_run(args: argparse.Namespace, kind: str, plot_run) -> None:
     shown = []
     for run_dir in _resolve_run_dirs(args):
         meta = _run_meta(run_dir)
+        section(LOGGER, f"Plot {kind}: {_run_label(run_dir, meta)} ({run_dir})")
         out_dir = (args.output or _figures_dir(kind)) / _run_figure_subdir(run_dir, meta)
         out_dir.mkdir(parents=True, exist_ok=True)
         shown += plot_run(run_dir, out_dir, args.fmt, args.dpi, args.show, title=_run_label(run_dir, meta)) or []
@@ -358,6 +362,9 @@ def _run_t1(args: argparse.Namespace) -> None:
         name = "t1_rate" if args.rate else "t1"
         out = _figures_dir("t1") / _combined_figure_subdir(run_dirs) / f"{name}.{args.fmt}"
         out.parent.mkdir(parents=True, exist_ok=True)
+    section(LOGGER, f"Plot {'1/T1' if args.rate else 'T1'}: {len(inputs)} file(s)")
+    for path in inputs:
+        LOGGER.debug(f"T1 data: {path}")
     plot_t1(
         inputs,
         output_path=out,

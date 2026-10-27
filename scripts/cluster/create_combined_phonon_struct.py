@@ -9,11 +9,13 @@ from __future__ import annotations
 import argparse
 import sys
 
+from spinlabs.logging_utils import configure_logging
 from spinlabs.vasp import apply_combined_perturbation, load_phonon_data, load_poscar, write_perturbed_poscar
 from spinlabs.vasp.structures import add_displacement_args, displacement_from_args
 
 
 def main() -> int:
+    configure_logging()
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("poscar_file", help="Path to VASP POSCAR file")
     ap.add_argument("phonon_file", help="Path to phonon data file (.npz or phonopy .yaml)")

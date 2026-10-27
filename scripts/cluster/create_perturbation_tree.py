@@ -16,7 +16,7 @@ from spinlabs.logging_utils import configure_logging
 
 
 def main() -> int:
-    configure_logging(verbosity=1)
+    configure_logging()
     ap = argparse.ArgumentParser(
         description="Build ready-to-go perturbed ZFS run folders (first_order/second_order x basis x perturbation)"
     )

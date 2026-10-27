@@ -28,7 +28,7 @@ from spinlabs.vasp.trees import (
 
 
 def main() -> int:
-    configure_logging(verbosity=1)
+    configure_logging()
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("output", type=Path, help="defect folder (holds ZFS_hyp/, ZFS_occup/ and its trees)")
     ap.add_argument("--modes", type=int, nargs="+", required=True, help="1-based modes to run, e.g. 13 62 231 378")

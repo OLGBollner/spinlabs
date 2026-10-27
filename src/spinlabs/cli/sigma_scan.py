@@ -15,7 +15,7 @@ import numpy as np
 
 from spinlabs.cli import add_verbosity_args
 from spinlabs.cli.coupling import add_input_args, load_manager
-from spinlabs.logging_utils import get_logger
+from spinlabs.logging_utils import get_logger, section
 from spinlabs.relaxation_dynamics import INIT_STATES, normalize_init_state
 
 LOGGER = get_logger(__name__)
@@ -65,6 +65,7 @@ def _run_sigma_scan(args: argparse.Namespace) -> None:
     temps = np.array(sorted(set(args.temperature)), dtype=float)
     manager, ph_path, orders = load_manager(args, "spinlabs run sigma-scan")
 
+    section(LOGGER, f"Spin-phonon coupling: {manager.defect}_{manager.cell_size} {manager.calc_method}")
     with tempfile.TemporaryDirectory() as tmp:
         base = str(Path(tmp) / "spin_phonon_coupling")
         if 2 in orders and manager.zfs_tensors_2d:
@@ -77,7 +78,7 @@ def _run_sigma_scan(args: argparse.Namespace) -> None:
         # t1[sigma][state] -> T1 (s) at each temperature
         t1: dict[float, dict[str, np.ndarray]] = {}
         for n, sigma in enumerate(sigmas, start=1):
-            print(f"[{n}/{len(sigmas)}] sigma {sigma:g} meV", flush=True)
+            section(LOGGER, f"Transition rates and T1, sigma {sigma:g} meV ({n}/{len(sigmas)})")
             valid, _, directional = compute_rates(coupling, temps, sigma=sigma, has_second_order=has_second)
             dir_path = Path(tmp) / f"directional_rates_{n}.npz"
             np.savez(dir_path, temperatures=valid, **directional)
@@ -86,10 +87,10 @@ def _run_sigma_scan(args: argparse.Namespace) -> None:
     print(_table(manager, t1, temps, args.init_state, has_second, DEFAULT_SIGMA_MEV))
     if args.plot:
         if not any(np.any(np.isfinite(v) & (v > 0)) for by_state in t1.values() for v in by_state.values()):
-            print(f"No finite T1 to plot; {args.plot} not written")
+            LOGGER.warning(f"no finite T1 to plot; {args.plot} not written")
         else:
             _plot(manager, t1, temps, args.init_state, args.plot, DEFAULT_SIGMA_MEV)
-            print(f"Saved {args.plot}")
+            LOGGER.info(f"saved figure: {args.plot}")
 
 
 def _on_grid(valid: np.ndarray, values: np.ndarray, temps: np.ndarray) -> np.ndarray:
