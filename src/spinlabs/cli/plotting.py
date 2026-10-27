@@ -7,6 +7,7 @@ import matplotlib.pyplot as plt
 
 from spinlabs.cli import add_verbosity_args
 from spinlabs.convergence import SNR_TARGET, TRUNC_TOL, plot_pert_convergence, read_conv_metadata
+from spinlabs.convergence_summary import plot_convergence_summary
 from spinlabs.plotter import plot_run_coupling, plot_run_rates, plot_t1
 from spinlabs.registry import ensure_db, find_convergence, find_runs, parse_orders
 from spinlabs.relaxation_dynamics import INIT_STATES, find_t1_files, normalize_init_state
@@ -63,26 +64,34 @@ def build_plot_parser(subparsers: argparse._SubParsersAction) -> None:  # noqa: 
     t1.set_defaults(func=_run_t1)
 
     conv = subparsers.add_parser(
-        "convergence", help="Plot ZFS principal components vs perturbation scale from a packed npz"
+        "convergence",
+        help="Plot finite differences and SNR against step size for every mode of a defect (one summary figure "
+        "per defect); with --mode, the per-mode ZFS principal components and fits",
     )
     conv.add_argument("npz", type=Path, nargs="*", help="npz files from 'spinlabs package --conv'")
     _add_query_args(conv, runs=False)
-    conv.add_argument("-m", "--mode", type=int, action="append", help="plot only this mode (repeatable; default: all)")
     conv.add_argument(
-        "--quad", action="store_true", help="also fit y = a + b x + c x^2 and report the second-order derivative 2c"
+        "-m", "--mode", type=int, action="append",
+        help="plot this mode on its own: principal components, fits and SNR per mode (repeatable; "
+        "default: every mode in one summary figure per defect)",
+    )
+    conv.add_argument(
+        "--quad", action="store_true",
+        help="with --mode: also fit y = a + b x + c x^2 and report the second-order derivative 2c",
     )
     conv.add_argument(
         "--deviation",
         action="store_true",
-        help="plot D(Q) - D(Q=0) instead of raw D, so the response fills the y-range",
+        help="with --mode: plot D(Q) - D(Q=0) instead of raw D, so the response fills the y-range",
     )
     conv.add_argument(
-        "--csv", type=Path, default=None, help="write slopes (and quad coefficients with --quad) to this csv"
+        "--csv", type=Path, default=None,
+        help="with --mode: write slopes (and quad coefficients with --quad) to this csv",
     )
     conv.add_argument(
         "--drop-anchor",
         action="store_true",
-        help="exclude the Q=0 anchor from fits and residuals (curves still extrapolate to Q=0)",
+        help="with --mode: exclude the Q=0 anchor from fits and residuals (curves still extrapolate to Q=0)",
     )
     conv.add_argument(
         "--noise", type=float, help="noise sigma per tensor element in MHz (default: cubic-fit scatter of all modes)"
@@ -112,11 +121,38 @@ def _run_convergence(args: argparse.Namespace) -> None:
         if not args.npz:
             raise SystemExit("error: provide npz paths, or use --query to select registry files")
         files = args.npz
+    if not args.mode:
+        per_mode_only = [flag for flag, on in (("--quad", args.quad), ("--deviation", args.deviation),
+                                               ("--csv", args.csv), ("--drop-anchor", args.drop_anchor)) if on]
+        if per_mode_only:
+            raise SystemExit(f"error: {', '.join(per_mode_only)} apply to the per-mode plots; pick modes with --mode")
+        _plot_convergence_summaries(args, [Path(f) for f in files])
+        return
     if len(files) > 1 and (args.output or args.csv):
         raise SystemExit(f"error: -o/--csv name one file but {len(files)} convergence files were selected")
     for n, npz in enumerate(files, start=1):
         section(LOGGER, f"Plot convergence {n}/{len(files)}: {npz}", major=True)
         _plot_convergence(args, Path(npz))
+
+
+def _plot_convergence_summaries(args: argparse.Namespace, files: list[Path]) -> None:
+    """One summary figure per defect and cell, a column per convergence file (all bands first)."""
+    groups: dict[str, list[tuple[tuple, Path]]] = {}
+    for npz in files:
+        meta = read_conv_metadata(npz)
+        name = "_".join(str(meta[k]) for k in ("defect", "cell") if meta.get(k) is not None) or npz.stem
+        order = (list(_METHODS).index(meta["method"]) if meta.get("method") in _METHODS else len(_METHODS),
+                 str(meta.get("method_key") or ""))
+        groups.setdefault(name, []).append((order, npz))
+    if len(groups) > 1 and args.output:
+        raise SystemExit(f"error: -o names one figure but the files hold {len(groups)} defects ({', '.join(groups)})")
+    for name, entries in groups.items():
+        section(LOGGER, f"Convergence summary: {name}")
+        packs = [npz for _, npz in sorted(entries, key=lambda e: e[0])]
+        out = args.output or _default_output(args, "convergence", f"{name}_convergence_summary")
+        plot_convergence_summary(
+            packs, out, noise=args.noise, target=args.snr_target, tol=args.trunc_tol, dpi=args.dpi, show=args.show
+        )
 
 
 def _plot_convergence(args: argparse.Namespace, npz: Path) -> None:

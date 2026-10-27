@@ -399,7 +399,8 @@ def conv_files(tmp_path, monkeypatch):
 def _plot_conv(monkeypatch, argv):
     """Run 'plot convergence' with plotting stubbed; return the npz files it would plot."""
     plotted = []
-    monkeypatch.setattr(cli_plot, "_plot_convergence", lambda args, npz: plotted.append(npz))
+    monkeypatch.setattr(cli_plot, "_plot_convergence", lambda args, npz: plotted.append(npz))  # with --mode
+    monkeypatch.setattr(cli_plot, "_plot_convergence_summaries", lambda args, files: plotted.extend(files))
     cli_plot._run_convergence(cli.build_parser().parse_args(["plot", "convergence", *argv]))
     return plotted
 
@@ -432,6 +433,6 @@ def test_plot_convergence_query_errors(conv_files, monkeypatch, tmp_path):
     with pytest.raises(SystemExit, match="either npz paths or --query"):
         _plot_conv(monkeypatch, [str(conv_files["new"]), "--query"])
     with pytest.raises(SystemExit, match="-o/--csv name one file"):
-        _plot_conv(monkeypatch, ["--query", "--defect", "NV", "-o", str(tmp_path / "x.png")])
+        _plot_conv(monkeypatch, ["--query", "--defect", "NV", "-m", "1", "-o", str(tmp_path / "x.png")])
     with pytest.raises(SystemExit, match="provide npz paths"):
         _plot_conv(monkeypatch, [])
