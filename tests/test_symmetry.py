@@ -351,19 +351,51 @@ def test_symmetrize_is_fixpoint_on_pure_groups(path):
     assert Counter(map(str, sym.symmetries)) == Counter(map(str, spec.symmetries))
 
 
-def test_symmetrize_recover_artificial_mixing():
-    """Rotate a known-pure A1/Ey pair by theta, symmetrize, check recovery.
+def _closest_a1_ey_in_cluster(spec, tol_mev=0.01):
+    """(A1, Ey) indices closest in frequency among pairs sharing a frequency
+    cluster, plus that cluster. Only such pairs can mix in a real calculation;
+    the symmetrizer leaves modes in different clusters alone by design."""
+    from spinlabs.symmetry import _build_clusters
 
-    Uses the NV_512 pair that recovers exactly (modes 313/315). On NV_64 and
-    ClV_128 the same rotation is only partially undone, so this
-    exact-recovery claim is not asserted there.
+    labels = [str(s) for s in spec.symmetries]
+    freq = np.asarray(spec.frequencies_mev, dtype=float)
+    best = None
+    for c in _build_clusters(freq, tol_mev):
+        for ia in (i for i in c if labels[i] == "A1"):
+            for ie in (j for j in c if labels[j] == "Ey"):
+                gap = abs(freq[ia] - freq[ie])
+                if best is None or gap < best[0]:
+                    best = (gap, ia, ie, c)
+    assert best is not None, "no A1/Ey pair shares a frequency cluster"
+    return best[1:]
+
+
+def _sector(spec, cluster, parent):
+    """Orthonormal rows spanning the cluster's modes of one parent irrep."""
+    rows = [i for i in cluster if _parent_label(str(spec.symmetries[i])) == parent]
+    return np.asarray(spec.eigenvectors)[rows].reshape(len(rows), -1)
+
+
+@pytest.mark.parametrize(
+    "path",
+    [pytest.param(path, id=name) for name, path in SMALL_CELLS.items()]
+    + [pytest.param(NV_SUBSET_PATH, id="NV_512_subset")],
+)
+def test_symmetrize_recover_artificial_mixing(path):
+    """Rotate a pure A1/Ey pair from one frequency cluster by theta,
+    symmetrize, and check that the A1 and E subspaces of the cluster come
+    back exactly.
+
+    Compared per irrep rather than slot by slot: Ex and Ey are degenerate,
+    and the symmetrizer may return them in swapped slots (with the labels
+    following the vectors), which a slot-wise overlap would read as failure.
     """
     from spinlabs.symmetry import symmetrize_degenerate_groups
     import dataclasses
 
-    spec = parse_phonon_npz(_real_phonon(NV_SUBSET_PATH))
+    spec = parse_phonon_npz(_real_phonon(path))
     pure = symmetrize_degenerate_groups(spec)  # ground-truth pure states
-    ia, ie = _mode(spec, 315), _mode(spec, 313)  # A1 and Ey slots
+    ia, ie, cluster = _closest_a1_ey_in_cluster(pure)
     theta = 0.35
     va = pure.eigenvectors[ia].copy()
     ve = pure.eigenvectors[ie].copy()
@@ -372,11 +404,14 @@ def test_symmetrize_recover_artificial_mixing():
     vecs[ie] = -np.sin(theta) * va + np.cos(theta) * ve
     mixed = dataclasses.replace(spec, eigenvectors=vecs)
     sym = symmetrize_degenerate_groups(mixed)
-    # recovered vectors must overlap strongly with the pure originals
-    ov_a = abs(np.sum(sym.eigenvectors[ia] * va))
-    ov_e = abs(np.sum(sym.eigenvectors[ie] * ve))
-    assert ov_a > 0.999, ov_a
-    assert ov_e > 0.999, ov_e
+    labels = Counter(str(sym.symmetries[i]) for i in cluster)
+    assert labels == Counter(str(pure.symmetries[i]) for i in cluster)
+    for parent in ("A1", "E"):
+        want = _sector(pure, cluster, parent)
+        got = _sector(sym, cluster, parent)
+        # equal subspaces: every principal-angle cosine is 1
+        cosines = np.linalg.svd(got @ want.T, compute_uv=False)
+        assert np.all(cosines > 0.999), (parent, cosines)
 
 
 # ---------------------------------------------------------------------------
