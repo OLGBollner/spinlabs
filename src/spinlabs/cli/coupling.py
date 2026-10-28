@@ -55,6 +55,12 @@ def add_input_args(parser: argparse.ArgumentParser) -> argparse._ArgumentGroup:
         action="store_true",
         help="Take the second-order coupling of each degenerate Ex-Ey pair from its Ex-Ex derivative (as for run)",
     )
+    opt.add_argument(
+        "--offdiag-from-diagonal",
+        action="store_true",
+        help="Approximate every second-order pair (i, j), i != j, that was not run as sqrt(V_ii V_jj) from the "
+        "diagonal couplings (computed pairs keep their values)",
+    )
     return opt
 
 
@@ -138,6 +144,7 @@ def load_manager(args: argparse.Namespace, command: str):
         spectrum=spectrum,
         exclude_inconsistent_pairs=args.exclude_inconsistent_pairs,
         degenerate_pairs_from_symmetry=args.degenerate_pairs_from_symmetry,
+        offdiag_from_diagonal=args.offdiag_from_diagonal,
     )
     manager.calc_method = calc_method
     if not manager.zfs_tensors:

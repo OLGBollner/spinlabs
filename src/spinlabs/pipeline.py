@@ -406,6 +406,7 @@ def run_full_pipeline(
     show_plots: bool = False,
     exclude_inconsistent_pairs: bool = False,
     degenerate_pairs_from_symmetry: bool = False,
+    offdiag_from_diagonal: bool = False,
     sigma: float = DEFAULT_SIGMA_MEV,
 ) -> dict[str, Any]:
     """
@@ -450,6 +451,7 @@ def run_full_pipeline(
             show_plots=show_plots,
             exclude_inconsistent_pairs=exclude_inconsistent_pairs,
             degenerate_pairs_from_symmetry=degenerate_pairs_from_symmetry,
+            offdiag_from_diagonal=offdiag_from_diagonal,
             sigma=sigma,
         )
     finally:
@@ -483,6 +485,7 @@ def _execute_pipeline(
     show_plots: bool = False,
     exclude_inconsistent_pairs: bool = False,
     degenerate_pairs_from_symmetry: bool = False,
+    offdiag_from_diagonal: bool = False,
     sigma: float = DEFAULT_SIGMA_MEV,
 ) -> dict[str, Any]:
     """Pipeline body of :func:`run_full_pipeline` (DB logging already owned)."""
@@ -658,6 +661,7 @@ def _execute_pipeline(
     coupling_path = run_dir / "spin_phonon_coupling.npz"
     inconsistent_pairs: list[tuple[int, int, float, float]] = []
     symmetry_derived_pairs: list[tuple[int, int]] = []
+    offdiag_filled = 0
     if coupling_data is not None:
         coupling_data.save(coupling_path)
         LOGGER.info(f"saved coupling data (copied from the input): {coupling_path}")
@@ -667,6 +671,7 @@ def _execute_pipeline(
             spectrum=spectrum,
             exclude_inconsistent_pairs=exclude_inconsistent_pairs,
             degenerate_pairs_from_symmetry=degenerate_pairs_from_symmetry,
+            offdiag_from_diagonal=offdiag_from_diagonal,
         )
         if calc_method:
             manager.calc_method = calc_method
@@ -689,6 +694,7 @@ def _execute_pipeline(
         coupling_data = SpinPhononCouplingData.load(coupling_path)
         inconsistent_pairs = manager.inconsistent_pairs
         symmetry_derived_pairs = manager.symmetry_derived_pairs
+        offdiag_filled = manager.n_offdiag_filled
 
     # ── 6. Transition Rates Calculation ──────────────────────────────────────
     temps = temperature_grid(t_start, t_end, t_step, temperatures)
@@ -799,6 +805,8 @@ def _execute_pipeline(
             "enabled": degenerate_pairs_from_symmetry,
             "pairs": [f"{x + 1}_{y + 1}" for x, y in symmetry_derived_pairs],
         },
+        # Second-order pairs i != j not computed, approximated as sqrt(V_ii V_jj).
+        "offdiag_from_diagonal": {"enabled": offdiag_from_diagonal, "pairs_filled": offdiag_filled},
     }
 
     info_path = run_dir / "run_info.json"

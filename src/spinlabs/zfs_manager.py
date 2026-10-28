@@ -45,6 +45,7 @@ class ZFSManager:
         raw_data: Optional[RawZFSData] = None,
         exclude_inconsistent_pairs: bool = False,
         degenerate_pairs_from_symmetry: bool = False,
+        offdiag_from_diagonal: bool = False,
     ):
         # spectrum is the primary dataclass
         if spectrum is not None:
@@ -126,6 +127,10 @@ class ZFSManager:
         self.degenerate_pairs_from_symmetry = degenerate_pairs_from_symmetry
         # (Ex, Ey) pairs, 0-based, whose couplings were replaced that way.
         self.symmetry_derived_pairs: list[tuple[int, int]] = []
+        # Fill every second-order pair (i, j), i != j, that no run or symmetry rule gave with the
+        # geometric mean of the two diagonal couplings; see _offdiag_from_diagonal.
+        self.offdiag_from_diagonal = offdiag_from_diagonal
+        self.n_offdiag_filled = 0  # pairs (i < j) filled that way
         if self.displacement != "mass_weighted":
             if spectrum is None:
                 raise ValueError(
@@ -455,6 +460,7 @@ class ZFSManager:
 
         no_first_order = []
         diagonal_done: set[int] = set()  # modes whose own (i, i) coupling was computed
+        computed_pairs: set[tuple[int, int]] = set()  # (i, j), i <= j, whose coupling came from a run
         # Entries with content outside the exact Gi x Gj rule (MHz of that content), for the summary.
         outside_strict: list[float] = []
         n_judged = 0
@@ -536,6 +542,7 @@ class ZFSManager:
 
             if i == j:
                 diagonal_done.add(i)
+            computed_pairs.add((min(i, j), max(i, j)))
 
             V_0_0_2nd[j, i] = V_0_0_2nd[i, j]
             V_p_m_2nd[j, i] = V_p_m_2nd[i, j]
@@ -564,6 +571,10 @@ class ZFSManager:
 
         if self.degenerate_pairs_from_symmetry:
             self._degenerate_pairs_from_symmetry(zfs_2nd_derivs, V_0_0_2nd, V_p_m_2nd, V_0_pm_2nd)
+            computed_pairs.update((min(x, y), max(x, y)) for x, y in self.symmetry_derived_pairs)
+
+        if self.offdiag_from_diagonal:
+            self._offdiag_from_diagonal(computed_pairs, V_0_0_2nd, V_p_m_2nd, V_0_pm_2nd)
 
         if outside_strict:
             LOGGER.debug(
@@ -647,6 +658,46 @@ class ZFSManager:
         LOGGER.info(
             f"degenerate Ex-Ey couplings from symmetry: {len(self.symmetry_derived_pairs)} of {n_pairs} pairs"
             + (f" ({n_kept} without an Ex-Ex derivative keep their computed values)" if n_kept else "")
+        )
+
+    def _offdiag_from_diagonal(
+        self, computed: set[tuple[int, int]], V_0_0_2nd: np.ndarray, V_p_m_2nd: np.ndarray, V_0_pm_2nd: np.ndarray
+    ) -> None:
+        """Approximate each second-order pair (i, j), i != j, that was not computed as sqrt(V_ii V_jj).
+
+        Per coupling type, from the diagonal couplings (the (i, i) runs, inherited by degenerate
+        twins), and only for the types the pair's symmetry allows, by the same rules as the computed
+        pairs in calculate_second_order_derivatives: A1 x A1 and A2 x A2 give V_00; Ex x Ex and
+        Ey x Ey give V_00, V_0pm and V_pm; Ex x Ey gives V_0pm and V_pm; any other pair none.
+        Pairs in ``computed`` (run, or derived by symmetry) keep their values. The rates use V^2,
+        so this assumes the cross curvature is as large as the two diagonal ones allow.
+        """
+        n = V_0_0_2nd.shape[0]
+        labels = list(self.spectrum.symmetries) if self.spectrum is not None and self.spectrum.symmetries else []
+        if len(labels) != n:
+            LOGGER.warning("off-diagonal couplings from the diagonal need the modes' symmetry labels; option ignored")
+            return
+        irrep = np.array([str(s).upper() for s in labels])
+        is_ex, is_ey = irrep == "EX", irrep == "EY"
+        same = irrep[:, None] == irrep[None, :]
+        a_pair = same & np.isin(irrep, ["A1", "A2"])[:, None]  # A1 x A1, A2 x A2: product A1
+        e_same = same & (is_ex | is_ey)[:, None]  # Ex x Ex, Ey x Ey
+        e_mixed = (is_ex[:, None] & is_ey[None, :]) | (is_ey[:, None] & is_ex[None, :])  # Ex x Ey
+        allowed = {"V_00": a_pair | e_same, "V_pm": e_same | e_mixed, "V_0pm": e_same | e_mixed}
+
+        keep = np.eye(n, dtype=bool)
+        for i, j in computed:
+            keep[i, j] = keep[j, i] = True
+        for name, V in (("V_00", V_0_0_2nd), ("V_pm", V_p_m_2nd), ("V_0pm", V_0_pm_2nd)):
+            diag = np.abs(np.diag(V))
+            fill = ~keep & allowed[name]
+            V[fill] = np.sqrt(np.outer(diag, diag))[fill]
+        any_allowed = allowed["V_00"] | allowed["V_pm"]
+        self.n_offdiag_filled = int(np.count_nonzero(np.triu(~keep & any_allowed, 1)))
+        LOGGER.info(
+            f"off-diagonal couplings from the diagonal, sqrt(V_ii V_jj), symmetry-allowed types only: "
+            f"{self.n_offdiag_filled} pairs filled, {int(np.count_nonzero(np.triu(keep, 1)))} computed "
+            "off-diagonal pairs kept"
         )
 
     def process_first_order_perturbations(self, output_filename: Optional[str] = None) -> list[str]:

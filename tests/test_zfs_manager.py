@@ -198,6 +198,46 @@ class TestZFSManager:
         _, _, V_pm, V_0pm = manager.calculate_second_order_derivatives(np.zeros((4, 3, 3)))
         assert V_pm[1, 1] > 0 and V_pm[2, 2] == V_pm[1, 1] and V_0pm[2, 2] == V_0pm[1, 1]
 
+    def _offdiag_couplings(self, manager, with_cross: bool, fill: bool):
+        """Second-order couplings (V_00, V_pm, V_0pm) of modes A1, Ex, Ey, A1, with or without the fill."""
+        a1 = np.diag([-1.0, -1.0, 2.0])
+        dD_x = np.array([[2.0, 4.0, 3.0], [4.0, -4.0, 4.0], [3.0, 4.0, 2.0]])
+        entries = {
+            (0, 0): self._second_order_entry(manager, 2.0 * a1, ("A1", "A1")),
+            (1, 1): self._second_order_entry(manager, dD_x, ("Ex", "Ex")),
+            (3, 3): self._second_order_entry(manager, 5.0 * a1, ("A1", "A1")),
+        }
+        if with_cross:  # a run off-diagonal pair
+            entries[(0, 3)] = self._second_order_entry(manager, 0.3 * a1, ("A1", "A1"))
+        manager.treated_modes = {0, 1, 3}  # mode 2 (Ey) inherits mode 1's diagonal
+        manager.zfs_tensors_2d = entries
+        manager.offdiag_from_diagonal = fill
+        return manager.calculate_second_order_derivatives(np.zeros((4, 3, 3)))[1:]
+
+    def test_offdiag_from_diagonal_fills_symmetry_allowed_uncomputed_pairs(self, setup_system):
+        """Uncomputed pairs get sqrt(V_ii V_jj) for the types their symmetry allows; a run pair keeps its value."""
+        manager, _, _ = setup_system
+        plain = self._offdiag_couplings(manager, with_cross=True, fill=False)
+        assert manager.n_offdiag_filled == 0 and plain[1][1, 2] == 0  # no fill without the flag
+        V00, Vpm, V0pm = self._offdiag_couplings(manager, with_cross=True, fill=True)
+        for V_plain, V in zip(plain, (V00, Vpm, V0pm)):
+            np.testing.assert_allclose(np.diag(V), np.diag(V_plain))  # the diagonal is untouched
+            assert V[0, 3] == V_plain[0, 3]  # the computed A1 x A1 pair keeps its value
+        # Ex x Ey (modes 1, 2): V_pm and V_0pm filled, no V_00
+        for V in (Vpm, V0pm):
+            assert V[1, 2] == pytest.approx(np.sqrt(V[1, 1] * V[2, 2])) and V[2, 1] == V[1, 2] and V[1, 2] > 0
+        assert V00[1, 2] == 0
+        # A1 x E pairs get nothing, as a computed A1 x E pair would not
+        for i, j in ((0, 1), (0, 2), (3, 1), (3, 2)):
+            assert V00[i, j] == Vpm[i, j] == V0pm[i, j] == 0
+        assert manager.n_offdiag_filled == 1
+
+        # without the run A1 x A1 pair, it is filled with V_00 only
+        V00, Vpm, V0pm = self._offdiag_couplings(manager, with_cross=False, fill=True)
+        assert V00[0, 3] == pytest.approx(np.sqrt(V00[0, 0] * V00[3, 3])) and V00[0, 3] > 0
+        assert Vpm[0, 3] == V0pm[0, 3] == 0
+        assert manager.n_offdiag_filled == 2
+
     def test_pair_with_a_mode_without_first_order_data_is_skipped(self, setup_system, caplog):
         manager, spectrum, gs_zfs = setup_system
         dD = np.array([[3.0, 0.0, 1.0], [0.0, -3.0, 0.0], [1.0, 0.0, 0.0]])
