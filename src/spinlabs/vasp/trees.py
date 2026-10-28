@@ -572,10 +572,11 @@ def step_sizes(steps: list[float]) -> list[float]:
 
 
 def convergence_steps(pert: list[float]) -> list[float]:
-    """Convergence step sizes for a tree's steps: p/2, p and 2p for each p (each run at both
-    signs), so the forward second-order difference (needs the run at 2Q) has points up to the
-    tree's own steps."""
-    return step_sizes([f * p for p in pert for f in (0.5, 1.0, 2.0)])
+    """Convergence step sizes for a tree's steps: p/2, p, 2p and 4p for each p (each run at both
+    signs). The largest, 4p, is the 2Q helper of 2p (convergence.helper_step): it completes the
+    forward second-order difference at 2p and is no fit point of its own, which leaves p/2, p and
+    2p for the noise and the Taylor fit, and second-order points up to twice the tree's step."""
+    return step_sizes([f * p for p in pert for f in (0.5, 1.0, 2.0, 4.0)])
 
 
 def build_convergence_tree(

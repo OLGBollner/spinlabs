@@ -109,8 +109,8 @@ def cubic_fit(perts: np.ndarray, values: np.ndarray) -> tuple[np.ndarray, np.nda
 def helper_step(perts: np.ndarray) -> float | None:
     """The step size run only as the 2Q partner of the pair scheme, or None.
 
-    Convergence tests run p/2, p and 2p (trees.convergence_steps): 2p gives D(2Q) for the
-    forward second difference (D(2Q) - 2 D(Q) + D0)/Q^2 at Q = p and is no data point of its
+    Convergence tests run p/2, p, 2p and 4p (trees.convergence_steps): 4p gives D(2Q) for the
+    forward second difference (D(2Q) - 2 D(Q) + D0)/Q^2 at Q = 2p and is no data point of its
     own, so the Taylor fit, the noise and the first-order differences leave it out. It is the
     largest |step| when half of it was run too. It is kept (None) when leaving it out would
     leave fewer than 3 step sizes, too few for the cubic fit to estimate the noise.

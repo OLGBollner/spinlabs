@@ -252,7 +252,7 @@ def test_add_convergence_to_an_existing_defect_takes_its_trees_displacement(tmp_
     script = defect / "convergence_test_occup" / "run_convergence.sh"
     assert _config(script, "DISPLACEMENT") == "mass_weighted"
     assert _config(script, "binary") == "/opt/vasp_std"
-    assert _config(script, "PERTS") == '"0.05 0.1 0.2"'
+    assert _config(script, "PERTS") == '"0.05 0.1 0.2 0.4"'  # --pert 0.1: p/2, p, 2p and the 2Q helper 4p
 
 
 def test_finished_runs_are_known_by_done_and_older_ones_get_it_once(tmp_path):
