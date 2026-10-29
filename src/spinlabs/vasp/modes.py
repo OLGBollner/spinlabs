@@ -23,11 +23,12 @@ def mode_numbers(phonon: Path) -> list[int]:
 
 
 def mode_table(phonon: Path) -> list[tuple[int, float, str, float, float]]:
-    """(mode number, frequency in cm^-1, symmetry label, <r>, P(2 shells)) per mode.
+    """(mode number, frequency in cm^-1, symmetry label, <r>, P_2bond) per mode.
 
-    Labels are classified if the npz has none. <r> (Angstrom) and P(2 shells) say how near the defect
-    the mode lives (PhononSpectrum.mean_defect_distance, .defect_participation); NaN when the defect
-    centre cannot be found.
+    Labels are classified if the npz has none. <r> (Angstrom, from the defect centre) and P_2bond (the
+    weight within two bond lengths of it) say how near the defect the mode lives
+    (PhononSpectrum.mean_defect_distance, .defect_participation); NaN when no single defect centre is
+    found.
     """
     from spinlabs.parsers import parse_phonon_npz
     from spinlabs.symmetry import classify_and_pair
@@ -61,8 +62,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument(
         "--sym",
         action="store_true",
-        help="print mode, frequency, symmetry and how near the defect it lives (<r> in Angstrom and the "
-        "fraction of its weight within the first two neighbour shells) per line",
+        help="print mode, frequency, symmetry and how near the defect it lives (<r> in Angstrom from the "
+        "defect centre, and the fraction of its weight within two bond lengths of it) per line",
     )
     args = ap.parse_args(argv)
     if args.phonon.suffix != ".npz":
@@ -75,7 +76,7 @@ def main(argv: list[str] | None = None) -> int:
     except ValueError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
-    print("mode freq[cm-1] sym r_mean[A] P_2shell")
+    print("mode freq[cm-1] sym r_mean[A] P_2bond")
     for n, freq, label, mean_r, near in table:
         print(f"{n} {freq:.2f} {label} {mean_r:.2f} {near:.3f}")
     return 0
