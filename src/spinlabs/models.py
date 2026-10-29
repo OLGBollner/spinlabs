@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import itertools
 import json
 from dataclasses import dataclass, field
 from enum import Enum
@@ -15,7 +16,23 @@ from spinlabs.logging_utils import get_logger
 
 LOGGER = get_logger(__name__)
 
-DEFECT_SHELL_TOL = 0.05  # Angstrom: a neighbour shell = atoms at the same distance from the defect centre (one symmetry orbit)
+DEFECT_RADIUS_BONDS = 2.0  # defect_participation: the weight within this many bond lengths of the defect centre
+
+
+def min_image_distances(frac_offsets: np.ndarray, lattice: np.ndarray) -> np.ndarray:
+    """Length (Angstrom) of each fractional offset at its nearest periodic image.
+
+    Rounding the fractional coordinates finds that image only in a cell with right angles; in a
+    hexagonal (120 degree) cell it can miss by a lattice vector. After rounding, the nearest image is
+    among the 27 neighbouring cells.
+    """
+    reduced = np.asarray(frac_offsets, dtype=float)
+    reduced = reduced - np.round(reduced)
+    lattice = np.asarray(lattice, dtype=float)
+    best = np.full(reduced.shape[:-1], np.inf)
+    for shift in itertools.product((-1, 0, 1), repeat=3):
+        best = np.minimum(best, np.linalg.norm((reduced + np.array(shift)) @ lattice, axis=-1))
+    return best
 
 
 class EnergyUnit(str, Enum):
@@ -748,27 +765,43 @@ class PhononSpectrum:
     # concentrated on a shell 5 Angstrom out has a high IPR too. These say how near the defect it lives.
     # Weights are |e_j|^2 per atom, as for the IPR.
 
+    def defect_centre(self) -> np.ndarray:
+        """Fractional coordinates of the defect centre, where its spin sits.
+
+        For a defect with a vacancy (NV, ClV, the divacancy, V_Si) that is the vacancy: the centroid of
+        the under-coordinated atoms around it, as find_defect reports it, not an atom substituted next
+        to it. Without a vacancy, the single defect find_defect finds. Raises ValueError when there is
+        no defect, or no single one to choose.
+        """
+        from spinlabs.vasp.structures import find_defect, spectrum_structure
+
+        defects = find_defect(spectrum_structure(self))
+        vacancies = [d for d in defects if d.defect_class in ("vacancy", "divacancy")]
+        chosen = vacancies or defects
+        if len(chosen) != 1:
+            found = ", ".join(sorted(d.defect_class for d in defects)) or "none"
+            raise ValueError(f"no single defect centre (find_defect found: {found})")
+        return np.asarray(chosen[0].frac_coords, dtype=float)
+
     def defect_distances(self) -> np.ndarray:
-        """Distance (Angstrom) of every atom from the defect centre, minimum image.
+        """Distance (Angstrom) of every atom from the defect centre (defect_centre), at its nearest image.
 
-        The centre is translate_defect_to_origin's: the N of NV, the Cl of ClV, else find_defect.
+        Computed once per spectrum; the defect search is the slow part.
         """
-        shifted, _ = self.translate_defect_to_origin()
-        nearest = shifted - np.round(shifted)
-        return np.linalg.norm(nearest @ np.asarray(self.lattice, dtype=float), axis=1)
+        if getattr(self, "_defect_distances", None) is None:
+            offsets = np.asarray(self.atom_frac_coords, dtype=float) - self.defect_centre()
+            self._defect_distances = min_image_distances(offsets, self.lattice)
+        return self._defect_distances
 
-    def defect_shell_radii(self, tol: float = DEFECT_SHELL_TOL) -> np.ndarray:
-        """Outer radius (Angstrom) of each neighbour shell around the defect centre, nearest first.
-
-        Atoms whose distances lie within ``tol`` of the previous one share a shell, so a shell split by
-        relaxation stays one. An atom on the centre itself (closer than ``tol``) is not a shell.
-        """
-        r = np.sort(self.defect_distances())
-        r = r[r >= tol]
-        if not len(r):
-            return np.array([])
-        breaks = np.flatnonzero(np.diff(r) > tol)
-        return r[np.append(breaks, len(r) - 1)]
+    def bond_length(self) -> float:
+        """The host's bond length (Angstrom): the median of every atom's nearest-neighbour distance."""
+        frac = np.asarray(self.atom_frac_coords, dtype=float)
+        nearest = np.empty(len(frac))
+        for j in range(len(frac)):
+            d = min_image_distances(frac - frac[j], self.lattice)
+            d[j] = np.inf
+            nearest[j] = d.min()
+        return float(np.median(nearest))
 
     def _defect_weights(self) -> np.ndarray:
         """|e_j|^2 per mode and atom, normalised per mode (NaN for an all-zero mode)."""
@@ -777,18 +810,19 @@ class PhononSpectrum:
         with np.errstate(invalid="ignore", divide="ignore"):
             return w / total
 
-    def defect_participation_shells(self, shells: int = 2, tol: float = DEFECT_SHELL_TOL) -> np.ndarray:
-        """Fraction of each mode's weight on the defect centre and its first ``shells`` neighbour shells."""
-        radii = self.defect_shell_radii(tol)
-        if not len(radii):
-            return np.full(self.n_modes, np.nan)
-        cutoff = radii[min(shells, len(radii)) - 1]
-        return self._defect_weights()[:, self.defect_distances() <= cutoff + 1e-9].sum(axis=1)
+    def defect_participation_radius(self, bonds: float = DEFECT_RADIUS_BONDS) -> np.ndarray:
+        """Fraction of each mode's weight within ``bonds`` bond lengths of the defect centre.
+
+        A radius rather than a number of neighbour shells: relaxation splits a shell into symmetry
+        orbits at slightly different distances, and a radius in bond lengths compares across hosts.
+        """
+        near = self.defect_distances() <= bonds * self.bond_length()
+        return self._defect_weights()[:, near].sum(axis=1)
 
     @property
     def defect_participation(self) -> np.ndarray:
-        """P(2 shells): fraction of each mode's weight within the first two neighbour shells of the defect."""
-        return self.defect_participation_shells(2)
+        """P_2bond: fraction of each mode's weight within two bond lengths of the defect centre."""
+        return self.defect_participation_radius()
 
     @property
     def mean_defect_distance(self) -> np.ndarray:
