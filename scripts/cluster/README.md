@@ -50,7 +50,13 @@ from that snapshot.
   ones its trees use.
 - `update_tree_scripts.sh`: put the current templates into existing trees and convergence
   folders, keeping each script's `#SBATCH` lines, config and displacement (an older
-  convergence script becomes `run_convergence.sh`).
+  convergence script becomes `run_convergence.sh`), and copy in the current
+  `verify_perturbation_setup.py`.
+- `verify_perturbation_setup.py` (in each tree, from the templates): checks the INCAR and job
+  script, then prints `x/N runs done` (a run is done when its folder has `.done`) and offers to
+  set the script's `-t` for the runs left: ceil(left / array tasks) x the median wall time of
+  the finished runs x 1.2, keeping the array size (smaller only when fewer runs are left than
+  tasks). The logic is `spinlabs.vasp.verify.main`, so a tree's copy stays current.
 - `get_n_modes.py`: the modes a tree runs (`spinlabs.vasp.modes`).
 
 The scripts are tested in their own suite, `pytest scripts/tests` (plain `pytest` runs
