@@ -118,7 +118,7 @@ class TestZFSManager:
 
         _, V_00_comp, V_pm_comp, V_0pm_comp = manager.calculate_second_order_derivatives(zfs_1d_derivs)
         assert manager.symmetry_derived_pairs == []
-        assert not np.isclose(V_pm_comp[1, 2] / self.D2_UNIT, 5.0)
+        assert not np.isclose(V_pm_comp[1, 2] / self.D2_UNIT, 2.5)
 
         manager.degenerate_pairs_from_symmetry = True
         _, V_00, V_pm, V_0pm = manager.calculate_second_order_derivatives(zfs_1d_derivs)
@@ -126,9 +126,9 @@ class TestZFSManager:
         assert manager.symmetry_derived_pairs == [(1, 2)]
         for V in (V_pm, V_0pm, V_00):
             assert V[1, 2] == V[2, 1]
-        # V_+- = 0.5 |w_xx| (twice the Ex-Ex value), V_0+- = |p_xx| / (2 sqrt 2), V_00 = 0.
-        assert np.isclose(V_pm[1, 2] / self.D2_UNIT, 5.0)
-        assert np.isclose(V_pm[1, 2], 2.0 * V_pm[1, 1])
+        # V_+- = |w_xx| / 4 and V_0+- = |p_xx| / (2 sqrt 2), the Ex-Ex values; V_00 = 0.
+        assert np.isclose(V_pm[1, 2] / self.D2_UNIT, 2.5)
+        assert np.isclose(V_pm[1, 2], V_pm[1, 1])
         assert np.isclose(V_0pm[1, 2] / self.D2_UNIT, 5.0 / (2.0 * np.sqrt(2)))
         assert np.isclose(V_0pm[1, 2], V_0pm[1, 1])
         assert V_00[1, 2] == 0.0
@@ -149,7 +149,7 @@ class TestZFSManager:
 
         assert manager.symmetry_derived_pairs == []
         diff, off = dD_xy[0, 0] - dD_xy[1, 1], dD_xy[0, 1]
-        assert np.isclose(V_pm[1, 2] / self.D2_UNIT, 0.5 * np.sqrt(diff**2 + 4 * off**2))
+        assert np.isclose(V_pm[1, 2] / self.D2_UNIT, 0.25 * np.sqrt(diff**2 + 4 * off**2))
 
     def test_symmetry_check_uses_the_shared_response_check(self, setup_system, caplog):
         manager, _, _ = setup_system
@@ -178,6 +178,18 @@ class TestZFSManager:
             manager.calculate_second_order_derivatives(np.zeros((4, 3, 3)))
         assert "symmetry mismatch" not in caplog.text
         assert "second-order symmetry: 1 of 1 entries hold content outside Gi x Gj" in caplog.text
+
+    def test_ex_ey_pair_and_its_ex_ex_partner_give_the_same_v_pm(self, setup_system):
+        """The D_xy of Ex x Ey partners the D_xx - D_yy of Ex x Ex: equal size, equal V_pm."""
+        manager, _, _ = setup_system
+        manager.zfs_tensors_2d = {
+            (1, 1): self._second_order_entry(manager, np.diag([3.0, -3.0, 0.0]), ("Ex", "Ex")),
+            (1, 2): self._second_order_entry(manager, np.array([[0.0, 3.0, 0.0], [3.0, 0.0, 0.0], [0.0] * 3]),
+                                             ("Ex", "Ey")),
+        }
+        manager.treated_modes = {1, 2}
+        _, _, Vpm, _ = manager.calculate_second_order_derivatives(np.zeros((4, 3, 3)))
+        assert np.isclose(Vpm[1, 2], Vpm[1, 1]) and np.isclose(Vpm[1, 1] / self.D2_UNIT, 1.5)
 
     def test_a_x_e_pair_gives_the_e_couplings_of_its_curvature(self, setup_system):
         """A1 x Ex and A1 x Ey are pure E: V_pm and V_0pm as for Ex x Ex, and no V_00."""

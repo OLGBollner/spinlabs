@@ -537,8 +537,10 @@ class ZFSManager:
                 V_0_pm_2nd[i, j] = np.sqrt(d2D_dqidqj[0, 2] ** 2 + d2D_dqidqj[1, 2] ** 2) / (2.0 * np.sqrt(2))
                 V_p_m_2nd[i, j] = 0.25 * np.sqrt(diff_in_plane**2 + 4.0 * off_diag_in_plane**2)
             elif {sym_i, sym_j} == {"Ex", "Ey"}:
+                # The D_xy part of Ex x Ey is the E partner of the D_xx - D_yy part of Ex x Ex, of equal
+                # size, so the same factors apply.
                 V_0_pm_2nd[i, j] = np.sqrt(d2D_dqidqj[0, 2] ** 2 + d2D_dqidqj[1, 2] ** 2) / (2.0 * np.sqrt(2))
-                V_p_m_2nd[i, j] = 0.5 * np.sqrt(diff_in_plane**2 + 4.0 * off_diag_in_plane**2)
+                V_p_m_2nd[i, j] = 0.25 * np.sqrt(diff_in_plane**2 + 4.0 * off_diag_in_plane**2)
             elif {sym_i, sym_j} & {"A1", "A2"} and {sym_i, sym_j} & {"Ex", "Ey"}:
                 # A x E = E: a pure E curvature, shaped like a first-order E derivative, so no V_00.
                 V_0_pm_2nd[i, j] = np.sqrt(d2D_dqidqj[0, 2] ** 2 + d2D_dqidqj[1, 2] ** 2) / (2.0 * np.sqrt(2))
@@ -652,7 +654,7 @@ class ZFSManager:
             off_diag_in_plane = d2D_xx[0, 1]
             # The Ex-Ey formulas of calculate_second_order_derivatives, with |w| and |p| of the Ex-Ex derivative.
             V_0_0_2nd[x, y] = V_0_0_2nd[y, x] = 0.0
-            V_p_m_2nd[x, y] = V_p_m_2nd[y, x] = 0.5 * np.sqrt(diff_in_plane**2 + 4.0 * off_diag_in_plane**2)
+            V_p_m_2nd[x, y] = V_p_m_2nd[y, x] = 0.25 * np.sqrt(diff_in_plane**2 + 4.0 * off_diag_in_plane**2)
             V_0_pm_2nd[x, y] = V_0_pm_2nd[y, x] = np.sqrt(d2D_xx[0, 2] ** 2 + d2D_xx[1, 2] ** 2) / (
                 2.0 * np.sqrt(2)
             )
