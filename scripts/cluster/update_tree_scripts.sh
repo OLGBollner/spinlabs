@@ -9,6 +9,7 @@
 # perturbation trees, and run_convergence.sh of the convergence_test_* folders. An older
 # convergence script (a run_perturbation_*_order.sh with MODES and PERTS in a convergence* folder)
 # becomes run_convergence.sh. The original script is kept as <name>.bak (written once).
+# Each updated tree also gets the current verify_perturbation_setup.py.
 #
 # The displacement convention stays what the tree's runs used: its DISPLACEMENT line, else its
 # MASS_WEIGHTED (0: unweighted, else mass_weighted), else mass_weighted (scripts from before both).
@@ -74,5 +75,6 @@ find "$@" -path '*/.spinlabs-code' -prune -o -type f \( -name 'run_perturbation_
   [ -e "$old.bak" ] || cp -p "$old" "$old.bak"  # keep the first original
   mv "$tmp" "$target"
   [ "$old" = "$target" ] || rm -f "$old"  # an older convergence script now lives on as run_convergence.sh (and .bak)
-  echo "updated $target (DISPLACEMENT=$(sed -n 's/^DISPLACEMENT=\([^ ]*\).*/\1/p' "$target"))"
+  cp "$REPO/src/spinlabs/vasp/templates/verify_perturbation_setup.py" "$dir/"
+  echo "updated $target (DISPLACEMENT=$(sed -n 's/^DISPLACEMENT=\([^ ]*\).*/\1/p' "$target")) and its verify_perturbation_setup.py"
 done

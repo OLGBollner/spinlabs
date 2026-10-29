@@ -377,3 +377,166 @@ def test_verify_setup_flags_repo_without_runner(tmp_path):
 def test_verify_setup_requires_spinlabs_repo(tmp_path):
     problems = _verify_folder(tmp_path, script="BINARY={bin}\nPHONON_PATH={phon}\nPERT=0.025\n")
     assert any(p.startswith("FAIL") and "SPINLABS_REPO not set" in p for p in problems)
+
+
+def test_verify_setup_reads_default_form_of_spinlabs_repo(tmp_path):
+    # update_tree_scripts.sh writes SPINLABS_REPO=${SPINLABS_REPO:-<repo>}; the default is the path.
+    problems = _verify_folder(
+        tmp_path, script="BINARY={bin}\nPHONON_PATH={phon}\nSPINLABS_REPO=${{SPINLABS_REPO:-{repo}}}\nPERT=0.025\n"
+    )
+    assert problems == []
+
+
+def test_script_config_unwraps_defaults_quotes_and_comments():
+    from spinlabs.vasp.verify import script_config
+
+    config = script_config(
+        "#!/bin/sh\n# PERT=9\nDEFECT=${DEFECT:-NV_512}\nbinary=${BINARY:-/opt/vasp}\n"
+        'MODES="13 62"  # 1-based\nPERT=0.05\nPERT=1\n'
+    )
+    assert config["DEFECT"] == "NV_512"
+    assert config["BINARY"] == "/opt/vasp"
+    assert config["MODES"] == "13 62"
+    assert config["PERT"] == "0.05"  # the first assignment, as update_tree_scripts.sh keeps it
+
+
+# ---------- run progress and the time limit for the runs left ----------
+
+PROGRESS_SCRIPT = (
+    "#!/bin/sh\n#SBATCH -J NV_first_order_all_bands\n#SBATCH -t 10:00:00\n#SBATCH -a 0-3\n"
+    "PHONON_PATH={phon}\nPERT=0.05\nORDER={order}\nPAIR_MODE=diag\n"
+)
+
+
+def _progress_tree(tmp_path, done=(), attempted=(), seconds=600.0, order="first_order"):
+    """A tree whose phonon file runs modes 4, 5, 7, 9, 10 (idx + 1), with runs/<r> marked as given."""
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    phon = tmp_path / "phon.npz"
+    np.savez(phon, idx=np.array([3, 4, 6, 8, 9]), freqs=np.ones(5))
+    (tmp_path / "run_x.sh").write_text(PROGRESS_SCRIPT.format(phon=phon, order=order))
+    for r in done:
+        run = tmp_path / "runs" / r
+        run.mkdir(parents=True)
+        (run / ".done").touch()
+        (run / "OUTCAR").write_text(f" Elapsed time (sec):     {seconds}\n")
+    for r in attempted:
+        (tmp_path / "runs" / r).mkdir(parents=True, exist_ok=True)
+        (tmp_path / "runs" / r / ".attempted").write_text("123_0")
+    return tmp_path
+
+
+def test_expected_runs_per_order(tmp_path):
+    from spinlabs.vasp.verify import expected_runs
+
+    phon = tmp_path / "phon.npz"
+    np.savez(phon, idx=np.array([3, 4, 6]), freqs=np.ones(3))
+    assert expected_runs({"PHONON_PATH": str(phon)}, "first_order") == ["4", "5", "7"]
+    assert expected_runs({"PHONON_PATH": str(phon), "PAIR_MODE": "diag"}, "second_order") == ["4_4", "5_5", "7_7"]
+    assert expected_runs({"PHONON_PATH": str(phon), "PAIR_MODE": "all"}, "second_order") == [
+        "4_4", "4_5", "4_7", "5_5", "5_7", "7_7"
+    ]
+    # convergence: like perturbation_runner.sh, sizes without sign or repeats, each at -p and +p
+    assert expected_runs({"MODES": "13 62", "PERTS": "0.05 -0.025 0.05"}, "convergence") == [
+        "13_pert_-0.025", "62_pert_-0.025", "13_pert_0.025", "62_pert_0.025",
+        "13_pert_-0.05", "62_pert_-0.05", "13_pert_0.05", "62_pert_0.05",
+    ]
+
+
+def test_run_progress_counts_done_and_failed(tmp_path):
+    from spinlabs.vasp.verify import run_progress
+
+    _progress_tree(tmp_path, done=["4", "5"], attempted=["7"])
+    (tmp_path / "runs" / "99").mkdir()  # not one of the tree's runs
+    (tmp_path / "runs" / "99" / ".done").touch()
+    progress = run_progress(tmp_path, ["4", "5", "7", "9", "10"])
+    assert progress.done == ["4", "5"]
+    assert progress.failed == ["7"]
+    assert progress.left == 3
+
+
+@pytest.mark.parametrize(
+    "spec, expected", [("0-9", (10, 10)), ("1,3,5-7", (5, 5)), ("0-31%8", (32, 8)), ("0-9:2", (5, 5))]
+)
+def test_array_tasks(spec, expected):
+    from spinlabs.vasp.verify import array_tasks
+
+    assert array_tasks(spec) == expected
+
+
+def test_rescaled_limits_keep_the_array_and_shrink_the_time():
+    from spinlabs.vasp.verify import rescaled_limits
+
+    text = "#SBATCH -t 10:00:00\n#SBATCH -a 0-9\n"
+    # 58 left over 10 tasks: the busiest does 6 runs, 6 x 1000 s x 1.2 = 2 h
+    assert rescaled_limits(text, 58, 1000.0) == ("2:00:00", "0-9")
+    # throttled to 4 at once: 15 runs for the busiest task
+    assert rescaled_limits("#SBATCH --time=10:00:00\n#SBATCH --array=0-9%4\n", 58, 1000.0) == ("5:00:00", "0-9%4")
+    # fewer runs left than tasks: one task per run
+    assert rescaled_limits(text, 3, 1000.0) == ("0:20:00", "0-2")
+
+
+def test_offer_rescale_updates_the_script_on_yes(tmp_path, capsys):
+    from spinlabs.vasp.verify import offer_rescale
+
+    _progress_tree(tmp_path, done=["4", "5"], seconds=600.0)
+    questions = []
+    offer_rescale(tmp_path, "run_x.sh", ask=lambda q: questions.append(q) or "")
+    out = capsys.readouterr().out
+    assert "2/5 runs done (3 left)." in out
+    assert questions == ["Update run_x.sh with new arrays and time allocations? [Y/n]: "]
+    text = (tmp_path / "run_x.sh").read_text()
+    # 3 runs left on 4 tasks -> 3 tasks of one run each, 600 s x 1.2 = 12 min
+    assert "#SBATCH -t 0:12:00\n" in text and "#SBATCH -a 0-2\n" in text
+    assert "#SBATCH -J NV_first_order_all_bands\n" in text
+
+
+@pytest.mark.parametrize("answer", ["n", "no", EOFError])
+def test_offer_rescale_leaves_the_script_on_no(tmp_path, answer):
+    from spinlabs.vasp.verify import offer_rescale
+
+    _progress_tree(tmp_path, done=["4"])
+    before = (tmp_path / "run_x.sh").read_text()
+
+    def ask(_question):
+        if answer is EOFError:
+            raise EOFError
+        return answer
+
+    offer_rescale(tmp_path, "run_x.sh", ask=ask)
+    assert (tmp_path / "run_x.sh").read_text() == before
+
+
+def test_offer_rescale_does_not_ask_when_done_or_without_timing(tmp_path, capsys):
+    from spinlabs.vasp.verify import offer_rescale
+
+    def never(_question):
+        raise AssertionError("asked")
+
+    _progress_tree(tmp_path / "all", done=["4", "5", "7", "9", "10"])
+    offer_rescale(tmp_path / "all", "run_x.sh", ask=never)
+    assert "5/5 runs done (0 left)." in capsys.readouterr().out
+
+    _progress_tree(tmp_path / "none")
+    offer_rescale(tmp_path / "none", "run_x.sh", ask=never)
+    out = capsys.readouterr().out
+    assert "0/5 runs done (5 left)." in out and "cannot estimate" in out
+
+
+def test_offer_rescale_second_order_diag(tmp_path, capsys):
+    from spinlabs.vasp.verify import offer_rescale
+
+    _progress_tree(tmp_path, done=["4_4"], attempted=["5_5"], order="second_order")
+    offer_rescale(tmp_path, "run_x.sh", ask=lambda q: "n")
+    assert "1/5 runs done (4 left; 1 attempted but failed)." in capsys.readouterr().out
+
+
+def test_main_verifies_then_reports_progress(tmp_path, capsys, monkeypatch):
+    from spinlabs.vasp.verify import main
+
+    _progress_tree(tmp_path, done=["4"])
+    (tmp_path / "input").mkdir()
+    (tmp_path / "input" / "INCAR").write_text("LDMATRIX = .TRUE.\n")
+    monkeypatch.setattr("builtins.input", lambda q: "n")
+    assert main(tmp_path, []) == 1  # BINARY and SPINLABS_REPO are not set
+    out = capsys.readouterr().out
+    assert "FAIL" in out and "1/5 runs done (4 left)." in out and "run_x.sh left as it is." in out
