@@ -34,7 +34,7 @@ from spinlabs.zfs_manager import ZFSManager  # noqa: E402
 MODES = ("computed", "sqrt", "diagonal", "diagonal-sqrt")
 STATES = (("ms_0", "$m_s=0$"), ("ms_1", "$m_s=\\pm1$"))
 DEFAULT_SIGMAS = [0.1, 0.15, 0.2, 0.3, 0.5, 1.0, 2.0, 3.5, 5.0, 6.0, 7.0, 7.5, 8.0, 8.5, 9.0, 9.5, 10.0, 11.0, 12.0]
-NV64 = "NV_64/pert_0.1/all_bands/20261021/NV_64_raw_zfs_data_all_bands_12d.npz"
+NV64 = "NV_64/pert_0.1/all_bands/20261029/NV_64_raw_zfs_data_all_bands_12d.npz"  # repackaged as unweighted
 NV512_STEP_0025 = "NV_512/pert_0.025/all_bands/20261020/NV_512_raw_zfs_data_all_bands_12d.npz"
 NV512_STEP_01 = "NV_512/pert_0.1/all_bands/20261022/NV_512_raw_zfs_data_all_bands_12d.npz"
 DEFAULT_CASES = [
