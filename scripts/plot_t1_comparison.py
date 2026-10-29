@@ -39,9 +39,9 @@ NV512_STEP_0025 = "NV_512/pert_0.025/all_bands/20261020/NV_512_raw_zfs_data_all_
 NV512_STEP_01 = "NV_512/pert_0.1/all_bands/20261022/NV_512_raw_zfs_data_all_bands_12d.npz"
 DEFAULT_CASES = [
     ("NV 64 step 0.1, all pairs computed", NV64, "computed"),
-    ("NV 64 step 0.1, diagonal + sqrt(V_ii V_jj)", NV64, "diagonal-sqrt"),
-    ("NV 512 step 0.025, diagonal + sqrt(V_ii V_jj)", NV512_STEP_0025, "sqrt"),
-    ("NV 512 step 0.1, diagonal + sqrt(V_ii V_jj)", NV512_STEP_01, "sqrt"),
+    ("NV 64 step 0.1, diagonal + sqrt fill", NV64, "diagonal-sqrt"),
+    ("NV 512 step 0.025, diagonal + sqrt fill", NV512_STEP_0025, "sqrt"),
+    ("NV 512 step 0.1, diagonal + sqrt fill", NV512_STEP_01, "sqrt"),
     ("NV 512 step 0.025, diagonal only", NV512_STEP_0025, "diagonal"),
     ("NV 512 step 0.1, diagonal only", NV512_STEP_01, "diagonal"),
 ]
@@ -147,8 +147,9 @@ def plot(result, out, mark):
                ncol=3 if len(result["cases"]) > 4 else 2, fontsize=8.5, frameon=False)
     conventions = "; ".join(dict.fromkeys(case["convention"] for case in result["cases"]))
     mark_text = f"sigma = {mark:g} meV" if kind == "sigma" else f"{mark:g} K"
-    fig.text(0.5, -0.05, f"displacement: {conventions}\ninconsistent second-order entries excluded; sqrt fill only "
-             f"for symmetry-allowed coupling types; vertical dotted line: {mark_text}",
+    fig.text(0.5, -0.05, f"displacement: {conventions}; inconsistent second-order entries excluded\nsqrt fill: "
+             "sqrt(V_ii V_jj) per coupling type, sqrt(V00_aa V_ee) for A x E pairs, symmetry-allowed types only; "
+             f"vertical dotted line: {mark_text}",
              ha="center", fontsize=8.5, color="#555555")
     fig.tight_layout()
     fig.savefig(out, dpi=200, bbox_inches="tight")
