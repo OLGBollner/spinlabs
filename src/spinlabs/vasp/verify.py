@@ -3,8 +3,10 @@
 Checks the INCAR and the prefilled SLURM script in a run folder so that
 problems are caught *before* sbatch queues the job, not hours later in
 the scheduler.  The checks mirror the preflight in the run templates but
-run locally at generation time.  It also counts the finished runs and
-offers to fit the script's time limit to the runs that are left
+run locally at generation time.  It also counts the finished runs, says
+why the others did not finish (from the tree's SLURM logs, see
+spinlabs.vasp.slurm_logs) and offers to fit the script's time limit to the
+runs that are left
 (:func:`main`, which a tree's verify_perturbation_setup.py calls).
 """
 
@@ -18,6 +20,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from spinlabs.vasp.modes import mode_numbers
+from spinlabs.vasp.slurm_logs import summarize, unfinished_reasons
 from spinlabs.vasp.trees import read_outcar_time, sbatch_time, step_sizes
 
 PLACEHOLDER = re.compile(r"<[^<>\s]+>")
@@ -231,6 +234,23 @@ def _script_order(script_name: str, config: dict[str, str]) -> str:
     return "second_order" if "second_order" in script_name else "first_order"
 
 
+def unfinished_runs(folder: Path) -> dict[str, str] | None:
+    """Why each of the tree's runs without ``.done`` did not finish (see :func:`unfinished_reasons`).
+
+    None when the folder has no single run_*.sh job script or its runs cannot be listed.
+    """
+    scripts = sorted(Path(folder).glob("run_*.sh"))
+    if len(scripts) != 1:
+        return None
+    config = script_config(_read(scripts[0]))
+    try:
+        expected = expected_runs(config, _script_order(scripts[0].name, config))
+    except (KeyError, ValueError, OSError):
+        return None
+    finished = set(run_progress(folder, expected).done)
+    return unfinished_reasons(folder, [r for r in expected if r not in finished])
+
+
 def offer_rescale(folder: Path, script_name: str, ask=None) -> None:
     """Print how many runs are done and offer to fit the script's time limit to the ones left.
 
@@ -252,6 +272,10 @@ def offer_rescale(folder: Path, script_name: str, ask=None) -> None:
     if progress.left == 0:
         print("All runs are done; nothing to update.")
         return
+    finished = set(progress.done)
+    print("Not finished (from the slurm-*.out logs here):")
+    for line in summarize(unfinished_reasons(folder, [r for r in expected if r not in finished])):
+        print(f"  {line}")
     per_run = median_run_seconds(folder, progress.done)
     if per_run is None:
         print("No finished run with an OUTCAR wall time yet; cannot estimate a new time limit.")
