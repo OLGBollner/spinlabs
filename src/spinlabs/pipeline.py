@@ -661,7 +661,7 @@ def _execute_pipeline(
     coupling_path = run_dir / "spin_phonon_coupling.npz"
     inconsistent_pairs: list[tuple[int, int, float, float]] = []
     symmetry_derived_pairs: list[tuple[int, int]] = []
-    offdiag_filled = 0
+    offdiag_filled = offdiag_filled_a_x_e = 0
     if coupling_data is not None:
         coupling_data.save(coupling_path)
         LOGGER.info(f"saved coupling data (copied from the input): {coupling_path}")
@@ -695,6 +695,7 @@ def _execute_pipeline(
         inconsistent_pairs = manager.inconsistent_pairs
         symmetry_derived_pairs = manager.symmetry_derived_pairs
         offdiag_filled = manager.n_offdiag_filled
+        offdiag_filled_a_x_e = manager.n_offdiag_filled_a_x_e
 
     # ── 6. Transition Rates Calculation ──────────────────────────────────────
     temps = temperature_grid(t_start, t_end, t_step, temperatures)
@@ -805,8 +806,13 @@ def _execute_pipeline(
             "enabled": degenerate_pairs_from_symmetry,
             "pairs": [f"{x + 1}_{y + 1}" for x, y in symmetry_derived_pairs],
         },
-        # Second-order pairs i != j not computed, approximated as sqrt(V_ii V_jj).
-        "offdiag_from_diagonal": {"enabled": offdiag_from_diagonal, "pairs_filled": offdiag_filled},
+        # Second-order pairs i != j not computed, approximated from the diagonal couplings: same-type
+        # pairs as sqrt(V_ii V_jj), A x E pairs as sqrt(V00_aa V_ee) (counted in both numbers).
+        "offdiag_from_diagonal": {
+            "enabled": offdiag_from_diagonal,
+            "pairs_filled": offdiag_filled,
+            "a_x_e_pairs_filled": offdiag_filled_a_x_e,
+        },
     }
 
     info_path = run_dir / "run_info.json"

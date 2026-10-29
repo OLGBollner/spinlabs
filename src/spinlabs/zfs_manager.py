@@ -131,6 +131,7 @@ class ZFSManager:
         # geometric mean of the two diagonal couplings; see _offdiag_from_diagonal.
         self.offdiag_from_diagonal = offdiag_from_diagonal
         self.n_offdiag_filled = 0  # pairs (i < j) filled that way
+        self.n_offdiag_filled_a_x_e = 0  # of which A x E pairs, filled by the mixed-type root
         if self.displacement != "mass_weighted":
             if spectrum is None:
                 raise ValueError(
@@ -669,16 +670,23 @@ class ZFSManager:
     def _offdiag_from_diagonal(
         self, computed: set[tuple[int, int]], V_0_0_2nd: np.ndarray, V_p_m_2nd: np.ndarray, V_0_pm_2nd: np.ndarray
     ) -> None:
-        """Approximate each second-order pair (i, j), i != j, that was not computed as sqrt(V_ii V_jj).
+        """Approximate each second-order pair (i, j), i != j, that was not computed, from the diagonal.
 
-        Per coupling type, from the diagonal couplings (the (i, i) runs, inherited by degenerate
-        twins), and only for the types the pair's symmetry allows, by the same rules as the computed
-        pairs in calculate_second_order_derivatives: A1 x A1 and A2 x A2 give V_00; Ex x Ex and
-        Ey x Ey give V_00, V_0pm and V_pm; Ex x Ey gives V_0pm and V_pm; any other pair none.
-        A x E pairs are allowed V_0pm and V_pm, but an A mode has no diagonal V_0pm or V_pm, so
-        the root would be zero: they are left out, and only a computed A x E pair has them.
-        Pairs in ``computed`` (run, or derived by symmetry) keep their values. The rates use V^2,
-        so this assumes the cross curvature is as large as the two diagonal ones allow.
+        From the diagonal couplings (the (i, i) runs, inherited by degenerate twins), and only for
+        the types the pair's symmetry allows, by the same rules as the computed pairs in
+        calculate_second_order_derivatives. Same-type pairs take the root of the same coupling type,
+        V_T(i, j) = sqrt(V_T(i, i) V_T(j, j)): A1 x A1 and A2 x A2 give V_00; Ex x Ex and Ey x Ey give
+        V_00, V_0pm and V_pm; Ex x Ey gives V_0pm and V_pm.
+
+        A x E pairs (A1 x E = A2 x E = E) are allowed V_0pm and V_pm, but an A mode has no diagonal
+        V_0pm or V_pm, so that root would be zero. They take the mixed-type root instead,
+        V_T(a, e) = sqrt(V_00(a, a) V_T(e, e)), and no V_00: how strongly the A mode modulates D,
+        with how strongly the E mode flips the spin. Any other pair (A1 x A2) gets nothing.
+
+        Both roots are heuristics: neither follows from symmetry, and pair by pair they scatter by a
+        factor of about ten. In NV_64, where every pair is computed, the fill without the A x E pairs
+        gives a T1 2.5-4.4x the all-pairs one (100-500 K, sigma 1-7.5 meV); with them 0.74-1.46x.
+        Pairs in ``computed`` (run, or derived by symmetry) keep their values.
         """
         n = V_0_0_2nd.shape[0]
         labels = list(self.spectrum.symmetries) if self.spectrum is not None and self.spectrum.symmetries else []
@@ -691,21 +699,29 @@ class ZFSManager:
         a_pair = same & np.isin(irrep, ["A1", "A2"])[:, None]  # A1 x A1, A2 x A2: product A1
         e_same = same & (is_ex | is_ey)[:, None]  # Ex x Ex, Ey x Ey
         e_mixed = (is_ex[:, None] & is_ey[None, :]) | (is_ey[:, None] & is_ex[None, :])  # Ex x Ey
+        is_a, is_e = np.isin(irrep, ["A1", "A2"]), is_ex | is_ey
+        a_x_e = (is_a[:, None] & is_e[None, :]) | (is_e[:, None] & is_a[None, :])  # A1 x E, A2 x E
         allowed = {"V_00": a_pair | e_same, "V_pm": e_same | e_mixed, "V_0pm": e_same | e_mixed}
 
         keep = np.eye(n, dtype=bool)
         for i, j in computed:
             keep[i, j] = keep[j, i] = True
+        v00_diag = np.abs(np.diag(V_0_0_2nd))  # before the loop: it fills only off-diagonal entries
         for name, V in (("V_00", V_0_0_2nd), ("V_pm", V_p_m_2nd), ("V_0pm", V_0_pm_2nd)):
             diag = np.abs(np.diag(V))
             fill = ~keep & allowed[name]
             V[fill] = np.sqrt(np.outer(diag, diag))[fill]
-        any_allowed = allowed["V_00"] | allowed["V_pm"]
+            if name != "V_00":  # A x E: the A mode's V_00 with the E mode's spin-flip coupling
+                a_side, e_side = np.where(is_a, v00_diag, 0.0), np.where(is_e, diag, 0.0)
+                fill = ~keep & a_x_e
+                V[fill] = np.sqrt(np.outer(a_side, e_side) + np.outer(e_side, a_side))[fill]
+        any_allowed = allowed["V_00"] | allowed["V_pm"] | a_x_e
         self.n_offdiag_filled = int(np.count_nonzero(np.triu(~keep & any_allowed, 1)))
+        self.n_offdiag_filled_a_x_e = int(np.count_nonzero(np.triu(~keep & a_x_e, 1)))
         LOGGER.info(
-            f"off-diagonal couplings from the diagonal, sqrt(V_ii V_jj), symmetry-allowed types only: "
-            f"{self.n_offdiag_filled} pairs filled, {int(np.count_nonzero(np.triu(keep, 1)))} computed "
-            "off-diagonal pairs kept"
+            f"off-diagonal couplings from the diagonal, symmetry-allowed types only: {self.n_offdiag_filled} "
+            f"pairs filled ({self.n_offdiag_filled_a_x_e} A x E by sqrt(V00_aa V_ee), the rest by sqrt(V_ii V_jj)), "
+            f"{int(np.count_nonzero(np.triu(keep, 1)))} computed off-diagonal pairs kept"
         )
 
     def process_first_order_perturbations(self, output_filename: Optional[str] = None) -> list[str]:
