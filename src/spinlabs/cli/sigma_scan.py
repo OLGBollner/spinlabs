@@ -117,7 +117,12 @@ def _run_sigma_scan(args: argparse.Namespace) -> None:
         if not any(np.any(np.isfinite(v) & (v > 0)) for by_state in t1_all.values() for v in by_state.values()):
             LOGGER.warning(f"no finite T1 to plot; {args.plot_temperature} not written")
         else:
-            _plot_temperature(manager, t1_all, all_temps, args.init_state, args.plot_temperature, DEFAULT_SIGMA_MEV)
+            # the --t-range grid only: a --temperature outside it would stretch the lines past the range
+            on_grid = np.isin(np.round(all_temps, 9), np.round(grid, 9))
+            t1_grid = {sigma: {state: v[on_grid] for state, v in by_state.items()} for sigma, by_state in t1_all.items()}
+            _plot_temperature(
+                manager, t1_grid, all_temps[on_grid], args.init_state, args.plot_temperature, DEFAULT_SIGMA_MEV
+            )
             LOGGER.info(f"saved figure: {args.plot_temperature}")
     if args.plot:
         if not any(np.any(np.isfinite(v) & (v > 0)) for by_state in t1.values() for v in by_state.values()):
@@ -125,6 +130,13 @@ def _run_sigma_scan(args: argparse.Namespace) -> None:
         else:
             _plot(manager, t1, temps, args.init_state, args.plot, DEFAULT_SIGMA_MEV)
             LOGGER.info(f"saved figure: {args.plot}")
+
+
+def _gaps_as_nan(t1: np.ndarray) -> np.ndarray:
+    """T1 with missing, infinite or non-positive values as NaN, so a log plot breaks the line there
+    instead of drawing straight across the gap."""
+    t1 = np.asarray(t1, dtype=float)
+    return np.where(np.isfinite(t1) & (t1 > 0), t1, np.nan)
 
 
 def _on_grid(valid: np.ndarray, values: np.ndarray, temps: np.ndarray) -> np.ndarray:
@@ -197,10 +209,9 @@ def _plot_temperature(manager, t1, temps, states, path: Path, default_sigma) -> 
     fig, axes = plt.subplots(1, len(panels), figsize=(5.2 * len(panels) + 1.2, 4.5), sharey=True, squeeze=False)
     for ax, group in zip(axes[0], panels):
         for sigma in sigmas:
-            y = t1[sigma][group[0]]
-            ok = np.isfinite(y) & (y > 0)
+            y = _gaps_as_nan(t1[sigma][group[0]])
             default = np.isclose(sigma, default_sigma)
-            ax.plot(temps[ok], y[ok], "-", lw=2.6 if default else 1.6, color=cmap(norm(sigma)), zorder=3 if default else 2)
+            ax.plot(temps, y, "-", lw=2.6 if default else 1.6, color=cmap(norm(sigma)), zorder=3 if default else 2)
         name = "$m_s=\\pm1$" if sorted(group) == ["ms_-1", "ms_1"] else ", ".join(_INIT_STATE_LABELS.get(g, g) for g in group)
         ax.set_title(name, fontsize=10)
         ax.set_yscale("log")
@@ -243,7 +254,8 @@ def _plot(manager, t1, temps, states, path: Path, default_sigma) -> None:
     for k, (group, m, y) in enumerate(curves):
         name = "$m_s=\\pm1$" if sorted(group) == ["ms_-1", "ms_1"] else ", ".join(_INIT_STATE_LABELS.get(g, g) for g in group)
         label = name + (f", {temps[m]:g} K" if len(temps) > 1 else "")
-        ax.plot(sigmas, y, styles[m % len(styles)], marker="o", ms=5, lw=2, color=colors[k % len(colors)], label=label)
+        ax.plot(sigmas, _gaps_as_nan(y), styles[m % len(styles)], marker="o", ms=5, lw=2,
+                color=colors[k % len(colors)], label=label)
     ax.axvline(default_sigma, color="#888888", lw=1, ls=":", label=f"default ({default_sigma:g} meV)")
     ax.set_xscale("log")
     ax.set_yscale("log")

@@ -134,6 +134,29 @@ def test_sigma_scan_plots_t1_against_temperature_per_sigma(tmp_path, capsys, mon
              "--t-range", "300", "50", "50"]))
 
 
+def test_sigma_scan_temperature_plot_stays_on_the_t_range(tmp_path, capsys, monkeypatch):
+    """A --temperature outside --t-range is in the table, not on the T1-vs-T lines."""
+    import matplotlib.pyplot as plt
+
+    raw_file = _inputs(tmp_path, spin_flip=True)
+    figures = []
+    monkeypatch.setattr(plt, "close", figures.append)
+    cli.main(["run", "sigma-scan", "--raw-zfs-file", str(raw_file), "--sigma", "7.5", "--temperature", "400",
+              "--init-state", "0", "--plot-temperature", str(tmp_path / "t.png"), "--t-range", "50", "300", "50", "-q"])
+
+    assert "ms_0 @400K" in capsys.readouterr().out
+    assert list(figures[-1].axes[0].lines[0].get_xdata()) == [50, 100, 150, 200, 250, 300]
+
+
+def test_missing_t1_breaks_the_plotted_line():
+    """NaN, infinite and non-positive T1 become NaN, where matplotlib leaves a gap instead of a straight line."""
+    import spinlabs.cli.sigma_scan as scan
+
+    out = scan._gaps_as_nan([1.0, np.nan, np.inf, 0.0, -2.0, 3.0])
+    np.testing.assert_array_equal(np.isnan(out), [False, True, True, True, True, False])
+    assert out[0] == 1.0 and out[-1] == 3.0
+
+
 def test_sigma_scan_without_spin_flip_coupling_reports_infinite_t1(tmp_path, capsys):
     """A1-only responses give no transitions: T1 is infinite, and the plot is skipped with a note."""
     raw_file = _inputs(tmp_path)
