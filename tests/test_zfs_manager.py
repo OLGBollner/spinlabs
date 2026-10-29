@@ -179,6 +179,29 @@ class TestZFSManager:
         assert "symmetry mismatch" not in caplog.text
         assert "second-order symmetry: 1 of 1 entries hold content outside Gi x Gj" in caplog.text
 
+    def test_a_x_e_pair_gives_the_e_couplings_of_its_curvature(self, setup_system):
+        """A1 x Ex and A1 x Ey are pure E: V_pm and V_0pm as for Ex x Ex, and no V_00."""
+        manager, _, _ = setup_system
+        # E parts |w| = sqrt(6^2 + 4*4^2) = 10, |p| = sqrt(3^2 + 4^2) = 5, plus an A1 part that must not count.
+        e_x = np.array([[3.0, 0.0, 3.0], [0.0, -3.0, 0.0], [3.0, 0.0, 0.0]])
+        e_y = np.array([[0.0, 4.0, 0.0], [4.0, 0.0, 4.0], [0.0, 4.0, 0.0]])
+        curvature = e_x + e_y + 0.2 * np.diag([-1.0, -1.0, 2.0])
+        manager.zfs_tensors_2d = {
+            (0, 1): self._second_order_entry(manager, curvature, ("A1", "Ex")),
+            (2, 3): self._second_order_entry(manager, curvature, ("Ey", "A1")),
+            (1, 1): self._second_order_entry(manager, curvature, ("Ex", "Ex")),
+        }
+        manager.treated_modes = {0, 1, 2, 3}
+
+        _, V00, Vpm, V0pm = manager.calculate_second_order_derivatives(np.zeros((4, 3, 3)))
+
+        for i, j in ((0, 1), (2, 3)):
+            assert np.isclose(Vpm[i, j] / self.D2_UNIT, 10.0 / 4) and Vpm[j, i] == Vpm[i, j]
+            assert np.isclose(V0pm[i, j] / self.D2_UNIT, 5.0 / (2.0 * np.sqrt(2))) and V0pm[j, i] == V0pm[i, j]
+            assert V00[i, j] == 0.0
+            # the same E couplings an Ex x Ex pair with this curvature gets
+            assert np.isclose(Vpm[i, j], Vpm[1, 1]) and np.isclose(V0pm[i, j], V0pm[1, 1])
+
     def test_twin_inherits_a_diagonal_coupling_only_when_it_has_none(self, setup_system):
         manager, spectrum, gs_zfs = setup_system
         manager.treated_modes = {1, 2}  # fewer than the 4 modes: inheritance is on
@@ -227,7 +250,7 @@ class TestZFSManager:
         for V in (Vpm, V0pm):
             assert V[1, 2] == pytest.approx(np.sqrt(V[1, 1] * V[2, 2])) and V[2, 1] == V[1, 2] and V[1, 2] > 0
         assert V00[1, 2] == 0
-        # A1 x E pairs get nothing, as a computed A1 x E pair would not
+        # A1 x E pairs are not filled: an A1 mode has no diagonal V_pm or V_0pm to take the root of
         for i, j in ((0, 1), (0, 2), (3, 1), (3, 2)):
             assert V00[i, j] == Vpm[i, j] == V0pm[i, j] == 0
         assert manager.n_offdiag_filled == 1

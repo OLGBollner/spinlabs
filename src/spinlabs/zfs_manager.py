@@ -539,6 +539,10 @@ class ZFSManager:
             elif {sym_i, sym_j} == {"Ex", "Ey"}:
                 V_0_pm_2nd[i, j] = np.sqrt(d2D_dqidqj[0, 2] ** 2 + d2D_dqidqj[1, 2] ** 2) / (2.0 * np.sqrt(2))
                 V_p_m_2nd[i, j] = 0.5 * np.sqrt(diff_in_plane**2 + 4.0 * off_diag_in_plane**2)
+            elif {sym_i, sym_j} & {"A1", "A2"} and {sym_i, sym_j} & {"Ex", "Ey"}:
+                # A x E = E: a pure E curvature, shaped like a first-order E derivative, so no V_00.
+                V_0_pm_2nd[i, j] = np.sqrt(d2D_dqidqj[0, 2] ** 2 + d2D_dqidqj[1, 2] ** 2) / (2.0 * np.sqrt(2))
+                V_p_m_2nd[i, j] = 0.25 * np.sqrt(diff_in_plane**2 + 4.0 * off_diag_in_plane**2)
 
             if i == j:
                 diagonal_done.add(i)
@@ -669,6 +673,8 @@ class ZFSManager:
         twins), and only for the types the pair's symmetry allows, by the same rules as the computed
         pairs in calculate_second_order_derivatives: A1 x A1 and A2 x A2 give V_00; Ex x Ex and
         Ey x Ey give V_00, V_0pm and V_pm; Ex x Ey gives V_0pm and V_pm; any other pair none.
+        A x E pairs are allowed V_0pm and V_pm, but an A mode has no diagonal V_0pm or V_pm, so
+        the root would be zero: they are left out, and only a computed A x E pair has them.
         Pairs in ``computed`` (run, or derived by symmetry) keep their values. The rates use V^2,
         so this assumes the cross curvature is as large as the two diagonal ones allow.
         """
