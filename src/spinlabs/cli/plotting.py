@@ -273,54 +273,18 @@ def _run_label(run_dir: Path, meta: tuple | None) -> str:
     return ", ".join(parts) + f" ({run_dir.name})"
 
 
-def _run_figure_subdir(run_dir: Path, meta: tuple | None) -> Path:
-    """Figure folder of a run, mirroring the run layout: ``<defect>_<cell>/pert_<x>/<method>/<run name>``.
-
-    The run name (its timestamp) is the leaf. Unregistered runs keep their
-    last four path parts when they sit in that layout, else just their name.
-    """
-    if meta is None:
-        parts = run_dir.parts
-        if len(parts) >= 4 and parts[-3].startswith("pert_"):
-            return Path(*parts[-4:])
-        return Path(run_dir.name)
-    defect, cell, method, pert = meta
-    head = f"{defect}_{cell}" if cell is not None else str(defect)
-    pert_dir = f"pert_{pert:g}" if pert is not None else "pert_none"
-    return Path(head) / pert_dir / (method or "unknown_method") / run_dir.name
-
-
-def _combined_figure_subdir(run_dirs: list[Path]) -> Path:
-    """Figure folder for one figure drawn from several runs, in the per-run layout.
-
-    Levels every run shares are kept; differing values are joined with ``+``
-    (e.g. ``NV_64+NV_512/pert_0.1/all_bands``). The leaf is the newest run's
-    name (the last run, as queries list runs oldest first). Folders that are
-    neither registered runs nor in the run layout (loose npz files) add no level.
-    """
-    subdirs = [
-        sub.parts
-        for d in dict.fromkeys(run_dirs)
-        if len((sub := _run_figure_subdir(d, _run_meta(d))).parts) > 1
-    ]
-    if not subdirs:
-        return Path()
-    if len(subdirs) == 1:
-        return Path(*subdirs[0])
-    if len({len(parts) for parts in subdirs}) != 1:
-        return Path(subdirs[-1][-1])  # mixed layouts: only the newest run's name
-    levels = ["+".join(dict.fromkeys(level)) for level in zip(*(parts[:-1] for parts in subdirs))]
-    return Path(*levels, subdirs[-1][-1])
-
-
 def _plot_each_run(args: argparse.Namespace, kind: str, plot_run) -> None:
-    """Plot every selected run in its own figure(s); with --show all windows open together."""
+    """Plot every selected run in its own figure(s); with --show all windows open together.
+
+    All runs write to one folder (figures/<kind>/, or -o); the plot functions name
+    each file after its run's configuration.
+    """
     shown = []
+    out_dir = args.output or _figures_dir(kind)
+    out_dir.mkdir(parents=True, exist_ok=True)
     for run_dir in _resolve_run_dirs(args):
         meta = _run_meta(run_dir)
         section(LOGGER, f"Plot {kind}: {_run_label(run_dir, meta)} ({run_dir})")
-        out_dir = (args.output or _figures_dir(kind)) / _run_figure_subdir(run_dir, meta)
-        out_dir.mkdir(parents=True, exist_ok=True)
         shown += plot_run(run_dir, out_dir, args.fmt, args.dpi, args.show, title=_run_label(run_dir, meta)) or []
     if shown:
         plt.show()
@@ -413,13 +377,7 @@ def _run_t1(args: argparse.Namespace) -> None:
         if not args.inputs:
             raise SystemExit("error: provide npz/run paths, or use --query to select registry runs")
         inputs = args.inputs
-    if args.output:
-        out = args.output
-    else:
-        run_dirs = dirs if args.query else [Path(p) if Path(p).is_dir() else Path(p).parent for p in inputs]
-        name = "t1_rate" if args.rate else "t1"
-        out = _figures_dir("t1") / _combined_figure_subdir(run_dirs) / f"{name}.{args.fmt}"
-        out.parent.mkdir(parents=True, exist_ok=True)
+    out = args.output or _default_output(args, "t1", "t1_rate" if args.rate else "t1")
     section(LOGGER, f"Plot {'1/T1' if args.rate else 'T1'}: {len(inputs)} file(s)")
     for path in inputs:
         LOGGER.debug(f"T1 data: {path}")

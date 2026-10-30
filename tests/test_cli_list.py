@@ -1,4 +1,4 @@
-"""``spinlabs list``: the latest packages, runs and plots per configuration, and what is out of date."""
+"""``spinlabs list``: the latest packages and runs per configuration, and what is out of date."""
 
 import os
 
@@ -26,12 +26,6 @@ def _run(conn, tmp_path, name: str, package, started: str):
     return run_dir
 
 
-def _figure(tmp_path, kind: str, run_name: str):
-    path = tmp_path / "figures" / kind / "NV_512" / "pert_0.025" / "all_bands" / run_name / "plot.png"
-    path.parent.mkdir(parents=True)
-    path.write_bytes(b"x")
-
-
 def test_run_from_an_older_package_is_marked(tmp_path, capsys, monkeypatch):
     monkeypatch.chdir(tmp_path)
     conn = ensure_db()
@@ -43,22 +37,7 @@ def test_run_from_an_older_package_is_marked(tmp_path, capsys, monkeypatch):
     assert "OLDER package" in out and "1 run(s) analysed an older package" in out
 
 
-def test_plots_of_an_older_run_are_named(tmp_path, capsys, monkeypatch):
-    monkeypatch.chdir(tmp_path)
-    conn = ensure_db()
-    pkg = _package(conn, tmp_path, "20261016")
-    _run(conn, tmp_path, "20261016_100000", pkg, "2026-10-16T08:00:00+00:00")
-    _run(conn, tmp_path, "20261020_100000", pkg, "2026-10-20T08:00:00+00:00")
-    _figure(tmp_path, "coupling", "20261016_100000")
-    main(["list", "--plot"])
-    out = capsys.readouterr().out
-    assert "20261020_100000  none; last plotted from older run 20261016_100000: coupling" in out
-    _figure(tmp_path, "t1", "20261020_100000")
-    main(["list", "--plot"])
-    assert "t1 (1," in capsys.readouterr().out
-
-
-def test_default_lists_packages_runs_and_plots(tmp_path, capsys, monkeypatch):
+def test_default_lists_packages_and_runs(tmp_path, capsys, monkeypatch):
     monkeypatch.chdir(tmp_path)
     conn = ensure_db()
     pkg = _package(conn, tmp_path, "20261016")
@@ -66,8 +45,9 @@ def test_default_lists_packages_runs_and_plots(tmp_path, capsys, monkeypatch):
     _run(conn, tmp_path, "20261016_100000", pkg, "2026-10-16T08:00:00+00:00")
     main(["list"])
     out = capsys.readouterr().out
-    for title in ("Packaged data", "Runs (latest", "Plots of the latest runs"):
+    for title in ("Packaged data", "Runs (latest"):
         assert title in out
+    assert "Plots of the latest runs" not in out
     assert "newest package" in out and "data/NV_512/pert_0.025/all_bands/20261016" in out
 
 
