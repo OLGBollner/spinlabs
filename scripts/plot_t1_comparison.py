@@ -46,7 +46,7 @@ DEFAULT_CASES = [
     ("NV 512 step 0.1, diagonal only", NV512_STEP_01, "diagonal"),
     ("NV 64 step 0.1, diagonal only", NV64, "diagonal"),
 ]
-DEFAULT_CASES_TEMPERATURE = DEFAULT_CASES[:4]
+DEFAULT_CASES_TEMPERATURE = DEFAULT_CASES[:4] + DEFAULT_CASES[6:]  # without the NV_512 diagonal-only curves
 COLORS = ["#2a78d6", "#eb6834", "#1baf7a", "#8e5bd0", "#c9a227", "#555555"]  # one per raw file
 MARKERS = "osD^vP"
 MODE_STYLES = {
