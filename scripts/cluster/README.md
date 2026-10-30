@@ -42,7 +42,8 @@ from that snapshot.
   plus the convergence folders `convergence_test_all/` and `convergence_test_occup/`.
   `--pert` (the step) is required; `--displacement` defaults to `normalized`;
   `--conv-modes` picks the convergence modes (or `--no-convergence`), `--conv-perts` their
-  step sizes (default p/2, p, 2p for each step p; each run at both signs). The generated script gets
+  step sizes (default p/2, p, 2p and 4p for each step p, 4p being the 2Q helper of 2p; each run at
+  both signs). The generated script gets
   `#SBATCH -J <defect>_<order>_<basis>` and a time limit / array size from the reference
   OUTCAR's wall time x tasks / `--array-jobs`; `--max-hours` caps the per-job limit.
 - `add_convergence_tree.py`: add the convergence folders to an existing defect folder

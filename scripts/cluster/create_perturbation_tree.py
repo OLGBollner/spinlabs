@@ -43,8 +43,8 @@ def main() -> int:
         type=float,
         nargs="+",
         default=None,
-        help="convergence step sizes, each run at -s and +s (default: p/2, p, 2p for each --pert p, so the "
-        "forward second order has a point at every tree step)",
+        help="convergence step sizes, each run at -s and +s (default: p/2, p, 2p and 4p for each --pert p, 4p "
+        "being the 2Q helper of 2p, so the forward second order has points up to twice the tree step)",
     )
     ap.add_argument("--no-convergence", action="store_true", help="do not create the convergence folders")
     ap.add_argument(

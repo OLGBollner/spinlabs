@@ -40,16 +40,19 @@ class MathUtils:
 
     @staticmethod
     def smear_data(freqs: np.ndarray, values: np.ndarray, res: float, sigma: float) -> Tuple[np.ndarray, np.ndarray]:
+        """Each value spread as a Gaussian of width ``sigma`` over the grid, in [values]/[freqs].
+
+        The Gaussian is not truncated: its tail reaches every grid point, so a mode far
+        above omega ~ 0 still leaves there the small weight the one-phonon rate samples.
+        """
         x_grid, y_dense = MathUtils.expand_data(freqs, values, res, sigma)
 
-        x_kernel = np.arange(-4 * sigma, 4 * sigma + res, res)
+        half = len(x_grid) - 1  # kernel reaches from any grid point to any other
+        x_kernel = np.arange(-half, half + 1) * res
         kernel = np.exp(-0.5 * (x_kernel / sigma) ** 2) / (sigma * np.sqrt(2 * Cn.pi))
 
-        y_smooth = np.convolve(y_dense, kernel, mode="same")
-        if len(y_smooth) > len(x_grid):
-            diff = len(y_smooth) - len(x_grid)
-            start = diff // 2
-            y_smooth = y_smooth[start : start + len(x_grid)]
+        # Direct (not FFT) convolution: FFT round-off would swamp the far tails.
+        y_smooth = np.convolve(y_dense, kernel, mode="full")[half : half + len(x_grid)]
 
         return x_grid, y_smooth
 

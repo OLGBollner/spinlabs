@@ -116,6 +116,13 @@ def build_run_parser(parser: argparse.ArgumentParser) -> None:
         help="Take the second-order coupling of each degenerate Ex-Ey pair from its Ex-Ex derivative (C3v "
         "symmetry) instead of the computed Ex-Ey entry, so those runs are not needed",
     )
+    opt.add_argument(
+        "--offdiag-from-diagonal",
+        action="store_true",
+        help="Approximate every second-order pair (i, j), i != j, that was not run from the diagonal couplings: "
+        "sqrt(V_ii V_jj) per coupling type, and sqrt(V00_aa V_ee) for A x E pairs; a heuristic, only for the "
+        "types the pair's symmetry allows (computed pairs keep their values)",
+    )
     add_verbosity_args(opt)
 
     parser.set_defaults(func=_run)
@@ -240,6 +247,7 @@ def _run(args: argparse.Namespace) -> None:
         show_plots=False,
         exclude_inconsistent_pairs=args.exclude_inconsistent_pairs,
         degenerate_pairs_from_symmetry=args.degenerate_pairs_from_symmetry,
+        offdiag_from_diagonal=args.offdiag_from_diagonal,
         sigma=args.sigma,
     )
 
@@ -343,5 +351,6 @@ def _run_one_query_dataset(
         show_plots=False,
         exclude_inconsistent_pairs=args.exclude_inconsistent_pairs,
         degenerate_pairs_from_symmetry=args.degenerate_pairs_from_symmetry,
+        offdiag_from_diagonal=args.offdiag_from_diagonal,
         sigma=args.sigma,
     )
