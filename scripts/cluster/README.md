@@ -54,7 +54,10 @@ from that snapshot.
   convergence script becomes `run_convergence.sh`), and copy in the current
   `verify_perturbation_setup.py`.
 - `verify_perturbation_setup.py` (in each tree, from the templates): checks the INCAR and job
-  script, then prints `x/N runs done` (a run is done when its folder has `.done`) and offers to
+  script, then prints `x/N runs done` (a run is done when its folder has `.done`), why each other
+  run did not finish (from the tree's `slurm-*.out` logs: time limit or another SLURM cancel,
+  VASP exit code, unconverged SCF, failed structure or displacement check, not started; see
+  `spinlabs.vasp.slurm_logs`; `spinlabs package` lists the same per tree) and offers to
   set the script's `-t` for the runs left: ceil(left / array tasks) x the median wall time of
   the finished runs x 1.2, keeping the array size (smaller only when fewer runs are left than
   tasks). The logic is `spinlabs.vasp.verify.main`, so a tree's copy stays current.

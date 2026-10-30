@@ -31,7 +31,9 @@ from spinlabs.vasp.settings import (
     summary_line,
     tree_settings,
 )
+from spinlabs.vasp.slurm_logs import summarize
 from spinlabs.vasp.trees import default_phonon
+from spinlabs.vasp.verify import unfinished_runs
 
 from spinlabs.logging_utils import get_logger
 
@@ -277,6 +279,9 @@ def _scan_raw(args: argparse.Namespace, defect_folder: Path, methods: list[str])
                 basis = datasets[o][pert_scale] / calc_method
                 if basis.is_dir():
                     trees[_ORDER_DIRS[o]] = tree_settings(basis)
+                    unfinished = unfinished_runs(basis)
+                    if unfinished is not None:
+                        trees[_ORDER_DIRS[o]]["unfinished"] = unfinished
                     convention = tree_displacement(basis)
                     if convention is not None:
                         weighting.add(convention)
@@ -409,6 +414,14 @@ def _print_settings_of(name: str, settings: dict | None) -> None:
     for problem in problems:
         print(f"    !! {problem}")
         LOGGER.debug(f"{name}: settings: {problem}")  # kept in the DB log; printed once above
+    for label, tree in trees.items():
+        unfinished = tree.get("unfinished") or {}
+        if not unfinished:
+            continue
+        print(f"    !! {label}: {len(unfinished)} run(s) not finished (from the tree's slurm-*.out logs):")
+        for line in summarize(unfinished):
+            print(f"         {line}")
+            LOGGER.debug(f"{name}: {label} not finished: {line}")
     if start:
         print(f"    starting point only (ISTART/ICHARG, same converged result): {len(start)} difference(s)")
         for line in start:
