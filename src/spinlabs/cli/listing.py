@@ -1,9 +1,9 @@
-"""``spinlabs list``: what the latest packaged data, runs and plots are, and when they were made.
+"""``spinlabs list``: what the latest packaged data and runs are, and when they were made.
 
 One row per configuration (defect, cell, method, pert-scale), picked like every
 ``--latest`` query (most perturbation orders, then newest; ``registry.more_complete``).
-Runs analysed from an older package than the newest one, and plots made from an older
-run than the newest one, are marked so it is clear what needs rerunning.
+Runs analysed from an older package than the newest one are marked so it is clear
+what needs rerunning.
 """
 
 from __future__ import annotations
@@ -23,32 +23,23 @@ from spinlabs.registry import (
     unregistered_warning,
 )
 
-FIGURE_SUFFIXES = (".png", ".pdf", ".svg", ".jpg", ".eps")
-
-
 def build_list_parser(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--package", action="store_true", help="Latest packaged data per configuration")
     parser.add_argument("--runs", action="store_true", help="Latest completed run per configuration")
-    parser.add_argument("--plot", action="store_true", help="Plots made from the latest run of each configuration")
     parser.add_argument("--defect", nargs="+", help="Only these defect name(s) (e.g. NV ClV)")
     parser.add_argument("--cell-size", nargs="+", type=int, help="Only these supercell size(s)")
-    parser.add_argument(
-        "--figures-dir", type=Path, default=Path("figures"), help="Where the plot commands wrote (default: ./figures)"
-    )
     add_verbosity_args(parser)
     parser.set_defaults(func=_run)
 
 
 def _run(args: argparse.Namespace) -> None:
     conn = ensure_db()
-    show_all = not (args.package or args.runs or args.plot)
+    show_all = not (args.package or args.runs)
     sections = []
     if args.package or show_all:
         sections.append(package_table(conn, args.defect, args.cell_size))
     if args.runs or show_all:
         sections.append(runs_table(conn, args.defect, args.cell_size))
-    if args.plot or show_all:
-        sections.append(plots_table(conn, args.defect, args.cell_size, args.figures_dir))
     print("\n\n".join(sections))
 
 
@@ -192,56 +183,6 @@ def runs_table(conn, defects=None, cells=None) -> str:
     return _table(
         "Runs (latest per configuration)",
         ["defect", "method", "pert", "orders", "started", "git", "data", "run"],
-        rows,
-        notes,
-    )
-
-
-def _figures_by_run(figures_dir: Path) -> dict[str, dict[str, tuple[int, float]]]:
-    """Run folder name -> plot kind -> (number of figures, newest mtime), from the per-run figure layout."""
-    found: dict[str, dict[str, list]] = {}
-    if not figures_dir.is_dir():
-        return {}
-    for path in figures_dir.rglob("*"):
-        if path.suffix.lower() not in FIGURE_SUFFIXES or not path.is_file():
-            continue
-        rel = path.relative_to(figures_dir)
-        if len(rel.parts) < 3:
-            continue  # loose figures (convergence, method comparison) belong to no run
-        kind, run_name = rel.parts[0], rel.parts[-2]
-        entry = found.setdefault(run_name, {}).setdefault(kind, [0, 0.0])
-        entry[0] += 1
-        entry[1] = max(entry[1], path.stat().st_mtime)
-    return {run: {k: (n, t) for k, (n, t) in kinds.items()} for run, kinds in found.items()}
-
-
-def plots_table(conn, defects=None, cells=None, figures_dir: Path = Path("figures")) -> str:
-    figures = _figures_by_run(figures_dir)
-    # every done run of a configuration, newest first, to tell which older run the plots belong to
-    history: dict[tuple, list[str]] = {}
-    for defect, cell, method, pert, run_dir in conn.execute(
-        "SELECT defect, cell, method, pert, run_dir FROM runs WHERE status = 'done' ORDER BY started_at DESC, id DESC"
-    ):
-        if run_dir:
-            history.setdefault((defect, cell, method, pert), []).append(Path(run_dir).name)
-    rows, missing = [], 0
-    for key, (run_dir, *_rest) in sorted(_latest_runs(conn).items(), key=lambda kv: _sort_key(*kv[0])):
-        defect, cell, method, pert = key
-        if not _wanted(defect, cell, defects, cells):
-            continue
-        name = Path(run_dir).name
-        kinds = figures.get(name, {})
-        if kinds:
-            made = ", ".join(f"{k} ({n}, {datetime.fromtimestamp(t):%m-%d %H:%M})" for k, (n, t) in sorted(kinds.items()))
-        else:
-            missing += 1
-            older = next((r for r in history.get(key, []) if r != name and r in figures), None)
-            made = f"none; last plotted from older run {older}: {', '.join(sorted(figures[older]))}" if older else "none"
-        rows.append([_config(*key), str(method), f"{pert:g}" if pert is not None else "?", name, made])
-    notes = [f"{missing} latest run(s) without plots under {figures_dir}/"] if missing else []
-    return _table(
-        f"Plots of the latest runs (under {figures_dir}/; kind (figures, last written))",
-        ["defect", "method", "pert", "run", "plots"],
         rows,
         notes,
     )

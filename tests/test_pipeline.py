@@ -108,9 +108,14 @@ def test_run_full_pipeline_from_coupling_data(tmp_path, dummy_coupling_file):
     plot_run_rates(run_dir, custom_fig_dir, "png", 150, False)
     plot_run_t1(run_dir, custom_fig_dir, "png", 150, False)
 
-    assert (custom_fig_dir / "coupling_spectral.png").exists()
-    assert (custom_fig_dir / "coupling_spectral_1d.png").exists()
-    assert (custom_fig_dir / "coupling_spectral_2d.png").exists()
+    # one folder holds every run's figures, so the names carry the run's configuration
+    coupling = run_dir / "spin_phonon_coupling.npz"
+    meta = np.load(coupling, allow_pickle=True)
+    tag = f"{meta['defect']}_{meta['cell_size']}_{meta['calc_method']}_pert-{float(meta['pert_scale']):g}"
+    assert not (custom_fig_dir / "coupling_spectral.png").exists()
+    assert (custom_fig_dir / f"coupling_spectral_1d_{tag}.png").exists()
+    assert (custom_fig_dir / f"coupling_spectral_2d_{tag}.png").exists()
+    assert (custom_fig_dir / f"transition_rates_{tag}_0_1.png").exists()
     assert (custom_fig_dir / "t1_vs_temperature.png").exists()
 
 

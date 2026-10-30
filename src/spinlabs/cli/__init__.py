@@ -39,7 +39,7 @@ def build_parser() -> argparse.ArgumentParser:
     build_table_parser(table_parser.add_subparsers(dest="command", required=True))
 
     build_list_parser(
-        subparsers.add_parser("list", help="When the latest packaged data, runs and plots were made")
+        subparsers.add_parser("list", help="When the latest packaged data and runs were made")
     )
 
     build_package_parser(subparsers.add_parser("package", help="Package (or with --scan, only parse) raw ZFS simulation data into a single .npz"))

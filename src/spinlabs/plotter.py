@@ -137,6 +137,17 @@ def plot_1d_spectral_functions(
     return fig, ax, ax2
 
 
+def _name_meta(defect, cell_size, calc_method=None, pert=None) -> str:
+    """Filename suffix naming a run's configuration, e.g. ``_NV_512_all_bands_pert-0.05`` (as plot_t1 names it).
+
+    Figures of every run share one folder per plot kind, so the name is what tells them apart.
+    """
+    parts = [str(x).replace(" ", "-") for x in (defect, cell_size, calc_method) if x is not None and str(x)]
+    if pert is not None and str(pert):
+        parts.append(f"pert-{float(pert):g}")
+    return "".join(f"_{p}" for p in parts)
+
+
 def plot_transition_rates_stacked(
     rates_data: str | Path | dict[str, Any],
     output_path: str | Path | None = None,
@@ -217,13 +228,9 @@ def plot_transition_rates_stacked(
 
         if output_path is not None:
             p = Path(output_path)
-            stem = p.stem
             # Metadata belongs in the filename, not a figure title
-            meta = "_".join(x.replace(" ", "-") for x in (defect, cell_size) if x)
-            if meta:
-                out_file = p.parent / f"{stem}_{meta}_{trans_key}{p.suffix}"
-            else:
-                out_file = p.parent / f"{stem}_{trans_key}{p.suffix}"
+            meta = _name_meta(defect, cell_size, data.get("calc_method"), data.get("pert_scale"))
+            out_file = p.parent / f"{p.stem}{meta}_{trans_key}{p.suffix}"
             fig.savefig(out_file, dpi=300)
             LOGGER.info(f"saved figure: {out_file}")
 
@@ -330,13 +337,10 @@ def plot_run_coupling(
         V_0_pm=data_display.V_0_pm,
         order=1,
     )
-    out_file1 = out_dir / f"coupling_spectral_1d.{fmt}"
+    meta = _name_meta(data.defect, data.cell_size, data.calc_method, data.pert_scale)
+    out_file1 = out_dir / f"coupling_spectral_1d{meta}.{fmt}"
     fig1.savefig(out_file1, dpi=dpi, bbox_inches="tight")
     LOGGER.info(f"saved figure: {out_file1}")
-
-    # Backward compatible alias
-    out_file_alias = out_dir / f"coupling_spectral.{fmt}"
-    fig1.savefig(out_file_alias, dpi=dpi, bbox_inches="tight")
     figures = [fig1]
 
     # 2D plot (diagonal phonons i == j)
@@ -364,7 +368,7 @@ def plot_run_coupling(
             V_0_pm=v2_0pm_diag,
             order=2,
         )
-        out_file2 = out_dir / f"coupling_spectral_2d.{fmt}"
+        out_file2 = out_dir / f"coupling_spectral_2d{meta}.{fmt}"
         fig2.savefig(out_file2, dpi=dpi, bbox_inches="tight")
         LOGGER.info(f"saved figure: {out_file2}")
         figures.append(fig2)

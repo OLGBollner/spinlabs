@@ -218,7 +218,9 @@ def test_plot_run_subcommand_query(subcmd, registry_db, tmp_path, monkeypatch, c
     args.func(args)
     assert len(called) == 1
     assert called[0].name == "NV_512_pert_0.025"
-    assert (tmp_path / "figures" / subcmd / "NV_512" / "pert_0.025" / "all_bands" / "NV_512_pert_0.025").is_dir()
+    # every run plots straight into figures/<kind>/; the plot functions name the files
+    assert (tmp_path / "figures" / subcmd).is_dir()
+    assert [p.name for p in (tmp_path / "figures" / subcmd).iterdir()] == []
 
 
 @pytest.mark.parametrize("subcmd", ["coupling", "rates"])
@@ -264,9 +266,9 @@ def test_plot_run_subcommand_latest_plots_each_configuration(subcmd, tmp_path, m
     args.func(args)
     assert sorted(titles) == ["p0025_new", "p01_new"]
     assert titles["p01_new"] == "NV 512, all bands, pert 0.1 (p01_new)"
-    root = tmp_path / "figures" / subcmd / "NV_512"
-    assert (root / "pert_0.1" / "all_bands" / "p01_new").is_dir()
-    assert (root / "pert_0.025" / "all_bands" / "p0025_new").is_dir()
+    # both runs plot into the one figures/<kind>/ folder, with no per-run subfolders
+    root = tmp_path / "figures" / subcmd
+    assert root.is_dir() and not any(root.iterdir())
 
 
 @pytest.mark.parametrize("subcmd", ["coupling", "rates", "t1"])
@@ -321,32 +323,6 @@ def test_plot_t1_init_state_filters_query_and_curves(tmp_path):
                  defect="ClV", cell_size=128, calc_method="all_bands", init_state=state)
     _, ax = plot_t1([tmp_path], init_states=["ms_0"])
     assert len(ax.get_lines()) == 1
-
-
-def test_run_figure_subdir_puts_run_name_last(tmp_path):
-    """Figure folders mirror the run layout with the run (timestamp) folder as the leaf."""
-    from spinlabs.cli.plotting import _run_figure_subdir
-
-    run = tmp_path / "runs" / "NV_64" / "pert_0.1" / "all_bands" / "20261015_094009"
-    assert _run_figure_subdir(run, ("NV", 64, "all_bands", 0.1)) == Path("NV_64/pert_0.1/all_bands/20261015_094009")
-    # Unregistered runs fall back to their own path layout, or just their name.
-    assert _run_figure_subdir(run, None) == Path("NV_64/pert_0.1/all_bands/20261015_094009")
-    assert _run_figure_subdir(tmp_path / "old_data", None) == Path("old_data")
-
-
-def test_combined_figure_subdir_joins_differing_levels(tmp_path, monkeypatch):
-    """T1 figures of several runs share one folder: common levels kept, differing ones joined with '+'."""
-    monkeypatch.setenv("SPINLABS_REGISTRY_DIR", str(tmp_path / "registry"))
-    from spinlabs.cli.plotting import _combined_figure_subdir
-
-    runs = tmp_path / "runs"
-    a = runs / "NV_64" / "pert_0.1" / "all_bands" / "20261015_094009"
-    b = runs / "NV_512" / "pert_0.1" / "all_bands" / "20261016_071501"
-    assert _combined_figure_subdir([a]) == Path("NV_64/pert_0.1/all_bands/20261015_094009")
-    assert _combined_figure_subdir([a, b]) == Path("NV_64+NV_512/pert_0.1/all_bands/20261016_071501")
-    # Loose npz folders outside the run layout add no level.
-    assert _combined_figure_subdir([tmp_path]) == Path()
-    assert _combined_figure_subdir([tmp_path, a]) == Path("NV_64/pert_0.1/all_bands/20261015_094009")
 
 
 def test_latest_prefers_the_run_with_more_orders(tmp_path, monkeypatch):
