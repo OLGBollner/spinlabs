@@ -7,7 +7,6 @@ pipeline produces (``order`` as a JSON list such as ``[1, 2]``).
 """
 
 
-from pathlib import Path
 
 import numpy as np
 import pytest
