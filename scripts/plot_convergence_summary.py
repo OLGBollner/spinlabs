@@ -30,6 +30,8 @@ if __name__ == "__main__":
     parser.add_argument("--data", default="data", help="Folder with the <defect>_<date>_conv_test_*.npz packs")
     parser.add_argument("--defect", nargs="+", help="Defects to plot, e.g. NV_512 (default: every pack found)")
     parser.add_argument("-o", "--output-dir", default=".", help="Folder for <defect>_convergence_summary.png")
+    parser.add_argument("--central", action="store_true",
+                        help="Central instead of forward differences (<defect>_central_convergence_summary.png)")
     args = parser.parse_args()
     configure_logging()
 
@@ -42,5 +44,6 @@ if __name__ == "__main__":
         by_method = packs[defect]
         plot_convergence_summary(
             [by_method[m] for m in ("all", "occup") if m in by_method],
-            Path(args.output_dir) / f"{defect}_convergence_summary.png",
+            Path(args.output_dir) / f"{defect}{'_central' if args.central else ''}_convergence_summary.png",
+            central=args.central,
         )

@@ -106,6 +106,11 @@ def build_plot_parser(subparsers: argparse._SubParsersAction) -> None:  # noqa: 
         f"narrow the |Q| safe for all modes (default {WEAK_FRACTION:g}; 0 keeps every mode with SNR >= target "
         "at some step)",
     )
+    conv.add_argument(
+        "--central", action="store_true",
+        help="summary: central differences (D(Q) - D(-Q))/2Q and (D(Q) + D(-Q) - 2 D0)/Q^2 instead of the forward "
+        "ones the production schemes take; written as <name>_central_convergence_summary",
+    )
     _add_output_args(conv)
     conv.set_defaults(func=_run_convergence)
 
@@ -134,6 +139,8 @@ def _run_convergence(args: argparse.Namespace) -> None:
             raise SystemExit(f"error: {', '.join(per_mode_only)} apply to the per-mode plots; pick modes with --mode")
         _plot_convergence_summaries(args, [Path(f) for f in files])
         return
+    if args.central:
+        raise SystemExit("error: --central applies to the summary figure (the per-mode plots show both); drop --mode")
     if len(files) > 1 and (args.output or args.csv):
         raise SystemExit(f"error: -o/--csv name one file but {len(files)} convergence files were selected")
     for n, npz in enumerate(files, start=1):
@@ -167,10 +174,11 @@ def _plot_convergence_summaries(args: argparse.Namespace, files: list[Path]) -> 
     for name, entries in groups.items():
         section(LOGGER, f"Convergence summary: {name}")
         packs = [npz for _, npz in sorted(entries, key=lambda e: e[0])]
-        out = args.output or _default_output(args, "convergence", f"{name}_convergence_summary")
+        stem = f"{name}_central_convergence_summary" if args.central else f"{name}_convergence_summary"
+        out = args.output or _default_output(args, "convergence", stem)
         plot_convergence_summary(
             packs, out, noise=args.noise, target=args.snr_target, tol=args.trunc_tol,
-            weak_fraction=args.weak_fraction, dpi=args.dpi, show=args.show,
+            weak_fraction=args.weak_fraction, central=args.central, dpi=args.dpi, show=args.show,
         )
 
 

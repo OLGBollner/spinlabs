@@ -200,6 +200,28 @@ def test_snr_report_bounds_an_unresolved_cubic_term():
     assert snr_report(q[1:-1], parts[1:-1]) is None  # 4 amplitudes besides D0: too few for a cubic
 
 
+def test_central_snr_report_truncates_at_the_next_even_or_odd_term():
+    from spinlabs.convergence import format_snr, snr_report
+
+    q = np.array([-0.2, -0.1, -0.05, -0.025, 0.0, 0.025, 0.05, 0.1, 0.2])
+    b, c, d, e = 100.0, 10.0, 50.0, 400.0
+    parts = np.zeros((len(q), 5))
+    parts[:, 0] = b * q + c * q**2 + d * q**3 + e * q**4
+    r = snr_report(q, parts, sigma=1e-4, offset=np.full(5, 1e-4) / np.sqrt(5), target=10.0, central=True)
+    assert r.central and r.d_resolved and r.e_resolved
+    assert (r.b, r.c, r.d, r.e) == pytest.approx((b, c, d, e), rel=1e-6)
+    # central errors: sigma / sqrt 2 first order (no D0), sqrt 6 sigma and twice the offset second order
+    assert r.err1 == pytest.approx(1e-4 / np.sqrt(2))
+    assert r.err2 == pytest.approx(np.hypot(np.sqrt(6) * 1e-4, 2e-4))
+    # truncation d Q^2 / b and e Q^2 / c reach 10% at the window's upper ends
+    assert r.q_hi1 == pytest.approx(np.sqrt(0.1 * b / d), rel=1e-6)
+    assert r.q_hi2 == pytest.approx(np.sqrt(0.1 * c / e), rel=1e-6)
+    assert r.second_order(r.q_hi2)[1] == pytest.approx(0.1)
+    assert r.first_order(0.05)[1] == pytest.approx(d * 0.05**2 / b, rel=1e-6)
+    assert "|e|" in format_snr(r, [0.05])
+    assert snr_report(q[2:-2], parts[2:-2], central=True) is None  # 4 amplitudes: too few for a quartic
+
+
 def test_pooled_noise_from_cubic_scatter():
     from spinlabs.convergence import pooled_noise
 

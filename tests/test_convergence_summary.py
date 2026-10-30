@@ -151,7 +151,7 @@ def _row(mode, lo, hi, *, snr=100.0, b=10.0, resolved=True, next_resolved=True):
     from types import SimpleNamespace
 
     report = SimpleNamespace(
-        b=b, c=1.0, q_lo1=lo, q_hi1=hi, b_resolved=resolved, c_resolved=next_resolved, target=3.0,
+        b=b, c=1.0, q_lo1=lo, q_hi1=hi, b_resolved=resolved, next1_resolved=next_resolved, target=3.0,
         first_order=lambda q: (np.full(np.shape(q), 1 / snr), np.zeros(np.shape(q))),
     )
     first = np.array([[q, 10.0] for q in (-0.05, -0.025, 0.025, 0.05)])
@@ -210,6 +210,35 @@ def test_the_2q_helper_is_no_first_order_point_but_completes_the_pair_scheme(tmp
     _mode, p, first, second, _report = rows[0]
     assert 0.2 not in np.abs(p) and 0.2 not in np.abs(first[:, 0])  # left out of the fit and first order
     assert sorted(set(np.abs(second[:, 0]))) == pytest.approx([0.025, 0.05, 0.1])  # 0.1 uses D(0.2)
+
+
+def test_central_quotients_cancel_the_terms_that_split_forward_ones():
+    """A cubic term and a step at Q = 0 split the forward second difference by side; central cancels both."""
+    from spinlabs.convergence_summary import quotients
+
+    p = np.array([-0.2, -0.1, -0.05, -0.025, 0.0, 0.025, 0.05, 0.1, 0.2])
+    unit = np.array([1.0, 0.0, 0.0, 0.0, 0.0])
+    parts = np.outer(100.0 * p + 40.0 * p**2 + 300.0 * p**3 + 0.05 * np.sign(p), unit)
+    first, second = quotients(p, parts, parts[4], central=True)
+    assert list(second[:, 0]) == pytest.approx([0.025, 0.05, 0.1, 0.2])  # one point per |Q|, 2Q no helper
+    assert second[:, 1] == pytest.approx(80.0)  # 2c exactly: odd terms cancel
+    assert first[:, 1] == pytest.approx(100.0 + 300.0 * first[:, 0] ** 2 + 0.05 / first[:, 0])
+    forward = quotients(p, parts, parts[4])[1]
+    # forward at -Q, +Q: 2c -+ 6 d Q (45) +- the step's 0.05/Q^2 (80)
+    assert forward[np.isclose(np.abs(forward[:, 0]), 0.025), 1] == pytest.approx([115.0, 45.0])
+
+
+def test_central_summary_uses_every_step_and_its_own_name(tmp_path, monkeypatch):
+    pack = _pack(tmp_path / "NV_all.npz")
+    rows = analyse(pack, central=True)[0]
+    _mode, p, first, second, report = rows[1]
+    assert report.central and 0.2 in np.abs(p)
+    assert list(first[:, 0]) == list(second[:, 0]) == pytest.approx([0.025, 0.05, 0.1, 0.2])
+    assert _plot(monkeypatch, tmp_path, [str(pack), "--central"]) == [
+        "figures/convergence/NV_512_normalized_central_convergence_summary.png"
+    ]
+    with pytest.raises(SystemExit, match="--central applies to the summary figure"):
+        _plot(monkeypatch, tmp_path, [str(pack), "--central", "-m", "7"])
 
 
 def test_second_order_coefficients_come_from_the_fit_reaching_2q():
