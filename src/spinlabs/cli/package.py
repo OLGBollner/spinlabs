@@ -86,6 +86,13 @@ def build_package_parser(parser: argparse.ArgumentParser) -> None:
         help="Perturbation scale(s) to package. Default: every pert_* folder found.",
     )
     parser.add_argument(
+        "--central",
+        action="store_true",
+        help="Central differences: package each first_order/pert_<p> with its first_order/pert_-<p> runs "
+        "(stored as first_order_minus), for (D(Q) - D(-Q))/2Q and (D(Q) + D(-Q) - 2 D0)/Q^2. Second-order "
+        "trees are not packaged with them (central and forward differences cannot be mixed).",
+    )
+    parser.add_argument(
         "--method",
         type=str,
         nargs="+",
@@ -228,6 +235,13 @@ def _scan_raw(args: argparse.Namespace, defect_folder: Path, methods: list[str])
     unknown = [o for o in orders if o not in _ORDER_DIRS]
     if unknown:
         raise SystemExit(f"Unknown order(s): {', '.join(unknown)} (expected 'first' and/or 'second')")
+    central = getattr(args, "central", False)
+    if central:
+        if "first" not in orders:
+            raise SystemExit("--central packages first-order runs at +p and -p; --orders must include first")
+        if "second" in orders:
+            LOGGER.info("--central: second-order trees are not packaged (central and forward differences cannot mix)")
+        orders = ["first"]
 
     defect, cell_size = split_defect_folder_name(defect_folder.name)
     if cell_size is None:
@@ -246,8 +260,17 @@ def _scan_raw(args: argparse.Namespace, defect_folder: Path, methods: list[str])
             pert_scale = float(pert_dir.name.split("_")[1])
             if args.pert is not None and pert_scale not in args.pert:
                 continue
+            if central and pert_scale < 0:  # the -p partner of a +p dataset, not one of its own
+                continue
             perts[pert_scale] = pert_dir
         return perts
+
+    def _minus_folder(pert_scale: float) -> Path | None:
+        """The first_order/pert_-<p> folder holding the -Q runs of step pert_scale."""
+        for pert_dir in sorted((defect_folder / _ORDER_DIRS["first"]).glob("pert_-*")):
+            if np.isclose(float(pert_dir.name.split("_")[1]), -pert_scale):
+                return pert_dir
+        return None
 
     found: list[_Scanned] = []
     for method in methods:
@@ -282,6 +305,25 @@ def _scan_raw(args: argparse.Namespace, defect_folder: Path, methods: list[str])
                     unfinished = unfinished_runs(basis)
                     if unfinished is not None:
                         trees[_ORDER_DIRS[o]]["unfinished"] = unfinished
+                    convention = tree_displacement(basis)
+                    if convention is not None:
+                        weighting.add(convention)
+            if central and raw is not None:
+                minus_dir = _minus_folder(pert_scale)
+                if minus_dir is None:
+                    LOGGER.warning(
+                        f"{defect_folder.name} {calc_method} pert {pert_scale:g}: --central but no "
+                        f"{_ORDER_DIRS['first']}/pert_-{pert_scale:g} folder with the -Q runs; skipped"
+                    )
+                    continue
+                minus = parse_zfs_simulation_dataset(sim_folder=minus_dir, order=1, calc_method=method, verbose=True)
+                raw = raw.with_minus(minus)
+                basis = minus_dir / calc_method
+                if basis.is_dir():
+                    trees["first_order_minus"] = tree_settings(basis)
+                    unfinished = unfinished_runs(basis)
+                    if unfinished is not None:
+                        trees["first_order_minus"]["unfinished"] = unfinished
                     convention = tree_displacement(basis)
                     if convention is not None:
                         weighting.add(convention)
@@ -367,9 +409,11 @@ def _print_scan_summary(scanned: list[_Scanned], phonons: dict[tuple[str, int], 
     print(header)
     print("-" * len(header))
     for s in scanned:
+        # central: the 2nd-order column counts the modes with their -Q run
+        second = f"{len(s.raw.first_order_minus)} (-Q)" if s.raw.is_central else str(len(s.raw.second_order))
         print(
             f"{f'{s.defect}_{s.cell_size}':<12} {s.calc_method:<20} {s.pert_scale:>8g} "
-            f"{len(s.raw.first_order):>16} {len(s.raw.second_order):>16}"
+            f"{len(s.raw.first_order):>16} {second:>16}"
         )
     if phonons:
         print("\nPhonon data:")
@@ -552,9 +596,9 @@ def _register_only(data_path: Path) -> None:
                 # order is present in the file. Fall back to the filename
                 # suffix only when the order keys are missing or unreadable.
                 if _dict_nonempty(data, "first_order") or _dict_nonempty(data, "second_order"):
-                    orders = ([1] if _dict_nonempty(data, "first_order") else []) + (
-                        [2] if _dict_nonempty(data, "second_order") else []
-                    )
+                    # central packages hold their second order as the -Q runs of first_order_minus
+                    second = _dict_nonempty(data, "second_order") or _dict_nonempty(data, "first_order_minus")
+                    orders = ([1] if _dict_nonempty(data, "first_order") else []) + ([2] if second else [])
                 else:
                     suffix_orders = _DICT_ORDER_SUFFIXES.get(npz_path.stem.rsplit("_", 1)[-1])
                     if suffix_orders is None:

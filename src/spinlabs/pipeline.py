@@ -579,20 +579,20 @@ def _execute_pipeline(
         # legacy scalar for parsing and branch selection below.
         dims: list[int] = []
         if raw_data is not None:
-            if len(raw_data.second_order) > 0:
+            if raw_data.has_second_order:
                 dims.append(2)
             if len(raw_data.first_order) > 0:
                 dims.append(1)
         if user_orders is not None:
             has_1d = bool(raw_data is not None and len(raw_data.first_order) > 0)
-            has_2d = (raw_data is not None and len(raw_data.second_order) > 0) or (
+            has_2d = (raw_data is not None and raw_data.has_second_order) or (
                 coupling_data is not None and coupling_data.has_second_order
             )
             _check_requested_orders(user_orders, has_1d=has_1d if raw_data is not None else None, has_2d=has_2d)
             # ``analyzed`` is what this run will actually compute and register:
             # the user filter intersected with reality (validated above).
             analyzed = list(user_orders)
-        elif combine_orders or (raw_data is not None and len(raw_data.second_order) > 0):
+        elif combine_orders or (raw_data is not None and raw_data.has_second_order):
             order = 2
         elif raw_data is not None and raw_data.order is not None and str(raw_data.order) != "None":
             order = int(raw_data.order)
