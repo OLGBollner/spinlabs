@@ -118,7 +118,7 @@ class TestZFSManager:
 
         _, V_00_comp, V_pm_comp, V_0pm_comp = manager.calculate_second_order_derivatives(zfs_1d_derivs)
         assert manager.symmetry_derived_pairs == []
-        assert not np.isclose(V_pm_comp[1, 2] / self.D2_UNIT, 5.0)
+        assert not np.isclose(V_pm_comp[1, 2] / self.D2_UNIT, 2.5)
 
         manager.degenerate_pairs_from_symmetry = True
         _, V_00, V_pm, V_0pm = manager.calculate_second_order_derivatives(zfs_1d_derivs)
@@ -126,9 +126,9 @@ class TestZFSManager:
         assert manager.symmetry_derived_pairs == [(1, 2)]
         for V in (V_pm, V_0pm, V_00):
             assert V[1, 2] == V[2, 1]
-        # V_+- = 0.5 |w_xx| (twice the Ex-Ex value), V_0+- = |p_xx| / (2 sqrt 2), V_00 = 0.
-        assert np.isclose(V_pm[1, 2] / self.D2_UNIT, 5.0)
-        assert np.isclose(V_pm[1, 2], 2.0 * V_pm[1, 1])
+        # V_+- = |w_xx| / 4 and V_0+- = |p_xx| / (2 sqrt 2), the Ex-Ex values; V_00 = 0.
+        assert np.isclose(V_pm[1, 2] / self.D2_UNIT, 2.5)
+        assert np.isclose(V_pm[1, 2], V_pm[1, 1])
         assert np.isclose(V_0pm[1, 2] / self.D2_UNIT, 5.0 / (2.0 * np.sqrt(2)))
         assert np.isclose(V_0pm[1, 2], V_0pm[1, 1])
         assert V_00[1, 2] == 0.0
@@ -149,7 +149,7 @@ class TestZFSManager:
 
         assert manager.symmetry_derived_pairs == []
         diff, off = dD_xy[0, 0] - dD_xy[1, 1], dD_xy[0, 1]
-        assert np.isclose(V_pm[1, 2] / self.D2_UNIT, 0.5 * np.sqrt(diff**2 + 4 * off**2))
+        assert np.isclose(V_pm[1, 2] / self.D2_UNIT, 0.25 * np.sqrt(diff**2 + 4 * off**2))
 
     def test_symmetry_check_uses_the_shared_response_check(self, setup_system, caplog):
         manager, _, _ = setup_system
@@ -178,6 +178,41 @@ class TestZFSManager:
             manager.calculate_second_order_derivatives(np.zeros((4, 3, 3)))
         assert "symmetry mismatch" not in caplog.text
         assert "second-order symmetry: 1 of 1 entries hold content outside Gi x Gj" in caplog.text
+
+    def test_ex_ey_pair_and_its_ex_ex_partner_give_the_same_v_pm(self, setup_system):
+        """The D_xy of Ex x Ey partners the D_xx - D_yy of Ex x Ex: equal size, equal V_pm."""
+        manager, _, _ = setup_system
+        manager.zfs_tensors_2d = {
+            (1, 1): self._second_order_entry(manager, np.diag([3.0, -3.0, 0.0]), ("Ex", "Ex")),
+            (1, 2): self._second_order_entry(manager, np.array([[0.0, 3.0, 0.0], [3.0, 0.0, 0.0], [0.0] * 3]),
+                                             ("Ex", "Ey")),
+        }
+        manager.treated_modes = {1, 2}
+        _, _, Vpm, _ = manager.calculate_second_order_derivatives(np.zeros((4, 3, 3)))
+        assert np.isclose(Vpm[1, 2], Vpm[1, 1]) and np.isclose(Vpm[1, 1] / self.D2_UNIT, 1.5)
+
+    def test_a_x_e_pair_gives_the_e_couplings_of_its_curvature(self, setup_system):
+        """A1 x Ex and A1 x Ey are pure E: V_pm and V_0pm as for Ex x Ex, and no V_00."""
+        manager, _, _ = setup_system
+        # E parts |w| = sqrt(6^2 + 4*4^2) = 10, |p| = sqrt(3^2 + 4^2) = 5, plus an A1 part that must not count.
+        e_x = np.array([[3.0, 0.0, 3.0], [0.0, -3.0, 0.0], [3.0, 0.0, 0.0]])
+        e_y = np.array([[0.0, 4.0, 0.0], [4.0, 0.0, 4.0], [0.0, 4.0, 0.0]])
+        curvature = e_x + e_y + 0.2 * np.diag([-1.0, -1.0, 2.0])
+        manager.zfs_tensors_2d = {
+            (0, 1): self._second_order_entry(manager, curvature, ("A1", "Ex")),
+            (2, 3): self._second_order_entry(manager, curvature, ("Ey", "A1")),
+            (1, 1): self._second_order_entry(manager, curvature, ("Ex", "Ex")),
+        }
+        manager.treated_modes = {0, 1, 2, 3}
+
+        _, V00, Vpm, V0pm = manager.calculate_second_order_derivatives(np.zeros((4, 3, 3)))
+
+        for i, j in ((0, 1), (2, 3)):
+            assert np.isclose(Vpm[i, j] / self.D2_UNIT, 10.0 / 4) and Vpm[j, i] == Vpm[i, j]
+            assert np.isclose(V0pm[i, j] / self.D2_UNIT, 5.0 / (2.0 * np.sqrt(2))) and V0pm[j, i] == V0pm[i, j]
+            assert V00[i, j] == 0.0
+            # the same E couplings an Ex x Ex pair with this curvature gets
+            assert np.isclose(Vpm[i, j], Vpm[1, 1]) and np.isclose(V0pm[i, j], V0pm[1, 1])
 
     def test_twin_inherits_a_diagonal_coupling_only_when_it_has_none(self, setup_system):
         manager, spectrum, gs_zfs = setup_system
@@ -227,16 +262,39 @@ class TestZFSManager:
         for V in (Vpm, V0pm):
             assert V[1, 2] == pytest.approx(np.sqrt(V[1, 1] * V[2, 2])) and V[2, 1] == V[1, 2] and V[1, 2] > 0
         assert V00[1, 2] == 0
-        # A1 x E pairs get nothing, as a computed A1 x E pair would not
-        for i, j in ((0, 1), (0, 2), (3, 1), (3, 2)):
-            assert V00[i, j] == Vpm[i, j] == V0pm[i, j] == 0
-        assert manager.n_offdiag_filled == 1
+        # A1 x E pairs (an A1 mode has no diagonal V_pm or V_0pm): the A1 mode's V_00 with the E mode's
+        # spin-flip coupling, and no V_00
+        for a, e in ((0, 1), (0, 2), (3, 1), (3, 2)):
+            for V in (Vpm, V0pm):
+                assert V[a, e] == pytest.approx(np.sqrt(V00[a, a] * V[e, e])) and V[e, a] == V[a, e] > 0
+            assert V00[a, e] == 0
+        assert manager.n_offdiag_filled == 5 and manager.n_offdiag_filled_a_x_e == 4
 
         # without the run A1 x A1 pair, it is filled with V_00 only
         V00, Vpm, V0pm = self._offdiag_couplings(manager, with_cross=False, fill=True)
         assert V00[0, 3] == pytest.approx(np.sqrt(V00[0, 0] * V00[3, 3])) and V00[0, 3] > 0
         assert Vpm[0, 3] == V0pm[0, 3] == 0
-        assert manager.n_offdiag_filled == 2
+        assert manager.n_offdiag_filled == 6 and manager.n_offdiag_filled_a_x_e == 4
+
+    def test_offdiag_from_diagonal_keeps_a_computed_a_x_e_pair(self, setup_system):
+        manager, _, _ = setup_system
+        e_curvature = np.array([[1.0, 0.0, 2.0], [0.0, -1.0, 0.0], [2.0, 0.0, 0.0]])
+        a1 = np.diag([-1.0, -1.0, 2.0])
+        manager.zfs_tensors_2d = {
+            (0, 0): self._second_order_entry(manager, 2.0 * a1, ("A1", "A1")),
+            (1, 1): self._second_order_entry(manager, 3.0 * e_curvature, ("Ex", "Ex")),
+            (0, 1): self._second_order_entry(manager, e_curvature, ("A1", "Ex")),
+        }
+        manager.treated_modes = {0, 1}
+        computed = manager.calculate_second_order_derivatives(np.zeros((4, 3, 3)))[1:]
+        manager.offdiag_from_diagonal = True
+        filled = manager.calculate_second_order_derivatives(np.zeros((4, 3, 3)))[1:]
+        for V_comp, V in zip(computed, filled):
+            assert V[0, 1] == V_comp[0, 1]  # the run A1 x Ex pair
+        assert filled[1][0, 2] > 0  # the uncomputed A1 x Ey pair (Ey inherits Ex's diagonal) is filled
+        # the uncomputed A x E pairs of modes A1, Ex, Ey, A1: (0, 2), (3, 1), (3, 2); mode 3 has no
+        # diagonal run, so its two roots are zero, but the fill covers them
+        assert manager.n_offdiag_filled_a_x_e == 3
 
     def test_pair_with_a_mode_without_first_order_data_is_skipped(self, setup_system, caplog):
         manager, spectrum, gs_zfs = setup_system

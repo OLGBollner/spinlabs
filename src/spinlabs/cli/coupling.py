@@ -58,8 +58,9 @@ def add_input_args(parser: argparse.ArgumentParser) -> argparse._ArgumentGroup:
     opt.add_argument(
         "--offdiag-from-diagonal",
         action="store_true",
-        help="Approximate every second-order pair (i, j), i != j, that was not run as sqrt(V_ii V_jj) from the "
-        "diagonal couplings (computed pairs keep their values)",
+        help="Approximate every second-order pair (i, j), i != j, that was not run from the diagonal couplings: "
+        "sqrt(V_ii V_jj) per coupling type, and sqrt(V00_aa V_ee) for A x E pairs; a heuristic, only for the "
+        "types the pair's symmetry allows (computed pairs keep their values)",
     )
     return opt
 
