@@ -112,6 +112,14 @@ class TransitionRate:
 
         return omega, J_0_pm, J_p_m, J_0_0
 
+    @staticmethod
+    def _bose_at(energy_mev: float, T: float) -> float:
+        """Bose-Einstein occupation of one phonon energy (meV), without the grid cut-offs of bose_einstein."""
+        if T <= 0 or energy_mev <= 0:
+            return 0.0
+        x = energy_mev / (Cn.k / Cn.e * 1000 * T)
+        return 0.0 if x > 700 else float(1.0 / np.expm1(x))
+
     def compute_transition_rates(self, T, omega, J_0_pm, J_p_m, J_0_0, omega_zfs):
         if self.data is None:
             raise ValueError("Data not loaded. Please call load_data() first.")
@@ -119,18 +127,27 @@ class TransitionRate:
         res = omega[1] - omega[0]
         n = Phonons.bose_einstein(omega, T)
         mask = omega > 0.1
-        delta = MathUtils.gaussian_density(omega, omega_zfs, 1.0)
 
-        f1_factor = (2 * np.pi / (Cn.hbar / CONSTANTS["meV2J"])) * res
-        self.transition_rate["first_order"]["0_to_1"] = f1_factor * np.sum(J_0_pm[mask] * n[mask] * delta[mask])
-        self.transition_rate["first_order"]["0_to_-1"] = self.transition_rate["first_order"]["0_to_1"]
-        self.transition_rate["first_order"]["1_to_0"] = f1_factor * np.sum(J_0_pm[mask] * (n[mask] + 1) * delta[mask])
-        self.transition_rate["first_order"]["-1_to_0"] = self.transition_rate["first_order"]["1_to_0"]
+        # Direct (one-phonon) process: energy conservation puts the phonon at the spin
+        # splitting, so the rate is 2pi/hbar J(dE) n(dE) (absorption, upward) or
+        # 2pi/hbar J(dE) (n(dE) + 1) (emission, downward). J is already a density, so it
+        # is read off at dE, not weighed with a second broadened delta.
+        # At zero field m_s = +1 and -1 lie at D and m_s = 0 at 0; D < 0 swaps which is upper.
+        f1 = 2 * np.pi / (Cn.hbar / CONSTANTS["meV2J"])
+        split = abs(float(omega_zfs))
+        J_split = float(np.interp(split, omega, J_0_pm))
+        n_split = self._bose_at(split, T)
+        up, down = f1 * J_split * n_split, f1 * J_split * (n_split + 1)
+        zero_is_lower = omega_zfs >= 0
+        first = self.transition_rate["first_order"]
+        first["0_to_1"] = first["0_to_-1"] = up if zero_is_lower else down
+        first["1_to_0"] = first["-1_to_0"] = down if zero_is_lower else up
+        # +1 and -1 are degenerate at zero field: a direct process would need a phonon of
+        # zero energy, where a physical spectral function vanishes (acoustic J ~ w^3, so
+        # J n ~ w^2 -> 0). The smeared J stays finite there only through its Gaussian tails.
+        first["1_to_-1"] = first["-1_to_1"] = 0.0
 
-        self.transition_rate["first_order"]["1_to_-1"] = f1_factor * np.sum(J_p_m[mask] * (n[mask] + 1) * delta[mask])
-        self.transition_rate["first_order"]["-1_to_1"] = f1_factor * np.sum(J_p_m[mask] * n[mask] * delta[mask])
-
-        f2_factor = 2 * f1_factor
+        f2_factor = 2 * f1 * res
 
         def get_J_path(m1, m2):
             if m1 == m2:
@@ -169,15 +186,31 @@ class TransitionRate:
             return self.data_2ph[V_key]
         raise KeyError(f"Key '{V_key}' (or '{v2_key}') not found in data file.")
 
+    @staticmethod
+    def pair_weights(V2: np.ndarray) -> np.ndarray:
+        """|V2|^2 per mode pair, with the off-diagonal pairs (i != j) doubled.
+
+        V2 carries the 1/2 of the Taylor series, so the Hamiltonian holds a pair i != j
+        twice, V2_ij q_i q_j + V2_ji q_j q_i = 2 V2_ij q_i q_j, and its matrix element is
+        2 V2_ij sqrt(n_i (n_j + 1)). Squared that is 4 |V2_ij|^2, against the 2 |V2_ij|^2
+        that the two mirror-image Raman terms of compute_two_phonon_rates (abs_em, em_abs)
+        give a pair from |V2|^2 alone. A diagonal pair (i, i) appears once and keeps |V2_ii|^2,
+        the diagonal-only convention of Cambria et al. (PRL 130, 256903, Eq. S12).
+        """
+        w = np.abs(np.asarray(V2, dtype=float)) ** 2
+        if w.ndim != 2:
+            return w
+        return 2.0 * w - np.diag(np.diag(w))
+
     def get_2d_spectral_density(self, res, sigma):
         V_0_pm_2ph = self.get_2ph_coupling("V_0_pm") / CONSTANTS["meV2J"]
         V_p_m_2ph = self.get_2ph_coupling("V_p_m") / CONSTANTS["meV2J"]
         V_0_0_2ph = self.get_2ph_coupling("V_0_0") / CONSTANTS["meV2J"]
         freqs = self.data["freqs"] / CONSTANTS["meV2J"]
 
-        omega_x, omega_y, J_0_pm = MathUtils.get_2d_spectral_density(freqs, V_0_pm_2ph**2, res, sigma)
-        _, _, J_p_m = MathUtils.get_2d_spectral_density(freqs, V_p_m_2ph**2, res, sigma)
-        _, _, J_0_0_base = MathUtils.get_2d_spectral_density(freqs, V_0_0_2ph**2, res, sigma)
+        omega_x, omega_y, J_0_pm = MathUtils.get_2d_spectral_density(freqs, self.pair_weights(V_0_pm_2ph), res, sigma)
+        _, _, J_p_m = MathUtils.get_2d_spectral_density(freqs, self.pair_weights(V_p_m_2ph), res, sigma)
+        _, _, J_0_0_base = MathUtils.get_2d_spectral_density(freqs, self.pair_weights(V_0_0_2ph), res, sigma)
 
         return omega_x, omega_y, J_0_pm, J_p_m, J_0_0_base
 
