@@ -6,7 +6,7 @@ from scipy import constants as Cn
 
 from spinlabs.constants import CONSTANTS
 from spinlabs.models import SpinPhononCouplingData, ZFSTensor
-from spinlabs.transition_rate import Phonons, TransitionRate
+from spinlabs.transition_rate import TransitionRate
 
 MEV = CONSTANTS["meV2J"]
 FREQS_MEV = np.array([30.0, 30.0, 42.0, 55.0, 61.0])
@@ -48,29 +48,31 @@ def _gauss(x, width):
     return np.exp(-0.5 * (x / width) ** 2) / (np.sqrt(2 * np.pi) * width)
 
 
-def _pair_sum(calc, key, omega_zfs):
-    """Golden rule summed over the two-phonon final states; each mode smeared by SIGMA, so pairs by SIGMA*sqrt(2).
+def _line_integral(calc, key, gap, temp=T):
+    """Raman rate straight from the definition, without binning.
 
-    V2 holds the 1/2 of the Taylor series, so a pair i != j enters H as 2 V2_ij q_i q_j:
-    absorbing i and emitting j (one final state per ordered pair) has |M|^2 = 4 |V2_ij|^2 n_i (n_j + 1),
-    absorbing both (one final state per unordered pair) 4 |V2_ij|^2 n_i n_j. Diagonal pairs keep the
-    diagonal-only convention, 2 |V2_ii|^2 n (n + 1) (Cambria et al., Eq. S12).
+    V2 holds the 1/2 of the Taylor series, so a pair i != j enters H as 2 V2_ij q_i q_j and
+    absorbing i while emitting j has |M|^2 = 4 |V2_ij|^2 n_i (n_j + 1); diagonal pairs keep the
+    diagonal-only convention, 2 |V2_ii|^2 n (n + 1) (Cambria et al., Eq. S12). Each mode is smeared
+    by SIGMA, and energy conservation puts the emitted phonon at w - gap:
+    Gamma = 2 pi / hbar * integral dw sum_ij |M_ij|^2 G(w - w_i) G(w - gap - w_j) n(w) (n(w - gap) + 1).
     """
     v2 = (np.asarray(calc.data[key]) / MEV) ** 2
-    off = 1.0 - np.eye(len(FREQS_MEV))
-    n = Phonons.bose_einstein(FREQS_MEV, T)
-    width = np.sqrt(2) * SIGMA
-    w_a, w_e = FREQS_MEV[:, None], FREQS_MEV[None, :]
-    raman = (2 + 2 * off) * v2 * n[:, None] * (n[None, :] + 1) * _gauss(w_a - w_e - omega_zfs, width)
-    double_abs = (1 + off) * v2 * n[:, None] * n[None, :] * _gauss(w_a + w_e - omega_zfs, width)
-    return 2 * np.pi / (Cn.hbar / MEV) * (raman.sum() + double_abs.sum())
+    m2 = (2 + 2 * (1.0 - np.eye(len(FREQS_MEV)))) * v2
+    w = np.arange(0.005, 120.0, 0.01)
+    g_abs = _gauss(w[:, None] - FREQS_MEV[None, :], SIGMA)
+    g_em = _gauss(w[:, None] - gap - FREQS_MEV[None, :], SIGMA)
+    j2 = np.einsum("ki,ij,kj->k", g_abs, m2, g_em)
+    n_abs, n_em = TransitionRate._bose_grid(w, temp), TransitionRate._bose_grid(w - gap, temp)
+    ok = w - gap > 0
+    return 2 * np.pi / (Cn.hbar / MEV) * np.sum((j2 * n_abs * (n_em + 1))[ok]) * 0.01
 
 
 def test_pair_weight_matches_exact_matrix_element():
     """|<+1, n_a - 1, n_e + 1| H2 |-1, n_a, n_e>|^2 for H2 = 1/2 sum_ij D_ij q_i q_j, q = b + b^dagger.
 
-    compute_two_phonon_rates gives one ordered pair this final state twice (abs_em and em_abs),
-    each with the pair weight, so the weight must be half of |M|^2 / (n_a (n_e + 1)).
+    compute_two_phonon_rates gives a pair its weight times 4 pi / hbar (two Raman orderings),
+    so the weight must be half of |M|^2 / (n_a (n_e + 1)).
     """
     nmax, n_a, n_e = 5, 2, 1
     b = np.diag(np.sqrt(np.arange(1, nmax)), 1)
@@ -93,27 +95,36 @@ def test_pair_weight_matches_exact_matrix_element():
     assert 2 * weight * n_a * (n_e + 1) == pytest.approx(m2, rel=1e-12)
 
 
-def _two_phonon(calc, res):
-    omega_zfs = calc.data["zfs"] / MEV
-    ox, oy, j0pm, jpm, j00 = calc.get_2d_spectral_density(res=res, sigma=SIGMA)
-    calc.compute_two_phonon_rates(T, ox, oy, j0pm, jpm, j00, omega_zfs)
+def _two_phonon(calc, res=None, temp=T):
+    calc.compute_two_phonon_rates(temp, calc.get_line_spectral_density(SIGMA, res=res))
     return dict(calc.transition_rate["two_phonon"])
 
 
 def test_two_phonon_rate_is_independent_of_grid_spacing():
     calc = _calculator()
-    coarse, fine = _two_phonon(calc, 0.5), _two_phonon(calc, 0.125)
+    coarse, fine = _two_phonon(calc, 0.3), _two_phonon(calc, 0.02)
     for key in ("0_to_1", "1_to_-1", "1_to_0"):
-        assert fine[key] == pytest.approx(coarse[key], rel=0.02)
+        assert fine[key] == pytest.approx(coarse[key], rel=2e-3)
 
 
-def test_two_phonon_rate_matches_golden_rule_pair_sum():
+@pytest.mark.parametrize("temp", [30.0, T])
+def test_two_phonon_rate_matches_the_line_integral(temp):
     calc = _calculator()
-    rates = _two_phonon(calc, 0.25)
-    omega_zfs = calc.data["zfs"] / MEV
-    # 0 -> 1 (|dm| = 1) uses V2_0_pm, 1 -> -1 (|dm| = 2) uses V2_p_m.
-    assert rates["0_to_1"] == pytest.approx(_pair_sum(calc, "V2_0_pm", omega_zfs), rel=0.03)
-    assert rates["1_to_-1"] == pytest.approx(_pair_sum(calc, "V2_p_m", omega_zfs), rel=0.03)
+    rates = _two_phonon(calc, temp=temp)
+    D = calc.data["zfs"] / MEV
+    # 0 -> 1 (|dm| = 1, up by D) uses V2_0_pm, 1 -> 0 goes down by D, 1 -> -1 (|dm| = 2, no gap) V2_p_m.
+    assert rates["0_to_1"] == pytest.approx(_line_integral(calc, "V2_0_pm", D, temp), rel=2e-3)
+    assert rates["1_to_0"] == pytest.approx(_line_integral(calc, "V2_0_pm", -D, temp), rel=2e-3)
+    assert rates["1_to_-1"] == pytest.approx(_line_integral(calc, "V2_p_m", 0.0, temp), rel=2e-3)
+    assert rates["-1_to_1"] == rates["1_to_-1"]
+
+
+def test_two_phonon_rates_obey_detailed_balance():
+    """A splitting of 5 meV, so up and down differ visibly: down / up = exp(D / kT)."""
+    calc = _calculator(zfs_mev=5.0)
+    rates = _two_phonon(calc)
+    kT = Cn.k / Cn.e * 1000 * T
+    assert rates["1_to_0"] / rates["0_to_1"] == pytest.approx(np.exp(5.0 / kT), rel=2e-3)
 
 
 def test_first_order_rate_is_independent_of_grid_spacing():

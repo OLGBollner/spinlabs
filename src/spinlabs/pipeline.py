@@ -331,8 +331,8 @@ def compute_rates(
 
     ``sigma`` (meV) broadens each mode in the 1D and 2D spectral functions,
     standing in for the continuous phonon bands of a macroscopic crystal. The
-    2D grid spacing follows it (at most sigma/4, 0.5 meV by default); the rates
-    do not depend on the spacing beyond that resolution. Returns the
+    two-phonon rates integrate the 2D spectral function along each transition's
+    energy-conservation line (TransitionRate.get_line_spectral_density). Returns the
     temperatures with a result, the total rates per process and the
     directional rates.
     """
@@ -346,9 +346,7 @@ def compute_rates(
 
     omega, J_0_pm, J_p_m, J_0_0 = calculator.get_spectral_density(res=0.02, sigma=sigma)
     if two_phonon:
-        omega_x, omega_y, J2_0_pm, J2_p_m, J2_0_0 = calculator.get_2d_spectral_density(
-            res=min(0.5, sigma / 4), sigma=sigma
-        )
+        lines = calculator.get_line_spectral_density(sigma)
     omega_zfs = calculator.data["zfs"] / CONSTANTS["meV2J"]
 
     rate_results = {k: {"0_1": [], "1_-1": []} for k in ("first_order", "second_order", "two_phonon")}
@@ -357,7 +355,7 @@ def compute_rates(
     for T in temps:
         calculator.compute_transition_rates(T, omega, J_0_pm, J_p_m, J_0_0, omega_zfs)
         if two_phonon:
-            calculator.compute_two_phonon_rates(T, omega_x, omega_y, J2_0_pm, J2_p_m, J2_0_0, omega_zfs)
+            calculator.compute_two_phonon_rates(T, lines)
         total_rates = calculator.get_total_rates()
         dir_rates = calculator.get_directional_rates()
         if total_rates and dir_rates:
