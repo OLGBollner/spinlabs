@@ -185,9 +185,9 @@ def compute_rates(data_path, two_phonon_path, t_start, t_end, t_step):
     # Pre‑compute spectral densities
     omega, J_0_pm, J_p_m, J_0_0 = calculator.get_spectral_density(res=0.01, sigma=7.5)
     if two_phonon_path:
-        omega_x, omega_y, J2_0_pm, J2_p_m, J2_0_0 = calculator.get_2d_spectral_density(res=0.5, sigma=7.5)
+        lines = calculator.get_line_spectral_density(sigma=7.5)
     else:
-        omega_x = omega_y = J2_0_pm = J2_p_m = J2_0_0 = None
+        lines = None
 
     zfs = calculator.data["zfs"] / CONSTANTS["meV2J"]
 
@@ -211,7 +211,7 @@ def compute_rates(data_path, two_phonon_path, t_start, t_end, t_step):
     for T in temperatures:
         calculator.compute_transition_rates(T, omega, J_0_pm, J_p_m, J_0_0, zfs)
         if two_phonon_path:
-            calculator.compute_two_phonon_rates(T, omega_x, omega_y, J2_0_pm, J2_p_m, J2_0_0, zfs)
+            calculator.compute_two_phonon_rates(T, lines)
         total_rates = calculator.get_total_rates()
         directional_rates = calculator.get_directional_rates()
 

@@ -6,14 +6,6 @@ from pathlib import Path
 from spinlabs.utils import MathUtils
 from spinlabs.constants import CONSTANTS
 
-# (sign_l, sign_lp) for energy conservation: omega_spin = s*omega_l + s'*omega_lp
-PHONON_PROCESSES = {
-    "abs_em": (+1, -1),
-    "em_abs": (-1, +1),
-    "abs_abs": (+1, +1),
-    "em_em": (-1, -1),
-}
-
 
 class Phonons:
     @staticmethod
@@ -112,6 +104,14 @@ class TransitionRate:
 
         return omega, J_0_pm, J_p_m, J_0_0
 
+    @staticmethod
+    def _bose_at(energy_mev: float, T: float) -> float:
+        """Bose-Einstein occupation of one phonon energy (meV), without the grid cut-offs of bose_einstein."""
+        if T <= 0 or energy_mev <= 0:
+            return 0.0
+        x = energy_mev / (Cn.k / Cn.e * 1000 * T)
+        return 0.0 if x > 700 else float(1.0 / np.expm1(x))
+
     def compute_transition_rates(self, T, omega, J_0_pm, J_p_m, J_0_0, omega_zfs):
         if self.data is None:
             raise ValueError("Data not loaded. Please call load_data() first.")
@@ -119,18 +119,27 @@ class TransitionRate:
         res = omega[1] - omega[0]
         n = Phonons.bose_einstein(omega, T)
         mask = omega > 0.1
-        delta = MathUtils.gaussian_density(omega, omega_zfs, 1.0)
 
-        f1_factor = (2 * np.pi / (Cn.hbar / CONSTANTS["meV2J"])) * res
-        self.transition_rate["first_order"]["0_to_1"] = f1_factor * np.sum(J_0_pm[mask] * n[mask] * delta[mask])
-        self.transition_rate["first_order"]["0_to_-1"] = self.transition_rate["first_order"]["0_to_1"]
-        self.transition_rate["first_order"]["1_to_0"] = f1_factor * np.sum(J_0_pm[mask] * (n[mask] + 1) * delta[mask])
-        self.transition_rate["first_order"]["-1_to_0"] = self.transition_rate["first_order"]["1_to_0"]
+        # Direct (one-phonon) process: energy conservation puts the phonon at the spin
+        # splitting, so the rate is 2pi/hbar J(dE) n(dE) (absorption, upward) or
+        # 2pi/hbar J(dE) (n(dE) + 1) (emission, downward). J is already a density, so it
+        # is read off at dE, not weighed with a second broadened delta.
+        # At zero field m_s = +1 and -1 lie at D and m_s = 0 at 0; D < 0 swaps which is upper.
+        f1 = 2 * np.pi / (Cn.hbar / CONSTANTS["meV2J"])
+        split = abs(float(omega_zfs))
+        J_split = float(np.interp(split, omega, J_0_pm))
+        n_split = self._bose_at(split, T)
+        up, down = f1 * J_split * n_split, f1 * J_split * (n_split + 1)
+        zero_is_lower = omega_zfs >= 0
+        first = self.transition_rate["first_order"]
+        first["0_to_1"] = first["0_to_-1"] = up if zero_is_lower else down
+        first["1_to_0"] = first["-1_to_0"] = down if zero_is_lower else up
+        # +1 and -1 are degenerate at zero field: a direct process would need a phonon of
+        # zero energy, where a physical spectral function vanishes (acoustic J ~ w^3, so
+        # J n ~ w^2 -> 0). The smeared J stays finite there only through its Gaussian tails.
+        first["1_to_-1"] = first["-1_to_1"] = 0.0
 
-        self.transition_rate["first_order"]["1_to_-1"] = f1_factor * np.sum(J_p_m[mask] * (n[mask] + 1) * delta[mask])
-        self.transition_rate["first_order"]["-1_to_1"] = f1_factor * np.sum(J_p_m[mask] * n[mask] * delta[mask])
-
-        f2_factor = 2 * f1_factor
+        f2_factor = 2 * f1 * res
 
         def get_J_path(m1, m2):
             if m1 == m2:
@@ -169,15 +178,31 @@ class TransitionRate:
             return self.data_2ph[V_key]
         raise KeyError(f"Key '{V_key}' (or '{v2_key}') not found in data file.")
 
+    @staticmethod
+    def pair_weights(V2: np.ndarray) -> np.ndarray:
+        """|V2|^2 per mode pair, with the off-diagonal pairs (i != j) doubled.
+
+        V2 carries the 1/2 of the Taylor series, so the Hamiltonian holds a pair i != j
+        twice, V2_ij q_i q_j + V2_ji q_j q_i = 2 V2_ij q_i q_j, and its matrix element is
+        2 V2_ij sqrt(n_i (n_j + 1)), squared 4 |V2_ij|^2 = 2 x these 2 |V2_ij|^2: compute_two_phonon_rates
+        uses 4 pi / hbar, 2 pi / hbar for each of the two Raman orderings. A diagonal
+        pair (i, i) appears once and keeps |V2_ii|^2, the diagonal-only convention of Cambria et al.
+        (PRL 130, 256903, Eq. S12).
+        """
+        w = np.abs(np.asarray(V2, dtype=float)) ** 2
+        if w.ndim != 2:
+            return w
+        return 2.0 * w - np.diag(np.diag(w))
+
     def get_2d_spectral_density(self, res, sigma):
         V_0_pm_2ph = self.get_2ph_coupling("V_0_pm") / CONSTANTS["meV2J"]
         V_p_m_2ph = self.get_2ph_coupling("V_p_m") / CONSTANTS["meV2J"]
         V_0_0_2ph = self.get_2ph_coupling("V_0_0") / CONSTANTS["meV2J"]
         freqs = self.data["freqs"] / CONSTANTS["meV2J"]
 
-        omega_x, omega_y, J_0_pm = MathUtils.get_2d_spectral_density(freqs, V_0_pm_2ph**2, res, sigma)
-        _, _, J_p_m = MathUtils.get_2d_spectral_density(freqs, V_p_m_2ph**2, res, sigma)
-        _, _, J_0_0_base = MathUtils.get_2d_spectral_density(freqs, V_0_0_2ph**2, res, sigma)
+        omega_x, omega_y, J_0_pm = MathUtils.get_2d_spectral_density(freqs, self.pair_weights(V_0_pm_2ph), res, sigma)
+        _, _, J_p_m = MathUtils.get_2d_spectral_density(freqs, self.pair_weights(V_p_m_2ph), res, sigma)
+        _, _, J_0_0_base = MathUtils.get_2d_spectral_density(freqs, self.pair_weights(V_0_0_2ph), res, sigma)
 
         return omega_x, omega_y, J_0_pm, J_p_m, J_0_0_base
 
@@ -191,44 +216,108 @@ class TransitionRate:
             return V_p_m_2ph
         return np.zeros_like(V_0_pm_2ph)
 
-    def compute_two_phonon_rates(self, T, omega_x, omega_y, J_0_pm, J_p_m, J_0_0, omega_zfs):
-        if self.data is None:
-            raise ValueError("Data not loaded. Please call load_data() first.")
+    @staticmethod
+    def line_spectral_density(
+        freqs: np.ndarray, weights: np.ndarray, sigma: float, gap: float, res: float
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """The 2D spectral function J2(w, w') = sum_ij weights_ij G(w - w_i) G(w' - w_j) on the line w' = w - gap.
 
-        res = omega_x[1, 1] - omega_x[0, 0]
+        G is a Gaussian of width ``sigma``. On the line each pair's two Gaussians multiply into
+        g_{sqrt2 sigma}(w_i - w_j - gap) G_{sigma/sqrt2}(w - (w_i + w_j + gap) / 2) exactly: a constant
+        weight for how near the pair is to energy conservation, times a Gaussian along the line
+        around the pair's mean energy. So each pair is binned at its mean energy with that weight
+        (split linearly between the two nearest grid points) and the histogram is smoothed by
+        G_{sigma/sqrt2}. Returns the absorbed-phonon energy w (meV, grid spacing ``res``) and
+        J2 there, per meV^2 like the 2D function.
+        """
+        freqs = np.asarray(freqs, dtype=float)
+        keep = freqs > 0  # acoustic modes at ~0 (or slightly imaginary) carry no coupling
+        f = freqs[keep]
+        w = np.asarray(weights, dtype=float)[np.ix_(keep, keep)]
+        pair = w * MathUtils.gaussian_density(f[:, None] - f[None, :], gap, np.sqrt(2) * sigma)
+        centre = (f[:, None] + f[None, :] + gap) / 2
 
-        def get_J_path(m1, m2) -> np.ndarray:
-            if m1 == m2:
-                return (self.Fz_elements[m1] ** 2) * J_0_0
-            diff = abs(m1 - m2)
-            if diff == 1:
-                return J_0_pm
-            if diff == 2:
-                return J_p_m
-            return np.zeros_like(omega_x)
+        width = sigma / np.sqrt(2)
+        omega = np.arange(0.0, f.max() + abs(gap) + 8 * width + res, res)
+        pos = np.clip(centre.ravel() / res, 0.0, len(omega) - 1.0)
+        lower = np.floor(pos).astype(int)
+        upper = np.minimum(lower + 1, len(omega) - 1)
+        frac = pos - lower
+        hist = np.bincount(lower, pair.ravel() * (1 - frac), len(omega)) + np.bincount(
+            upper, pair.ravel() * frac, len(omega)
+        )
+        half = int(np.ceil(8 * width / res))
+        kernel = MathUtils.gaussian_density(np.arange(-half, half + 1) * res, 0.0, width)
+        density = np.convolve(hist, kernel, mode="full")[half : half + len(omega)]
+        return omega, density
 
-        bose = Phonons.bose_einstein_2d(omega_x[0, :], T)
+    def get_line_spectral_density(
+        self, sigma: float, res: float | None = None, zero_gap_tol: float | None = None
+    ) -> dict:
+        """Temperature-independent input of compute_two_phonon_rates: J2 on each transition's energy line.
 
-        f2ph = (2 * np.pi / (Cn.hbar / CONSTANTS["meV2J"])) * (res) ** 2
+        A transition m_s -> m_s' changes the spin energy by gap = E(m_s') - E(m_s), with
+        E(+-1) = D and E(0) = 0 at zero field, so the Raman line is w_absorbed - w_emitted = gap.
+        |dm| = 1 uses V2_0pm, |dm| = 2 V2_+-. ``res`` defaults to sigma/20 (at most 0.05 meV),
+        fine against the sigma/sqrt2 width along the line.
 
+        ``zero_gap_tol`` (meV) leaves out every pair whose frequencies differ by less: the
+        diagonal pairs (i, i) and the partners of a degenerate E doublet. Their gap is zero at any
+        sigma, so they add a term ~ 1/sigma that a phonon continuum does not have (there such
+        pairs have measure zero); without them the rate is the supercell's continuum estimate.
+        """
+        res = min(0.05, sigma / 20) if res is None else res
+        freqs = self.data["freqs"] / CONSTANTS["meV2J"]
+        D = float(self.data["zfs"]) / CONSTANTS["meV2J"]
+        couplings = {1: "V_0_pm", 2: "V_p_m"}
+        weights = {
+            dm: self.pair_weights(self.get_2ph_coupling(key) / CONSTANTS["meV2J"]) for dm, key in couplings.items()
+        }
+        if zero_gap_tol is not None:
+            zero_gap = np.abs(freqs[:, None] - freqs[None, :]) < zero_gap_tol
+            weights = {dm: np.where(zero_gap, 0.0, w) for dm, w in weights.items()}
+
+        lines, cache = {}, {}
         for ms in self.ms_values:
             for ms_prime in self.ms_values:
                 if ms == ms_prime:
                     continue
+                dm, gap = abs(ms - ms_prime), D * (ms_prime**2 - ms**2)
+                if (dm, gap) not in cache:
+                    cache[(dm, gap)] = self.line_spectral_density(freqs, weights[dm], sigma, gap, res)
+                lines[f"{ms}_to_{ms_prime}"] = (*cache[(dm, gap)], gap)
+        return lines
 
-                rate_key = f"{ms}_to_{ms_prime}"
-                J = get_J_path(ms_prime, ms)
-                total = 0.0
+    @staticmethod
+    def _bose_grid(omega: np.ndarray, T: float) -> np.ndarray:
+        """Bose-Einstein occupation on a grid; 0 at T = 0 and for w <= 0 (those points are left out)."""
+        n = np.zeros_like(omega, dtype=float)
+        if T <= 0:
+            return n
+        x = omega / (Cn.k / Cn.e * 1000 * T)
+        ok = (omega > 0) & (x < 700)
+        n[ok] = 1.0 / np.expm1(x[ok])
+        return n
 
-                for proc, (s, sp) in PHONON_PROCESSES.items():
-                    # Energy conservation is a line delta(s*w_x + s'*w_y - w_zfs); its width
-                    # only needs to resolve the line on the grid, the physical broadening
-                    # (sigma) is already in J.
-                    delta = MathUtils.gaussian_density(s * omega_x + sp * omega_y, omega_zfs, res)
-                    integrand = np.sum(J * bose[proc] * delta)
-                    total += integrand
+    def compute_two_phonon_rates(self, T: float, lines: dict) -> None:
+        """Raman rates from the second-order coupling, from get_line_spectral_density's lines.
 
-                self.transition_rate["two_phonon"][rate_key] = f2ph * total
+        Gamma = 4 pi / hbar * integral dw J2(w, w - gap) n(w) (n(w - gap) + 1), absorbing w and
+        emitting w - gap. The 4 pi is 2 pi / hbar times the two Raman orderings, Cambria et al.
+        Eq. 3; with pair_weights a pair i != j gets the 4 |V2_ij|^2 of its matrix element.
+        Double absorption and double emission (w + w' = |gap|) need two phonons below the
+        splitting (0.01 meV), where only the Gaussian tails of optical modes put weight, so
+        they are left out.
+        """
+        if self.data is None:
+            raise ValueError("Data not loaded. Please call load_data() first.")
+        prefactor = 4 * np.pi / (Cn.hbar / CONSTANTS["meV2J"])
+        for rate_key, (omega, density, gap) in lines.items():
+            res = omega[1] - omega[0]
+            emitted = omega - gap
+            ok = (omega > 0) & (emitted > 0)
+            bose = self._bose_grid(omega[ok], T) * (self._bose_grid(emitted[ok], T) + 1)
+            self.transition_rate["two_phonon"][rate_key] = prefactor * res * float(np.sum(density[ok] * bose))
 
     def get_directional_rates(self):
         directional_rates = {
