@@ -22,6 +22,26 @@ def mode_numbers(phonon: Path) -> list[int]:
         return list(range(1, int(data["freqs"].shape[0]) + 1))
 
 
+def pair_numbers(phonon: Path) -> list[tuple[int, int]]:
+    """Second-order mode pairs (i, j), i <= j, in the order PAIR_MODE=all runs them: nearest in frequency first.
+
+    Energy conservation lets a pair contribute to the two-phonon rate only when its two
+    frequencies lie within about the broadening of each other (about 90 % of the rate comes from
+    pairs closer than 2 sigma), so the pairs are run by increasing |w_i - w_j|: a tree stopped
+    part-way has the pairs that matter most. The diagonal pairs (gap 0) come first, then the
+    partners of degenerate doublets; equal gaps keep the index order (i, then j).
+    """
+    numbers = mode_numbers(phonon)
+    with np.load(phonon, allow_pickle=True) as data:
+        freqs = np.asarray(data["freqs"], dtype=float)
+    if len(freqs) != len(numbers):
+        raise ValueError(f"{len(freqs)} frequencies for {len(numbers)} modes in {phonon}")
+    order = sorted(range(len(numbers)), key=lambda k: numbers[k])
+    pairs = [(a, b) for x, a in enumerate(order) for b in order[x:]]  # i <= j by mode number
+    pairs.sort(key=lambda ab: abs(freqs[ab[0]] - freqs[ab[1]]))  # stable: ties stay in (i, j) order
+    return [(numbers[a], numbers[b]) for a, b in pairs]
+
+
 def mode_table(phonon: Path) -> list[tuple[int, float, str, float, float]]:
     """(mode number, frequency in cm^-1, symmetry label, <r>, P_2bond) per mode.
 
@@ -56,7 +76,8 @@ def mode_table(phonon: Path) -> list[tuple[int, float, str, float, float]]:
 
 
 def main(argv: list[str] | None = None) -> int:
-    """``get_n_modes.py <phonon.npz> [--sym]``: the mode numbers on one line, or a table with --sym."""
+    """``get_n_modes.py <phonon.npz> [--sym | --pairs]``: the mode numbers on one line, a table with --sym,
+    or the second-order pairs ``<i>_<j>`` one per line, nearest in frequency first, with --pairs."""
     ap = argparse.ArgumentParser(prog="get_n_modes.py", description=__doc__.splitlines()[0])
     ap.add_argument("phonon", type=Path, help="phonon .npz the tree runs from")
     ap.add_argument(
@@ -65,9 +86,25 @@ def main(argv: list[str] | None = None) -> int:
         help="print mode, frequency, symmetry and how near the defect it lives (<r> in Angstrom from the "
         "defect centre, and the fraction of its weight within two bond lengths of it) per line",
     )
+    ap.add_argument(
+        "--pairs",
+        action="store_true",
+        help="print the second-order pairs <i>_<j> (i <= j) one per line, sorted by their frequency gap "
+        "|w_i - w_j|, the order PAIR_MODE=all runs them",
+    )
     args = ap.parse_args(argv)
     if args.phonon.suffix != ".npz":
         ap.error(f"not an .npz file: {args.phonon}")
+    if args.sym and args.pairs:
+        ap.error("--sym and --pairs are exclusive")
+    if args.pairs:
+        try:
+            pairs = pair_numbers(args.phonon)
+        except ValueError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 1
+        print("\n".join(f"{i}_{j}" for i, j in pairs))
+        return 0
     if not args.sym:
         print(" ".join(str(n) for n in mode_numbers(args.phonon)))
         return 0

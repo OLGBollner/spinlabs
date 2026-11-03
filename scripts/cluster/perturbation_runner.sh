@@ -89,7 +89,15 @@ if [ "$ORDER" != "convergence" ]; then  # convergence runs only the modes its co
   MODES=$(python "$get_n_modes" "$PHONON_PATH") || fail "get_n_modes exited nonzero on $PHONON_PATH"
   [ -n "$MODES" ] || fail "get_n_modes returned no modes for $PHONON_PATH"
 fi
-echo "Preflight OK: $ORDER, $(echo $MODES | wc -w) modes${PAIR_MODE:+, pair_mode=$PAIR_MODE}${STEPS:+, steps $STEPS}, binary=$binary"
+# PAIR_MODE=all runs the pairs i <= j nearest in frequency first (spinlabs.vasp.modes.pair_numbers):
+# only pairs within about the broadening of each other feed the two-phonon rate, so a tree
+# stopped part-way has the ones that matter most.
+PAIRS=""
+if [ "$ORDER" = "second_order" ] && [ "$PAIR_MODE" = "all" ]; then
+  PAIRS=$(python "$get_n_modes" --pairs "$PHONON_PATH") || fail "get_n_modes --pairs exited nonzero on $PHONON_PATH"
+  [ -n "$PAIRS" ] || fail "get_n_modes --pairs returned no pairs for $PHONON_PATH"
+fi
+echo "Preflight OK: $ORDER, $(echo $MODES | wc -w) modes${PAIR_MODE:+, pair_mode=$PAIR_MODE}${PAIRS:+, $(echo "$PAIRS" | wc -l) pairs by frequency gap}${STEPS:+, steps $STEPS}, binary=$binary"
 case $DISPLACEMENT in
   normalized) echo "displacements: step * u/|u|, u = e/sqrt(m) (normalized: the same Cartesian step for every mode)" ;;
   mass_weighted) echo "displacements: Q*e/sqrt(m) (mass-weighted)" ;;
@@ -307,20 +315,20 @@ walk() {
     done
     return 0
   fi
+  if [ "$ORDER" = "second_order" ] && [ "$PAIR_MODE" = "all" ]; then
+    for pair in $PAIRS; do
+      i=${pair%_*}
+      j=${pair#*_}
+      visit "pair $i, $j" "runs/${i}_${j}" "$i" "$j"
+    done
+    return 0
+  fi
   for i in $MODES; do
     if [ "$ORDER" = "first_order" ]; then
       visit "mode $i" "runs/$i" "$i"
-      continue
+    else  # PAIR_MODE=diag
+      visit "pair $i, $i" "runs/${i}_${i}" "$i" "$i"
     fi
-    for j in $MODES; do
-      if [ "$PAIR_MODE" = "diag" ] && [ "$i" != "$j" ]; then
-        continue
-      fi
-      if [ "$PAIR_MODE" = "all" ] && [ $i -gt $j ]; then
-        continue
-      fi
-      visit "pair $i, $j" "runs/${i}_${j}" "$i" "$j"
-    done
   done
 }
 
