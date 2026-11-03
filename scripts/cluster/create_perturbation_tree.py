@@ -72,6 +72,12 @@ def main() -> int:
         "(default: diag)",
     )
     ap.add_argument(
+        "--central",
+        action="store_true",
+        help="central differences: first_order trees at +p and -p for each --pert p and no second_order tree "
+        "(package them with 'spinlabs package --central')",
+    )
+    ap.add_argument(
         "--array-jobs", type=int, default=10, help="number of SLURM array jobs to split the sweep into (default: 10)"
     )
     ap.add_argument(
@@ -114,6 +120,7 @@ def main() -> int:
             max_hours=args.max_hours,
             vasp_binary=vasp_binary,
             force=args.force,
+            central=args.central,
         )
     except (FileNotFoundError, ValueError) as e:
         sys.exit(f"Error: {e}")

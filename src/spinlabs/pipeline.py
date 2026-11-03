@@ -326,13 +326,15 @@ def compute_rates(
     sigma: float = DEFAULT_SIGMA_MEV,
     two_phonon_file: str | Path | None = None,
     has_second_order: bool = False,
+    zero_gap_tol: float | None = None,
 ) -> tuple[np.ndarray, dict, dict]:
     """Transition rates of a coupling file at each temperature.
 
     ``sigma`` (meV) broadens each mode in the 1D and 2D spectral functions,
     standing in for the continuous phonon bands of a macroscopic crystal. The
-    2D grid spacing follows it (at most sigma/4, 0.5 meV by default); the rates
-    do not depend on the spacing beyond that resolution. Returns the
+    two-phonon rates integrate the 2D spectral function along each transition's
+    energy-conservation line (TransitionRate.get_line_spectral_density); ``zero_gap_tol``
+    (meV) leaves out the pairs with (near) zero frequency gap there. Returns the
     temperatures with a result, the total rates per process and the
     directional rates.
     """
@@ -346,9 +348,7 @@ def compute_rates(
 
     omega, J_0_pm, J_p_m, J_0_0 = calculator.get_spectral_density(res=0.02, sigma=sigma)
     if two_phonon:
-        omega_x, omega_y, J2_0_pm, J2_p_m, J2_0_0 = calculator.get_2d_spectral_density(
-            res=min(0.5, sigma / 4), sigma=sigma
-        )
+        lines = calculator.get_line_spectral_density(sigma, zero_gap_tol=zero_gap_tol)
     omega_zfs = calculator.data["zfs"] / CONSTANTS["meV2J"]
 
     rate_results = {k: {"0_1": [], "1_-1": []} for k in ("first_order", "second_order", "two_phonon")}
@@ -357,7 +357,7 @@ def compute_rates(
     for T in temps:
         calculator.compute_transition_rates(T, omega, J_0_pm, J_p_m, J_0_0, omega_zfs)
         if two_phonon:
-            calculator.compute_two_phonon_rates(T, omega_x, omega_y, J2_0_pm, J2_p_m, J2_0_0, omega_zfs)
+            calculator.compute_two_phonon_rates(T, lines)
         total_rates = calculator.get_total_rates()
         dir_rates = calculator.get_directional_rates()
         if total_rates and dir_rates:
@@ -579,20 +579,20 @@ def _execute_pipeline(
         # legacy scalar for parsing and branch selection below.
         dims: list[int] = []
         if raw_data is not None:
-            if len(raw_data.second_order) > 0:
+            if raw_data.has_second_order:
                 dims.append(2)
             if len(raw_data.first_order) > 0:
                 dims.append(1)
         if user_orders is not None:
             has_1d = bool(raw_data is not None and len(raw_data.first_order) > 0)
-            has_2d = (raw_data is not None and len(raw_data.second_order) > 0) or (
+            has_2d = (raw_data is not None and raw_data.has_second_order) or (
                 coupling_data is not None and coupling_data.has_second_order
             )
             _check_requested_orders(user_orders, has_1d=has_1d if raw_data is not None else None, has_2d=has_2d)
             # ``analyzed`` is what this run will actually compute and register:
             # the user filter intersected with reality (validated above).
             analyzed = list(user_orders)
-        elif combine_orders or (raw_data is not None and len(raw_data.second_order) > 0):
+        elif combine_orders or (raw_data is not None and raw_data.has_second_order):
             order = 2
         elif raw_data is not None and raw_data.order is not None and str(raw_data.order) != "None":
             order = int(raw_data.order)

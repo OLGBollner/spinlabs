@@ -147,6 +147,8 @@ class ZFSManager:
         self.zfs_relaxed: Optional[np.ndarray] = None  # Shape (3, 3) in J
         self.eigen_rotation: Optional[np.ndarray] = None  # Shape (3, 3)
         self.first_order: dict[int, dict[str, Any]] = {}  # 1D perturbations
+        # 1D perturbations at -Q: with them first order and the diagonal second order are central differences
+        self.first_order_minus: dict[int, dict[str, Any]] = {}
         self.second_order: dict[tuple[int, int], dict[str, Any]] = {}  # 2D perturbations
         self.treated_modes: set[int] = set()
 
@@ -255,9 +257,10 @@ class ZFSManager:
                 dropped.append(idx)
             return mapped
 
-        if raw.first_order:
-            self.first_order = {}
-            for idx, entry in raw.first_order.items():
+        def ingest_first(entries: dict, sign: int) -> dict[int, dict[str, Any]]:
+            """First-order runs at sign * pert_scale, rotated into the defect frame, keyed by spectrum position."""
+            out = {}
+            for idx, entry in entries.items():
                 sp = remap(idx)
                 if sp is None:
                     continue
@@ -265,10 +268,10 @@ class ZFSManager:
                     tensor_mhz = entry.zfs_tensor.matrix
                     rotated = eigen_rot_t @ tensor_mhz @ eigen_rot if self.eigen_rotation is not None else tensor_mhz
                     tensor_j = rotated
-                    self.first_order[sp] = {
+                    out[sp] = {
                         "tensor": tensor_j,
                         "symmetry": phonon_pert["sym"][sp] if phonon_pert else None,
-                        "pert": phonon_pert["disp"][sp] if phonon_pert else None,
+                        "pert": sign * phonon_pert["disp"][sp] if phonon_pert else None,
                         "ipr": phonon_pert["ipr"][sp] if phonon_pert else None,
                         "original_index": idx,
                     }
@@ -288,11 +291,19 @@ class ZFSManager:
                         if phonon_pert.get("sym") is not None and sp < len(phonon_pert["sym"]):
                             enriched["symmetry"] = phonon_pert["sym"][sp]
                         if phonon_pert.get("disp") is not None and sp < len(phonon_pert["disp"]):
-                            enriched["pert"] = phonon_pert["disp"][sp]
+                            enriched["pert"] = sign * phonon_pert["disp"][sp]
                         if phonon_pert.get("ipr") is not None and sp < len(phonon_pert["ipr"]):
                             enriched["ipr"] = phonon_pert["ipr"][sp]
                     enriched["original_index"] = idx
-                    self.first_order[sp] = enriched
+                    out[sp] = enriched
+            return out
+
+        raw.check_central()
+        if raw.first_order:
+            self.first_order = ingest_first(raw.first_order, 1)
+        if raw.first_order_minus:
+            self.first_order_minus = ingest_first(raw.first_order_minus, -1)
+            self.second_order = self._central_diagonal_entries()
 
         if raw.second_order:
             self.second_order = {}
@@ -354,12 +365,48 @@ class ZFSManager:
         total_modes = self.nmodes
         n_1d = len(self.zfs_tensors)
         n_2d = len(self.zfs_tensors_2d)
-        treated = self.zfs_tensors.keys() if (0 < n_1d <= n_2d or n_2d == 0) else self.zfs_tensors_2d.keys()
+        if self.first_order_minus:  # central: the diagonal entries are built from the first-order runs
+            treated = self.zfs_tensors.keys()
+        else:
+            treated = self.zfs_tensors.keys() if (0 < n_1d <= n_2d or n_2d == 0) else self.zfs_tensors_2d.keys()
         mode_set = {x for item in treated for x in (item if isinstance(item, tuple) else (item,))}
         LOGGER.info(
             f"ZFS tensors: {n_1d} first order, {n_2d} second order; {len(mode_set)} of {total_modes} modes treated"
         )
         return mode_set
+
+    def _central_diagonal_entries(self) -> dict[tuple[int, int], dict[str, Any]]:
+        """The (i, i) second-order entries of the central differences, one per mode run at +Q and -Q.
+
+        Each holds the +Q tensor and, as ``tensor_minus``, the -Q one; calculate_second_order_derivatives
+        takes (D(Q) + D(-Q) - 2 D0)/Q^2 from them. A mode without its -Q run gets no diagonal entry.
+        """
+        entries = {}
+        for i, plus in self.first_order.items():
+            minus = self.first_order_minus.get(i)
+            if minus is None:
+                continue
+            entries[(i, i)] = {
+                "tensor": plus["tensor"],
+                "tensor_minus": minus["tensor"],
+                "central": True,
+                "pert": (plus.get("pert"), plus.get("pert")),
+                "symmetry": (plus.get("symmetry"), plus.get("symmetry")),
+                "ipr": (plus.get("ipr"), plus.get("ipr")),
+                "original_index": (plus.get("original_index"), plus.get("original_index")),
+            }
+        missing = sorted(set(self.first_order) - set(self.first_order_minus))
+        if missing:
+            LOGGER.warning(
+                f"central differences: {len(missing)} modes have no -Q run, so no diagonal second-order coupling "
+                "and a forward first-order derivative: "
+                + ", ".join(str(self.first_order[i].get("original_index", i) + 1) for i in missing[:20])
+                + (", ..." if len(missing) > 20 else "")
+            )
+        extra = sorted(set(self.first_order_minus) - set(self.first_order))
+        if extra:
+            LOGGER.warning(f"central differences: {len(extra)} -Q runs without their +Q run are not used")
+        return entries
 
     def calculate_first_order_derivatives(self, ipr_thresh: Optional[float] = None):
         """
@@ -397,7 +444,12 @@ class ZFSManager:
             if sym is None:
                 continue
 
-            dD = D_i - self.zfs_relaxed
+            minus = self.first_order_minus.get(i)
+            if minus is not None:
+                # central: (D(Q) - D(-Q)) / 2Q, free of D0 and of the Q^2 term
+                dD = (D_i - minus["tensor"]) / 2
+            else:
+                dD = D_i - self.zfs_relaxed
             self._check_symmetry(dD, [sym], i, kind="displacement")
 
             dD_dq = dD / q
@@ -488,7 +540,11 @@ class ZFSManager:
             sym = MathUtils.calc_symmetry(sym_i, sym_j)
 
             D_qi_qj = item["tensor"]
-            d2D_dqidqj = (D_qi_qj - self.zfs_relaxed) / (q_i * q_j) - dD_qi / q_j - dD_qj / q_i
+            if item.get("central"):
+                # (D(Q) + D(-Q) - 2 D0) / Q^2 from the +-Q first-order runs: no pair run, nothing to check it against
+                d2D_dqidqj = (D_qi_qj + item["tensor_minus"] - 2 * self.zfs_relaxed) / (q_i * q_j)
+            else:
+                d2D_dqidqj = (D_qi_qj - self.zfs_relaxed) / (q_i * q_j) - dD_qi / q_j - dD_qj / q_i
 
             # The pair displaces Q_i + Q_j, so its ZFS change is expected to be the
             # single-mode changes dD_i q_i + dD_j q_j plus a small remainder (the
@@ -498,7 +554,7 @@ class ZFSManager:
             # is a sizeable multiple of the expectation (|alpha| > INCONSISTENT_ALPHA)
             # means the response is strongly nonlinear at this Q, or the run was
             # displaced too far or is stale; the geometry check tells these apart.
-            if i in self.treated_modes and j in self.treated_modes:
+            if i in self.treated_modes and j in self.treated_modes and not item.get("central"):
                 if i == j and sym_i == "A2":
                     expected = 4.0 * dD_qi * q_i
                 else:

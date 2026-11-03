@@ -53,8 +53,8 @@ def plot_coupling_spectral(data, zfs_mev, sigma, title, mode, out):
         x, y = MathUtils.smear_data(w, np.asarray(V) ** 2, 0.02, sigma)
         keep = x <= 60
         ax.plot(x[keep], np.clip(y[keep], 1e-300, None), color=color, lw=2, label=f"$F_{{{name}}}^{{(1)}}$")
-    # compute_transition_rates weighs F with a 1 meV Gaussian around w_ZFS, from w = 0.1 meV
-    ax.axvspan(0.1, zfs_mev + 2.0, color="#f2c14e", alpha=0.35, lw=0, label="window of the one-phonon rate")
+    # compute_transition_rates reads F_0pm at the splitting w_ZFS (the +1 <-> -1 direct rate is 0 at zero field)
+    ax.axvline(abs(zfs_mev), color="#f2c14e", lw=2, label="splitting the one-phonon rate samples")
     ax.axvline(lowest, color="#666666", ls="--", lw=1, label=f"lowest mode {lowest:.1f} meV")
     ax.set_yscale("log")
     ax.set_ylim(1e-6, 1e4)

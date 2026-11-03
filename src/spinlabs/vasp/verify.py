@@ -19,7 +19,7 @@ import statistics
 from dataclasses import dataclass
 from pathlib import Path
 
-from spinlabs.vasp.modes import mode_numbers
+from spinlabs.vasp.modes import mode_numbers, pair_numbers
 from spinlabs.vasp.slurm_logs import summarize, unfinished_reasons
 from spinlabs.vasp.trees import read_outcar_time, sbatch_time, step_sizes
 
@@ -139,7 +139,7 @@ def expected_runs(config: dict[str, str], order: str) -> list[str]:
     """Run folder names (below runs/) the job script's runner works through, in its order.
 
     Mirrors the walk in scripts/cluster/perturbation_runner.sh: first order ``<i>``, second
-    order ``<i>_<j>`` (PAIR_MODE diag or all, i <= j), convergence ``<i>_pert_<step>`` for each
+    order ``<i>_<j>`` (PAIR_MODE diag, or all, i <= j nearest in frequency first: modes.pair_numbers), convergence ``<i>_pert_<step>`` for each
     of MODES at -p and +p for every step size p in PERTS.
     """
     if order == "convergence":
@@ -154,7 +154,7 @@ def expected_runs(config: dict[str, str], order: str) -> list[str]:
         raise ValueError(f"PAIR_MODE must be diag or all, got {pair_mode!r}")
     if pair_mode == "diag":
         return [f"{i}_{i}" for i in modes]
-    return [f"{i}_{j}" for i in modes for j in modes if i <= j]
+    return [f"{i}_{j}" for i, j in pair_numbers(Path(config["PHONON_PATH"]))]
 
 
 @dataclass

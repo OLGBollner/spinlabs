@@ -438,6 +438,7 @@ def build_perturbation_tree(
     max_hours: float | None = None,
     vasp_binary: Path | None = None,
     force: bool = False,
+    central: bool = False,
 ) -> list[str]:
     """Build ready-to-go perturbed ZFS run folders under a defect directory.
 
@@ -450,10 +451,18 @@ def build_perturbation_tree(
     `displacement` (spinlabs.models.DISPLACEMENTS); with `conv_modes` the defect also
     gets its step-size convergence folders (see build_convergence_tree), at
     `conv_perts` or, by default, convergence_steps(pert).
+    With `central`, every step p instead gets first_order/ trees at +p and -p and no second_order/
+    tree: the analysis takes central differences from them (``spinlabs package --central``).
     Returns the list of failure messages (empty on success).
     """
     if not pert:
         raise ValueError("no perturbation step given: the step (--pert) is required")
+    if central and any(p <= 0 for p in pert):
+        raise ValueError(f"central differences need positive steps p (run at +p and -p); got {pert}")
+    if central:
+        jobs = [("first_order", s * p) for p in pert for s in (1, -1)]
+    else:
+        jobs = [(order, p) for order in ("first_order", "second_order") for p in pert]
     failures: list[str] = []
     defect = out.name
     sources = zfs_sources(out)
@@ -462,31 +471,30 @@ def build_perturbation_tree(
     n_modes = n_modes_from_phonon(phonon)
     section(LOGGER, f"Perturbation trees {defect}: {n_modes} modes, {displacement} displacements")
     LOGGER.info(f"phonon data: {phonon}")
-    for order in ("first_order", "second_order"):
+    for order, p in jobs:
         for basis, src in sources.items():
-            for p in pert:
-                dst = out / order / f"pert_{p}" / basis
-                if not _make_room(dst, force):
-                    continue
-                script_name = FIRST_ORDER_SCRIPT if order == "first_order" else SECOND_ORDER_SCRIPT
-                failures.extend(
-                    prepare_basis(
-                        src,
-                        dst,
-                        script_name,
-                        phonon,
-                        defect=defect,
-                        pert=p,
-                        order=order,
-                        n_array_jobs=array_jobs,
-                        n_modes=n_modes,
-                        basis=dst.name,
-                        vasp_binary=vasp_binary,
-                        displacement=displacement,
-                        pair_mode=pair_mode if order == "second_order" else None,
-                        max_hours=max_hours,
-                    )
+            dst = out / order / f"pert_{p}" / basis
+            if not _make_room(dst, force):
+                continue
+            script_name = FIRST_ORDER_SCRIPT if order == "first_order" else SECOND_ORDER_SCRIPT
+            failures.extend(
+                prepare_basis(
+                    src,
+                    dst,
+                    script_name,
+                    phonon,
+                    defect=defect,
+                    pert=p,
+                    order=order,
+                    n_array_jobs=array_jobs,
+                    n_modes=n_modes,
+                    basis=dst.name,
+                    vasp_binary=vasp_binary,
+                    displacement=displacement,
+                    pair_mode=pair_mode if order == "second_order" else None,
+                    max_hours=max_hours,
                 )
+            )
     if conv_modes:
         failures.extend(
             build_convergence_tree(

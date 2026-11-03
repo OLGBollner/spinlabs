@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import itertools
 import json
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from enum import Enum
 from pathlib import Path
 from typing import Any, Dict, Optional, Sequence, Union
@@ -976,7 +976,7 @@ def _encode_first_order(d: dict) -> dict:
     for idx, entry in d.items():
         if isinstance(entry, PerturbationEntry):
             amp = entry.amplitude
-            if isinstance(amp, (int, float)) and amp > 1e-4:
+            if isinstance(amp, (int, float)) and abs(amp) > 1e-4:  # negative for the -Q runs of central differences
                 amp = amp * CONSTANTS["ang_amu2SI"]
             saved[idx] = {"tensor": entry.zfs_tensor.matrix, "unit": entry.zfs_tensor.unit, "pert": amp}
         elif isinstance(entry, dict):
@@ -1045,7 +1045,9 @@ def _scale_correction_fields(fields: dict) -> dict:
     gs = out.get("ground_state_zfs")
     if gs is not None:
         out["ground_state_zfs"] = apply_spin_correction(gs)
-    for name in ("first_order", "second_order"):
+    for name in ("first_order", "second_order", "first_order_minus"):
+        if name not in out:
+            continue
         entries = dict(out.get(name) or {})
         for key, entry in entries.items():
             if isinstance(entry, PerturbationEntry):
@@ -1101,6 +1103,23 @@ class RawZFSData:
     # VASP settings of the ground state and of each perturbation tree, recorded by
     # ``spinlabs package`` (spinlabs.vasp.settings): {"ground_state", "trees", "problems"}.
     vasp_settings: Optional[dict[str, Any]] = None
+    # First-order runs at -pert_scale (``spinlabs package --central``). With them the analysis takes
+    # central differences: first order (D(Q) - D(-Q))/2Q, diagonal second order
+    # (D(Q) + D(-Q) - 2 D0)/Q^2, in place of the forward pair runs in second_order.
+    first_order_minus: dict[int, Union[PerturbationEntry, dict[str, Any]]] = field(default_factory=dict)
+
+    def __post_init__(self):
+        if self.first_order_minus and self.second_order:
+            raise ValueError(
+                "Cannot mix central and forward differences: the data has both -Q first-order runs "
+                "(first_order_minus, central) and second-order pair runs (second_order, forward). "
+                "Package either the -Q runs (--central) or the second-order trees, not both."
+            )
+
+    def check_central(self) -> None:
+        """Raise when there are -Q runs but no +Q runs to take central differences with."""
+        if self.first_order_minus and not self.first_order:
+            raise ValueError("first_order_minus (-Q runs) without first_order (+Q runs): no central difference")
 
     @property
     def displacement_convention(self) -> str:
@@ -1108,9 +1127,14 @@ class RawZFSData:
         return displacement_convention(self.displacement, self.mass_weighted)
 
     @property
+    def is_central(self) -> bool:
+        """Whether the data holds -Q first-order runs, so the analysis takes central differences."""
+        return len(self.first_order_minus) > 0
+
+    @property
     def has_second_order(self) -> bool:
-        """Returns True if second-order perturbation data is present and non-empty."""
-        return len(self.second_order) > 0
+        """Returns True if second-order data is present: pair runs, or the -Q runs of the central differences."""
+        return len(self.second_order) > 0 or self.is_central
 
     @property
     def has_first_order(self) -> bool:
@@ -1124,7 +1148,9 @@ class RawZFSData:
 
     @property
     def order_suffix(self) -> str:
-        """Filename suffix showing which orders are present: '1d', '2d' or '12d' (both)."""
+        """Filename suffix showing which orders are present: '1d', '2d', '12d' (both) or 'central' (+-Q runs)."""
+        if self.is_central:  # both orders too, but never to overwrite a forward 12d package of the same step
+            return "central"
         if self.has_first_order and self.has_second_order:
             return "12d"
         return f"{self.combined_order}d"
@@ -1189,7 +1215,10 @@ class RawZFSData:
         merged_second = dict(self.second_order)
         merged_second.update(other.second_order)
 
-        eff_order = 2 if len(merged_second) > 0 else (self.order or other.order or 1)
+        merged_minus = dict(self.first_order_minus)
+        merged_minus.update(other.first_order_minus)
+
+        eff_order = 2 if (merged_second or merged_minus) else (self.order or other.order or 1)
         merged_defect = d1 or d2 or "defect"
         merged_cell = c1 or c2 or 0
         merged_scale = p1 or p2 or 0.0
@@ -1241,52 +1270,54 @@ class RawZFSData:
             second_order=merged_second,
             metadata=merged_metadata,
             vasp_settings=_merge_vasp_settings(self.vasp_settings, other.vasp_settings),
+            first_order_minus=merged_minus,
         )
 
     def __add__(self, other: RawZFSData) -> RawZFSData:
         return self.combine(other)
 
+    def with_minus(self, minus: RawZFSData) -> RawZFSData:
+        """This +Q dataset with the first-order runs of ``minus`` (its -Q partner) as first_order_minus.
+
+        ``minus`` is the first-order dataset parsed from the pert_-<p> tree: its step must be the
+        negative of this one's, and every other check of combine applies.
+        """
+        if minus.second_order:
+            raise ValueError("the -Q dataset holds second-order runs; only its first-order runs are used")
+        if not np.isclose(minus.pert_scale, -self.pert_scale, rtol=1e-3, atol=1e-5) or self.pert_scale <= 0:
+            raise ValueError(
+                f"central differences need steps +p and -p: got {self.pert_scale:g} and {minus.pert_scale:g}"
+            )
+        as_minus = replace(minus, pert_scale=self.pert_scale, first_order={}, first_order_minus=dict(minus.first_order))
+        return self.combine(as_minus)
+
     def to_unit(self, target_unit: str) -> RawZFSData:
         """Converts all tensors in the container to the specified unit."""
         new_gs = self.ground_state_zfs.to_unit(target_unit) if self.ground_state_zfs else None
 
-        new_first = {}
-        for k, v in self.first_order.items():
-            if isinstance(v, PerturbationEntry):
-                new_first[k] = PerturbationEntry(
-                    order=v.order,
-                    mode_indices=v.mode_indices,
-                    amplitude=v.amplitude,
-                    zfs_tensor=v.zfs_tensor.to_unit(target_unit),
-                    energy=v.energy,
-                )
-            elif isinstance(v, dict) and "tensor" in v:
-                curr_unit = v.get("unit", "J")
-                new_v = dict(v)
-                new_v["tensor"] = convert_energy(v["tensor"], curr_unit, target_unit)
-                new_v["unit"] = target_unit
-                new_first[k] = new_v
-            else:
-                new_first[k] = v
+        def converted(entries: dict) -> dict:
+            out = {}
+            for k, v in entries.items():
+                if isinstance(v, PerturbationEntry):
+                    out[k] = PerturbationEntry(
+                        order=v.order,
+                        mode_indices=v.mode_indices,
+                        amplitude=v.amplitude,
+                        zfs_tensor=v.zfs_tensor.to_unit(target_unit),
+                        energy=v.energy,
+                    )
+                elif isinstance(v, dict) and "tensor" in v:
+                    curr_unit = v.get("unit", "J")
+                    new_v = dict(v)
+                    new_v["tensor"] = convert_energy(v["tensor"], curr_unit, target_unit)
+                    new_v["unit"] = target_unit
+                    out[k] = new_v
+                else:
+                    out[k] = v
+            return out
 
-        new_second = {}
-        for k, v in self.second_order.items():
-            if isinstance(v, PerturbationEntry):
-                new_second[k] = PerturbationEntry(
-                    order=v.order,
-                    mode_indices=v.mode_indices,
-                    amplitude=v.amplitude,
-                    zfs_tensor=v.zfs_tensor.to_unit(target_unit),
-                    energy=v.energy,
-                )
-            elif isinstance(v, dict) and "tensor" in v:
-                curr_unit = v.get("unit", "J")
-                new_v = dict(v)
-                new_v["tensor"] = convert_energy(v["tensor"], curr_unit, target_unit)
-                new_v["unit"] = target_unit
-                new_second[k] = new_v
-            else:
-                new_second[k] = v
+        new_first = converted(self.first_order)
+        new_second = converted(self.second_order)
 
         return RawZFSData(
             defect=self.defect,
@@ -1303,6 +1334,7 @@ class RawZFSData:
             second_order=new_second,
             metadata=dict(self.metadata),
             vasp_settings=self.vasp_settings,
+            first_order_minus=converted(self.first_order_minus),
         )
 
     def enrich_with_spectrum(self, spectrum: PhononSpectrum) -> None:
@@ -1316,8 +1348,9 @@ class RawZFSData:
         syms = phonon_pert.get("sym", [])
         iprs = phonon_pert.get("ipr", [])
 
-        for idx, entry in list(self.first_order.items()):
-            disp = disps[idx] if idx < len(disps) else None
+        signed = [(1, e) for e in self.first_order.items()] + [(-1, e) for e in self.first_order_minus.items()]
+        for sign, (idx, entry) in signed:
+            disp = sign * disps[idx] if idx < len(disps) else None
             sym = syms[idx] if idx < len(syms) else None
             ipr = iprs[idx] if idx < len(iprs) else None
             if isinstance(entry, PerturbationEntry):
@@ -1380,6 +1413,7 @@ class RawZFSData:
             encode=_encode_second_order,
             decode=_decode_order_dict,
         ),
+        FieldSpec("first_order_minus", "dict", optional=True, encode=_encode_first_order, decode=_decode_order_dict),
         FieldSpec(
             "vasp_settings",
             "str",
@@ -1395,6 +1429,7 @@ class RawZFSData:
         spectrum: Optional[PhononSpectrum] = None,
     ) -> str:
         """Saves RawZFSData to a .npz file with latest naming conventions and explicit unit metadata."""
+        self.check_central()
         if spectrum is not None:
             self.enrich_with_spectrum(spectrum)
 
@@ -1448,6 +1483,7 @@ class RawZFSData:
                     "ground_state_zfs": fields.get("ground_state_zfs"),
                     "first_order": fields.get("first_order"),
                     "second_order": fields.get("second_order"),
+                    "first_order_minus": fields.get("first_order_minus"),
                 }
             )
             fields.update(scaled)
@@ -1460,12 +1496,15 @@ class RawZFSData:
         base = scaled_fields[0]
         first_order = dict(base.get("first_order") or {})
         second_order = dict(base.get("second_order") or {})
+        first_order_minus = dict(base.get("first_order_minus") or {})
 
         for fields in scaled_fields[1:]:
             for k, v in (fields.get("first_order") or {}).items():
                 first_order.setdefault(k, v)
             for k, v in (fields.get("second_order") or {}).items():
                 second_order.setdefault(k, v)
+            for k, v in (fields.get("first_order_minus") or {}).items():
+                first_order_minus.setdefault(k, v)
 
         # Files without the keys predate them and were mass-weighted.
         conventions = {
@@ -1476,7 +1515,7 @@ class RawZFSData:
         convention = conventions.pop()
 
         order = base.get("order")
-        if second_order:
+        if second_order or first_order_minus:
             order = 2
         elif order is None:
             order = 1 if first_order else None
@@ -1496,6 +1535,7 @@ class RawZFSData:
             eigen_rotation=base.get("eigen_rotation"),
             first_order=first_order,
             second_order=second_order,
+            first_order_minus=first_order_minus,
         )
         for fields in scaled_fields:
             obj.vasp_settings = _merge_vasp_settings(obj.vasp_settings, fields.get("vasp_settings"))
@@ -1522,11 +1562,13 @@ class RawZFSData:
                 "ground_state_zfs": self.ground_state_zfs,
                 "first_order": self.first_order,
                 "second_order": self.second_order,
+                "first_order_minus": self.first_order_minus,
             }
         )
         self.ground_state_zfs = scaled["ground_state_zfs"]
         self.first_order = scaled["first_order"]
         self.second_order = scaled["second_order"]
+        self.first_order_minus = scaled["first_order_minus"]
         self.spin_correction_applied = True
         LOGGER.info(f"applied spin correction (defect_band_approx, x{SPIN_CORRECTION_SCALE:g})")
 

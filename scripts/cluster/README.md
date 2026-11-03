@@ -26,7 +26,10 @@ from that snapshot.
 
 - `perturbation_runner.sh`: the loop. First order perturbs along single modes
   (`create_phonon_struct.py`, run dirs `runs/<mode>`), second order along mode pairs
-  (`create_combined_phonon_struct.py`, `runs/<i>_<j>`), convergence each of `MODES` at -p and
+  (`create_combined_phonon_struct.py`, `runs/<i>_<j>`; `PAIR_MODE=diag` the pairs (i, i),
+  `PAIR_MODE=all` every pair i <= j, nearest in frequency first from `get_n_modes.py --pairs`, as
+  only pairs within about the broadening of each other feed the two-phonon rate and a tree stopped
+  part-way should hold those), convergence each of `MODES` at -p and
   +p for each size p in `PERTS` (`runs/<mode>_pert_<step>`; a sign, a repeat or 0 in `PERTS`
   is dropped, so older signed lists run the same steps). A run dir is finished when it has
   `.done`, written by the task that finished it once its OUTCAR has the spin-spin ZFS block
@@ -41,6 +44,8 @@ from that snapshot.
   `all_bands`/`defect_band_approx` x steps) from `<defect>/ZFS_hyp` and `<defect>/ZFS_occup`,
   plus the convergence folders `convergence_test_all/` and `convergence_test_occup/`.
   `--pert` (the step) is required; `--displacement` defaults to `normalized`;
+  `--central` builds first-order trees at +p and -p and no second-order tree, for central
+  differences (package them with `spinlabs package --central`);
   `--conv-modes` picks the convergence modes (or `--no-convergence`), `--conv-perts` their
   step sizes (default p/2, p, 2p and 4p for each step p, 4p being the 2Q helper of 2p; each run at
   both signs). The generated script gets
