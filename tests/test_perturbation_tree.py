@@ -442,6 +442,29 @@ def test_expected_runs_per_order(tmp_path):
     ]
 
 
+def test_pairs_run_nearest_in_frequency_first(tmp_path, capsys):
+    """PAIR_MODE=all: pairs i <= j by increasing |w_i - w_j|; equal gaps in (i, j) order."""
+    from spinlabs.vasp.modes import main, pair_numbers
+    from spinlabs.vasp.verify import expected_runs
+
+    phon = tmp_path / "phon.npz"
+    # modes 4, 5, 7, 10 at 100, 300, 101, 100 cm^-1: 4 and 10 degenerate
+    np.savez(phon, idx=np.array([3, 4, 6, 9]), freqs=np.array([100.0, 300.0, 101.0, 100.0]))
+    pairs = pair_numbers(phon)
+    assert pairs[:4] == [(4, 4), (4, 10), (5, 5), (7, 7)]  # gap 0: diagonals and the doublet, index order
+    assert pairs[4:7] == [(10, 10), (4, 7), (7, 10)]
+    assert pairs[-3:] == [(5, 7), (4, 5), (5, 10)]  # gaps 199, 200, 200
+    freq = {4: 100.0, 5: 300.0, 7: 101.0, 10: 100.0}
+    gaps = [abs(freq[i] - freq[j]) for i, j in pairs]
+    assert gaps == sorted(gaps)
+    assert len(pairs) == 4 * 5 // 2 and all(i <= j for i, j in pairs)
+    assert expected_runs({"PHONON_PATH": str(phon), "PAIR_MODE": "all"}, "second_order") == [
+        f"{i}_{j}" for i, j in pairs
+    ]
+    assert main([str(phon), "--pairs"]) == 0
+    assert capsys.readouterr().out.split() == [f"{i}_{j}" for i, j in pairs]
+
+
 def test_run_progress_counts_done_and_failed(tmp_path):
     from spinlabs.vasp.verify import run_progress
 
