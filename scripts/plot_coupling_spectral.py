@@ -31,9 +31,9 @@ from spinlabs.utils import MathUtils  # noqa: E402
 
 MODE_TITLES = {
     "computed": "all second-order pairs computed",
-    "sqrt": "uncomputed pairs from sqrt(V_ii V_jj), symmetry-allowed types",
+    "sqrt": "uncomputed pairs from the sqrt fill",
     "diagonal": "diagonal second-order pairs only",
-    "diagonal-sqrt": "diagonal pairs + sqrt(V_ii V_jj), symmetry-allowed types",
+    "diagonal-sqrt": "diagonal pairs + the sqrt fill",
 }
 
 
@@ -66,8 +66,18 @@ def plot_coupling_spectral(data, zfs_mev, sigma, title, mode, out):
     ax.grid(True, ls=":", alpha=0.5)
 
     ax = fig.add_subplot(gs[0, 2])
-    plot_1d_spectral_functions(w, np.diag(data.V2_0_0), np.diag(data.V2_p_m), np.diag(data.V2_0_pm), sigma=sigma,
-                               res=0.1, order=2, ax=ax)
+    _, _, ax2 = plot_1d_spectral_functions(w, np.diag(data.V2_0_0), np.diag(data.V2_p_m), np.diag(data.V2_0_pm),
+                                           sigma=sigma, res=0.1, order=2, ax=ax)
+    # sqrt(F) on the right axis: in MHz/sqrt(meV), on the scale of the coupling sticks, so a few large
+    # couplings do not dwarf the rest
+    for line in ax2.get_lines():
+        line.set_ydata(np.sqrt(np.clip(line.get_ydata(), 0.0, None)))
+        line.set_label("$\\sqrt{" + line.get_label().strip("$") + "}$")
+    ax2.set_ylim(0, 1.08 * max(float(np.max(line.get_ydata())) for line in ax2.get_lines()))
+    ax2.set_ylabel(r"$\sqrt{F}$ (MHz/meV$^{1/2}$)")
+    handles, labels = ax.get_legend_handles_labels()
+    handles2, labels2 = ax2.get_legend_handles_labels()
+    ax.legend(handles + handles2, labels + labels2, loc="upper right", frameon=True)
     ax.set_title(f"Second order, diagonal (i = i), $\\sigma$ = {sigma:g} meV", fontsize=11)
 
     res2 = min(0.5, sigma / 4)  # the grid compute_rates uses
