@@ -251,13 +251,20 @@ class TransitionRate:
         density = np.convolve(hist, kernel, mode="full")[half : half + len(omega)]
         return omega, density
 
-    def get_line_spectral_density(self, sigma: float, res: float | None = None) -> dict:
+    def get_line_spectral_density(
+        self, sigma: float, res: float | None = None, zero_gap_tol: float | None = None
+    ) -> dict:
         """Temperature-independent input of compute_two_phonon_rates: J2 on each transition's energy line.
 
         A transition m_s -> m_s' changes the spin energy by gap = E(m_s') - E(m_s), with
         E(+-1) = D and E(0) = 0 at zero field, so the Raman line is w_absorbed - w_emitted = gap.
         |dm| = 1 uses V2_0pm, |dm| = 2 V2_+-. ``res`` defaults to sigma/20 (at most 0.05 meV),
         fine against the sigma/sqrt2 width along the line.
+
+        ``zero_gap_tol`` (meV) leaves out every pair whose frequencies differ by less: the
+        diagonal pairs (i, i) and the partners of a degenerate E doublet. Their gap is zero at any
+        sigma, so they add a term ~ 1/sigma that a phonon continuum does not have (there such
+        pairs have measure zero); without them the rate is the supercell's continuum estimate.
         """
         res = min(0.05, sigma / 20) if res is None else res
         freqs = self.data["freqs"] / CONSTANTS["meV2J"]
@@ -266,6 +273,9 @@ class TransitionRate:
         weights = {
             dm: self.pair_weights(self.get_2ph_coupling(key) / CONSTANTS["meV2J"]) for dm, key in couplings.items()
         }
+        if zero_gap_tol is not None:
+            zero_gap = np.abs(freqs[:, None] - freqs[None, :]) < zero_gap_tol
+            weights = {dm: np.where(zero_gap, 0.0, w) for dm, w in weights.items()}
 
         lines, cache = {}, {}
         for ms in self.ms_values:

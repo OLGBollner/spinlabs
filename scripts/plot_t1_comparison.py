@@ -8,6 +8,10 @@ unless the path exists as given) and which second-order pairs to use:
   diagonal        only the diagonal pairs (i, i)
   diagonal-sqrt   only the diagonal pairs, the rest filled with sqrt(V_ii V_jj)
 
+A MODE ending in +nogap (e.g. computed+nogap) leaves the zero-gap pairs out of the two-phonon
+rates: the diagonal (i, i) and the partners of degenerate E doublets (|w_i - w_j| < ZERO_GAP_TOL_MEV),
+whose ~1/sigma contribution a phonon continuum does not have.
+
 DISPLACEMENT (normalized, mass_weighted, unweighted) overrides the package's displacement convention.
 Inconsistent second-order entries are excluded. Without --case, the NV_64 / NV_512 comparison of
 2026-10-28 is drawn. The numbers go to <output>.json; --replot redraws from it without recomputing.
@@ -32,6 +36,8 @@ from spinlabs.pipeline import compute_rates, load_raw_inputs, solve_t1  # noqa: 
 from spinlabs.zfs_manager import ZFSManager  # noqa: E402
 
 MODES = ("computed", "sqrt", "diagonal", "diagonal-sqrt")
+NOGAP = "+nogap"
+ZERO_GAP_TOL_MEV = 1e-3  # symmetry-degenerate partners; accidental near-degeneracies start near 0.01 meV
 STATES = (("ms_0", "$m_s=0$"), ("ms_1", "$m_s=\\pm1$"))
 DEFAULT_SIGMAS = [0.1, 0.15, 0.2, 0.3, 0.5, 1.0, 2.0, 3.5, 5.0, 6.0, 7.0, 7.5, 8.0, 8.5, 9.0, 9.5, 10.0, 11.0, 12.0]
 NV64 = "NV_64/pert_0.1/all_bands/20261029/NV_64_raw_zfs_data_all_bands_12d.npz"  # repackaged as unweighted
@@ -75,7 +81,7 @@ def coupling_manager(raw_file, mode, displacement=None):
     return manager, f"{raw.defect}_{raw.cell_size} step {raw.pert_scale:g}: {manager.displacement}"
 
 
-def t1_grid(manager, sigmas, temps):
+def t1_grid(manager, sigmas, temps, zero_gap_tol=None):
     """T1 (s) per initial state and the 0<->1 one- and two-phonon rates (1/s), as [sigma][temperature]."""
     t1 = {state: [] for state, _ in STATES}
     rates_0_1 = {"first_order": [], "two_phonon": []}
@@ -83,7 +89,9 @@ def t1_grid(manager, sigmas, temps):
         base = str(Path(tmp) / "coupling")
         manager.process_both_orders(output_filename=base)
         for n, sigma in enumerate(sigmas):
-            valid, rates, directional = compute_rates(Path(f"{base}.npz"), temps, sigma=sigma, has_second_order=True)
+            valid, rates, directional = compute_rates(
+                Path(f"{base}.npz"), temps, sigma=sigma, has_second_order=True, zero_gap_tol=zero_gap_tol
+            )
             if len(valid) != len(temps):
                 raise SystemExit(f"rates missing at some temperatures for sigma {sigma:g}: got {list(valid)}")
             path = Path(tmp) / f"directional_{n}.npz"
@@ -99,8 +107,9 @@ def compute(kind, cases, sigmas, temps):
     """Run every case; the result dict that plot() draws and the JSON stores."""
     result = {"kind": kind, "sigma_mev": sigmas, "temperature_K": temps, "cases": []}
     for label, raw_file, mode, displacement in cases:
-        manager, convention = coupling_manager(raw_file, mode, displacement)
-        t1, rates_0_1 = t1_grid(manager, sigmas, temps)
+        nogap = mode.endswith(NOGAP)
+        manager, convention = coupling_manager(raw_file, mode.removesuffix(NOGAP), displacement)
+        t1, rates_0_1 = t1_grid(manager, sigmas, temps, zero_gap_tol=ZERO_GAP_TOL_MEV if nogap else None)
         result["cases"].append(
             {
                 "label": label,
@@ -131,7 +140,10 @@ def plot(result, out, mark):
             else:
                 x, y, every = result["temperature_K"], values[0], 3
             i = files.index(case["file"])
-            style = dict(color=COLORS[i % len(COLORS)], marker=MARKERS[i % len(MARKERS)], **MODE_STYLES[case["mode"]])
+            base = case["mode"].removesuffix(NOGAP)
+            style = dict(color=COLORS[i % len(COLORS)], marker=MARKERS[i % len(MARKERS)], **MODE_STYLES[base])
+            if case["mode"].endswith(NOGAP):
+                style.update(ls="-.", marker="x", mfc=style["color"])
             ax.plot(x, y, lw=2, ms=5, mew=1.3, markevery=every, label=case["label"], **style)
         ax.axvline(mark, color="#888888", lw=1, ls=":")
         ax.set_xscale("log")
@@ -162,8 +174,10 @@ def parse_cases(raw_cases, defaults, data):
     """(label, path, mode, displacement) per --case; the defaults when none is given."""
     cases = []
     for case in raw_cases or [list(c) for c in defaults]:
-        if len(case) not in (3, 4) or case[2] not in MODES:
-            raise SystemExit(f"--case wants LABEL FILE MODE [DISPLACEMENT] with MODE one of {MODES}: {case}")
+        if len(case) not in (3, 4) or case[2].removesuffix(NOGAP) not in MODES:
+            raise SystemExit(
+                f"--case wants LABEL FILE MODE [DISPLACEMENT] with MODE one of {MODES}, optionally +nogap: {case}"
+            )
         path = Path(case[1]) if Path(case[1]).exists() else Path(data) / case[1]
         if not path.exists():
             raise SystemExit(f"no such raw package: {case[1]} (also looked in {data})")

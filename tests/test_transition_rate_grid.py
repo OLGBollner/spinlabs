@@ -48,7 +48,7 @@ def _gauss(x, width):
     return np.exp(-0.5 * (x / width) ** 2) / (np.sqrt(2 * np.pi) * width)
 
 
-def _line_integral(calc, key, gap, temp=T):
+def _line_integral(calc, key, gap, temp=T, keep=None):
     """Raman rate straight from the definition, without binning.
 
     V2 holds the 1/2 of the Taylor series, so a pair i != j enters H as 2 V2_ij q_i q_j and
@@ -59,6 +59,8 @@ def _line_integral(calc, key, gap, temp=T):
     """
     v2 = (np.asarray(calc.data[key]) / MEV) ** 2
     m2 = (2 + 2 * (1.0 - np.eye(len(FREQS_MEV)))) * v2
+    if keep is not None:
+        m2 = m2 * keep
     w = np.arange(0.005, 120.0, 0.01)
     g_abs = _gauss(w[:, None] - FREQS_MEV[None, :], SIGMA)
     g_em = _gauss(w[:, None] - gap - FREQS_MEV[None, :], SIGMA)
@@ -175,3 +177,17 @@ def test_direct_rate_vanishes_at_zero_temperature_only_for_absorption():
     calc.compute_transition_rates(0.0, omega, j0pm, jpm, j00, 42.0)
     first = calc.transition_rate["first_order"]
     assert first["0_to_1"] == 0.0 and first["1_to_0"] > 0.0
+
+
+def test_zero_gap_pairs_are_left_out():
+    """FREQS_MEV holds a degenerate doublet (30, 30): with a tolerance, it and every (i, i) drop out."""
+    calc = _calculator()
+    calc.compute_two_phonon_rates(T, calc.get_line_spectral_density(SIGMA, zero_gap_tol=1e-3))
+    rates = dict(calc.transition_rate["two_phonon"])
+    D = calc.data["zfs"] / MEV
+    keep = np.abs(FREQS_MEV[:, None] - FREQS_MEV[None, :]) >= 1e-3
+    assert not keep[0, 1] and not keep[2, 2] and keep[0, 2]
+    assert rates["0_to_1"] == pytest.approx(_line_integral(calc, "V2_0_pm", D, keep=keep), rel=2e-3)
+    assert rates["1_to_-1"] == pytest.approx(_line_integral(calc, "V2_p_m", 0.0, keep=keep), rel=2e-3)
+    full = _two_phonon(calc)
+    assert rates["0_to_1"] < full["0_to_1"]
