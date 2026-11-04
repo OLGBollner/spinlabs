@@ -155,3 +155,17 @@ def test_relaxation_series_keeps_measured_t1_and_adds_t1_from_rates(tmp_path):
         t1_from_rates(lin[0], late)
     with pytest.raises(ValueError, match="init_state"):
         t1_from_rates(lin[0], lin[1], "ms_2")
+
+
+def test_optional_citation_line_is_read_and_kept_on_derived_t1(tmp_path):
+    plain = read_experimental_csv(_write(tmp_path, JARMOLA_LIKE))
+    assert all(s.citation is None for s in plain)
+    cited = read_experimental_csv(_write(tmp_path, "Jarmola et al. (2012)\n" + JARMOLA_LIKE))
+    assert [s.citation for s in cited] == ["Jarmola et al. (2012)"] * 3
+    assert [s.label for s in cited] == [s.label for s in plain]
+    np.testing.assert_allclose(cited[0].y, plain[0].y)
+
+    rates = read_experimental_csv(_write(tmp_path, "Lin et al. (2021)\n" + LIN_LIKE, "Lin_2021.csv"))
+    (t1,) = relaxation_series(rates)
+    assert t1.citation == "Lin et al. (2021)"
+    assert t1.to_units(y_unit="Hz").citation == "Lin et al. (2021)"

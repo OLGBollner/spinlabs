@@ -1,7 +1,9 @@
-"""Experimental data digitized from papers, one CSV per source (``experimental_data/<Author>_<year>.csv``).
+"""Experimental data digitized from papers, one CSV per source (``experimental_data/<defect>/<Author>_<year>.csv``).
 
-The CSV layout is WebPlotDigitizer's export of several datasets from one figure:
+The CSV layout is WebPlotDigitizer's export of several datasets from one figure, under an optional
+citation line:
 
+    Jarmola et al. (2012)    citation, as the legend shows it (optional; one cell)
     K,Hz                     units: one x and one y unit for every series (or one pair per series)
     S8,,S3,,S2,              series names, each over its X and Y column
     X,Y,X,Y,X,Y              column roles
@@ -65,6 +67,7 @@ class ExperimentalSeries:
     y_unit: str
     source: str
     kind: str = "relaxation"
+    citation: str | None = None
 
     def __len__(self) -> int:
         return len(self.x)
@@ -97,6 +100,10 @@ def read_experimental_csv(path: str | Path) -> list[ExperimentalSeries]:
     path = Path(path)
     with open(path, newline="", encoding="utf-8-sig") as fh:
         rows = [[cell.strip() for cell in row] for row in csv.reader(fh)]
+    citation = None
+    if len(rows) >= 4 and _is_roles_row(rows[3]) and not _is_roles_row(rows[2]):
+        citation = ",".join(c for c in rows[0] if c) or None  # the optional citation line
+        rows = rows[1:]
     if len(rows) < 3:
         raise ValueError(f"{path}: expected a units, a names and an X,Y header row before the data")
     units_row, names_row, roles_row, data = rows[0], rows[1], rows[2], rows[3:]
@@ -143,9 +150,16 @@ def read_experimental_csv(path: str | Path) -> list[ExperimentalSeries]:
                 y_unit=units[2 * k + 1],
                 source=path.stem,
                 kind=series_kind(name),
+                citation=citation,
             )
         )
     return series
+
+
+def _is_roles_row(row: list[str]) -> bool:
+    """Whether a CSV row is the X,Y column-roles header."""
+    roles = [r.upper() for r in row if r]
+    return bool(roles) and roles == ["X", "Y"] * (len(roles) // 2) and len(roles) % 2 == 0
 
 
 def _log_interp(x_new: np.ndarray, x: np.ndarray, y: np.ndarray) -> np.ndarray:
@@ -181,7 +195,7 @@ def t1_from_rates(omega: ExperimentalSeries, gamma: ExperimentalSeries, init_sta
     buffer.seek(0)
     t1 = np.asarray(RelaxationDynamics(INIT_POPULATIONS[init_state], buffer).compute_T1_range(), dtype=float)
     label = f"T1 {init_state} from {omega.label} and {gamma.label}"
-    return ExperimentalSeries(label, temps, t1, "K", "s", omega.source, "relaxation")
+    return ExperimentalSeries(label, temps, t1, "K", "s", omega.source, "relaxation", omega.citation)
 
 
 def relaxation_series(series: list[ExperimentalSeries], init_state: str = "ms_0") -> list[ExperimentalSeries]:
