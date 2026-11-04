@@ -231,3 +231,40 @@ def test_package_central_skips_a_step_without_its_minus_tree(tmp_path, monkeypat
         _run(_package_args(tmp_path))
     assert "no first_order/pert_-0.05 folder" in caplog.text
     assert not list((tmp_path / "data").rglob("*.npz"))
+
+
+# ---- modes with frequency <= 0 (acoustic) ----
+
+def _spectrum_with_acoustic():
+    """Modes at 0 and -0.2 meV (acoustic, as phonopy gives them) and one at 30 meV."""
+    rng = np.random.default_rng(3)
+    return PhononSpectrum(
+        frequencies_mev=np.array([0.0, -0.2, 30.0]),
+        eigenvectors=rng.normal(size=(3, 2, 3)),
+        atom_frac_coords=np.zeros((2, 3)),
+        atom_symbols=["C", "C"],
+        atomic_masses=np.array([12.011, 12.011]),
+        lattice=np.eye(3) * 3.56,
+        symmetries=["A1", "A1", "A1"],
+        iprs=np.ones(3) * 0.5,
+    )
+
+
+@pytest.mark.parametrize("central", [False, True], ids=["forward", "central"])
+def test_runs_of_modes_without_a_positive_frequency_get_no_displacement(central):
+    """Such modes have no step (get_phonon_pert gives None); the -Q sign must not turn that into an error."""
+    modes = (0, 1, 2)
+    if central:
+        raw = _central_raw(modes=modes, minus_modes=modes)
+    else:
+        raw = RawZFSData(defect="NV", cell_size=64, pert_scale=0.05, ground_state_zfs=ZFSTensor(matrix=D0, unit="MHz"),
+                         first_order={m: _entry(_response(1.0), 0.05) for m in modes})
+    manager = ZFSManager(spectrum=_spectrum_with_acoustic(), raw_data=raw)
+    assert manager.first_order[0]["pert"] is None and manager.first_order[1]["pert"] is None
+    assert manager.first_order[2]["pert"] > 0
+    if central:
+        assert manager.first_order_minus[0]["pert"] is None
+        assert manager.first_order_minus[2]["pert"] < 0
+    _, V_0_0, V_p_m, V_0_pm = manager.calculate_first_order_derivatives()
+    assert V_0_0[0] == V_0_pm[0] == V_p_m[0] == 0 and V_0_0[1] == V_0_pm[1] == V_p_m[1] == 0
+    assert V_0_0[2] > 0  # the A1 mode at 30 meV keeps its coupling

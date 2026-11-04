@@ -257,6 +257,10 @@ class ZFSManager:
                 dropped.append(idx)
             return mapped
 
+        def signed(disp: Optional[float], sign: int) -> Optional[float]:
+            """The run's displacement at sign * pert_scale; None (a mode with frequency <= 0) stays None."""
+            return None if disp is None else sign * disp
+
         def ingest_first(entries: dict, sign: int) -> dict[int, dict[str, Any]]:
             """First-order runs at sign * pert_scale, rotated into the defect frame, keyed by spectrum position."""
             out = {}
@@ -271,7 +275,7 @@ class ZFSManager:
                     out[sp] = {
                         "tensor": tensor_j,
                         "symmetry": phonon_pert["sym"][sp] if phonon_pert else None,
-                        "pert": sign * phonon_pert["disp"][sp] if phonon_pert else None,
+                        "pert": signed(phonon_pert["disp"][sp], sign) if phonon_pert else None,
                         "ipr": phonon_pert["ipr"][sp] if phonon_pert else None,
                         "original_index": idx,
                     }
@@ -291,7 +295,7 @@ class ZFSManager:
                         if phonon_pert.get("sym") is not None and sp < len(phonon_pert["sym"]):
                             enriched["symmetry"] = phonon_pert["sym"][sp]
                         if phonon_pert.get("disp") is not None and sp < len(phonon_pert["disp"]):
-                            enriched["pert"] = sign * phonon_pert["disp"][sp]
+                            enriched["pert"] = signed(phonon_pert["disp"][sp], sign)
                         if phonon_pert.get("ipr") is not None and sp < len(phonon_pert["ipr"]):
                             enriched["ipr"] = phonon_pert["ipr"][sp]
                     enriched["original_index"] = idx
