@@ -194,11 +194,44 @@ trap 'release_lock; exit 130' INT
 # asks Slurm whether the job still runs, and stops if not. No answer (no squeue, not in a SLURM job)
 # counts as running, as before.
 STOP=no
+STOP_WHY=""
 JOB_STATE=""
 job_ending() {
   [ -n "${SLURM_JOB_ID:-}" ] || return 1
   JOB_STATE=$(squeue -h -j "$SLURM_JOB_ID" -o %T 2>/dev/null | head -n 1)
-  [ -n "$JOB_STATE" ] && [ "$JOB_STATE" != "RUNNING" ]
+  if [ -n "$JOB_STATE" ] && [ "$JOB_STATE" != "RUNNING" ]; then
+    STOP_WHY="job ${SLURM_JOB_ID} is $JOB_STATE (past its time limit or cancelled)"
+    return 0
+  fi
+  return 1
+}
+
+# Nor is a run started that the time limit would cut off: the job has less time left than the
+# longest run this task has done (RUN_SECONDS, measured; a job script may set it as a first
+# estimate, else the task's first run always starts). squeue gives the time left as [D-]HH:MM:SS,
+# MM:SS or SS; UNLIMITED, NOT_SET or INVALID mean no limit to keep to.
+RUN_SECONDS=${RUN_SECONDS:-}
+TIME_LEFT=""
+time_left() {
+  TIME_LEFT=""
+  [ -n "${SLURM_JOB_ID:-}" ] || return 0
+  TIME_LEFT=$(squeue -h -j "$SLURM_JOB_ID" -o %L 2>/dev/null | head -n 1 | awk -F'[-:]' '
+    /^[0-9][0-9:-]*$/ {
+      s = 0; first = 1
+      if (index($0, "-")) { s = $1 * 86400; first = 2 }
+      m = 1
+      for (k = NF; k >= first; k--) { s += $k * m; m *= 60 }
+      print s
+    }')
+}
+too_little_time() {
+  [ -n "$RUN_SECONDS" ] || return 1
+  time_left
+  if [ -n "$TIME_LEFT" ] && [ "$TIME_LEFT" -lt "$RUN_SECONDS" ]; then
+    STOP_WHY="${TIME_LEFT} s left in job ${SLURM_JOB_ID:-}, a run takes up to ${RUN_SECONDS} s"
+    return 0
+  fi
+  return 1
 }
 # ---- end job state ----
 
@@ -236,7 +269,8 @@ run_one() {
     echo "$ID: skipping $label -- already attempted by another task of this array"
     return 0
   fi
-  if job_ending; then  # past the time limit (or cancelled): no step would start
+  # Past the time limit (or cancelled) no step would start; with too little time left it would be cut off.
+  if job_ending || too_little_time; then
     STOP=yes
     return 0
   fi
@@ -255,9 +289,30 @@ run_one() {
   PREV_ATTEMPT=$(cat "$TARGET_DIR/.attempted" 2>/dev/null || true)
   printf '%s\n' "$ARRAY_TAG" > "$TARGET_DIR/.attempted"
   rm -f "$TARGET_DIR"/CHECK "$TARGET_DIR"/.done  # from an earlier attempt
-  cp "$INPUT_DIR"/* "$TARGET_DIR"/
+  # The INCAR reads a CHGCAR (ICHARG = 1). An earlier attempt that left a complete one of its own
+  # restarts from it; else the ground-state one from input/ goes in. VASP writes CHGCAR at the end
+  # of the SCF, so a run cut off mid-SCF leaves none, or part of one (spinlabs.vasp.restart checks).
+  RESUME=no
+  OWN_CHGCAR=""
+  if [ -s "$TARGET_DIR/CHGCAR" ]; then
+    if OWN_CHGCAR=$(python -m spinlabs.vasp.restart "$TARGET_DIR/CHGCAR" 2>&1); then
+      RESUME=yes
+    fi
+  fi
+  for f in "$INPUT_DIR"/*; do
+    if [ "$RESUME" = yes ] && [ "${f##*/}" = CHGCAR ]; then
+      continue
+    fi
+    cp "$f" "$TARGET_DIR"/
+  done
   cd "$TARGET_DIR"
   echo "$ID: starting job for $label"
+  if [ "$RESUME" = yes ]; then
+    echo "$ID: $label restarts from its own CHGCAR"
+  elif [ -n "$OWN_CHGCAR" ]; then
+    echo "$ID: $label: its own CHGCAR is not usable ($OWN_CHGCAR) -- starting from the input CHGCAR"
+  fi
+  RUN_START=$(date +%s)
   # In the if-condition a failing script does not trip set -e, so the job still
   # reports the failure and the script's output before exiting.
   if MSG=$(python "$create_struct" -o POSCAR POSCAR "$PHONON_PATH" "$@" "$PERT" $DISP_FLAG) \
@@ -283,11 +338,17 @@ run_one() {
   # leave its other directories unattempted; the task exits nonzero at the end instead.
   if srun $binary; then
     echo "$ID: Done! $label"
+    # The longest run so far is what a next run is expected to need (too_little_time).
+    run_seconds=$(( $(date +%s) - RUN_START ))
+    if [ -z "$RUN_SECONDS" ] || [ "$run_seconds" -gt "$RUN_SECONDS" ]; then
+      RUN_SECONDS=$run_seconds
+    fi
   else
     status=$?
     if job_ending; then
       # srun was refused (or cut off) because the job is ending, not because VASP failed: the run
       # keeps the .attempted it had before, so it is not counted as a failure of this submission.
+      # A CHGCAR it may have written is judged on the next attempt.
       if [ -n "$PREV_ATTEMPT" ]; then printf '%s\n' "$PREV_ATTEMPT" > .attempted; else rm -f .attempted; fi
       echo "$ID: $label not run -- the job is $JOB_STATE"
       cd "$HEAD_DIR"
@@ -297,10 +358,16 @@ run_one() {
     fi
     echo "$ID: VASP exited with $status for $label"
     VASP_FAILED=$((VASP_FAILED + 1))
+    if [ "$RESUME" = yes ]; then
+      # A restart from the run's own density that crashes must not be repeated: the next attempt
+      # starts from the ground-state CHGCAR again.
+      rm -f CHGCAR
+      echo "$ID: $label crashed after restarting from its own CHGCAR -- dropped; the next attempt starts from the input CHGCAR"
+    fi
   fi
   # The one read of this OUTCAR's ZFS block: only a complete run gets .done and loses its
-  # restart files. VASP can exit 0 without writing a ZFS block; such a directory gets no .done,
-  # so it is retried and needs CHGCAR/CHG to resume. (A job that ends meanwhile returns above.)
+  # restart files. VASP can exit 0 without writing a ZFS block; such a directory gets no .done and
+  # is retried, from its own CHGCAR if complete. (A job that ends meanwhile returns above.)
   if [ -f OUTCAR ] && grep -qzP "$ZFS_REGEX_PATTERN" OUTCAR; then
     : > .done
     echo "$ID: removing excess VASP results (WAVECAR, CHGCAR, CHG)"
@@ -310,7 +377,7 @@ run_one() {
     python "$SCRIPTS/check_run.py" "$HEAD_DIR/$TARGET_DIR" --phonons "$PHONON_PATH" --write-check \
       | sed "s/^/$ID: /" || true
   else
-    echo "$ID: $label did not finish -- keeping CHGCAR/CHG so it can resume"
+    echo "$ID: $label did not finish -- the next attempt restarts from its CHGCAR if VASP left a complete one"
   fi
   cd "$HEAD_DIR"
   release_lock
@@ -372,7 +439,7 @@ if [ "$NJOBS" -gt 1 ] && [ "$STOP" != yes ]; then
   walk
 fi
 if [ "$STOP" = yes ]; then
-  echo "$ID: job ${SLURM_JOB_ID:-} is $JOB_STATE (past its time limit or cancelled) -- stopped; the next submission picks up the runs left"
+  echo "$ID: stopped: $STOP_WHY -- the next submission picks up the runs left"
 fi
 
 if [ "$VASP_FAILED" -gt 0 ]; then
