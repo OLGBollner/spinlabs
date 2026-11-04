@@ -9,11 +9,17 @@ The CSV layout is WebPlotDigitizer's export of several datasets from one figure:
 
 Rows are in digitizing order, so each series is sorted by x when read. The source (the paper) is
 the file name, e.g. ``Jarmola_2012``.
+
+A series measures either the relaxation itself, T1 or 1/T1 of a polarized state (``kind`` "relaxation",
+e.g. Jarmola et al. 2012), or a single-transition rate, named by its label: ``omega`` (or Ω) for
+|0> <-> |+-1>, ``gamma`` (or γ) for |+1> <-> |-1> (e.g. Lin et al. 2021). relaxation_series turns a
+source's Omega and gamma into T1 with the spinlabs rate-equation solver.
 """
 
 from __future__ import annotations
 
 import csv
+import io
 from dataclasses import dataclass, replace
 from pathlib import Path
 
@@ -36,9 +42,21 @@ UNITS: dict[str, tuple[str, float]] = {
 }
 
 
+# Series labels that name a single-transition rate (case-insensitive) and the kind they get.
+RATE_LABELS = {"omega": "omega", "ω": "omega", "gamma": "gamma", "γ": "gamma"}
+
+
+def series_kind(label: str) -> str:
+    """'omega' or 'gamma' for a single-transition rate, else 'relaxation' (T1 or 1/T1 of a polarized state)."""
+    return RATE_LABELS.get(label.strip().lower(), "relaxation")
+
+
 @dataclass(frozen=True)
 class ExperimentalSeries:
-    """One digitized dataset: ``y`` against ``x``, sorted by ``x``."""
+    """One digitized dataset: ``y`` against ``x``, sorted by ``x``.
+
+    ``kind`` is what y measures: "relaxation" (T1 or 1/T1), "omega" or "gamma" (see the module docstring).
+    """
 
     label: str
     x: np.ndarray
@@ -46,6 +64,7 @@ class ExperimentalSeries:
     x_unit: str
     y_unit: str
     source: str
+    kind: str = "relaxation"
 
     def __len__(self) -> int:
         return len(self.x)
@@ -123,9 +142,63 @@ def read_experimental_csv(path: str | Path) -> list[ExperimentalSeries]:
                 x_unit=units[2 * k],
                 y_unit=units[2 * k + 1],
                 source=path.stem,
+                kind=series_kind(name),
             )
         )
     return series
+
+
+def _log_interp(x_new: np.ndarray, x: np.ndarray, y: np.ndarray) -> np.ndarray:
+    """y at x_new, linear in log(y): the rates grow about exponentially with temperature."""
+    return np.exp(np.interp(x_new, x, np.log(y)))
+
+
+def t1_from_rates(omega: ExperimentalSeries, gamma: ExperimentalSeries, init_state: str = "ms_0") -> ExperimentalSeries:
+    """T1 (s) of ``init_state`` from measured Omega and gamma, by the spinlabs rate-equation solver.
+
+    Omega drives |0> <-> |+1> and |0> <-> |-1>, gamma |+1> <-> |-1>, each the same in both directions
+    (detailed balance differs by exp(D/kT) - 1 ~ 5e-4 at 300 K). The two series are taken at the union
+    of their temperatures where both were measured, each interpolated linearly in log(rate). T1 is the
+    fitted decay of RelaxationDynamics, as for the computed rates (pipeline.solve_t1).
+    """
+    from spinlabs.relaxation_dynamics import INIT_POPULATIONS, RelaxationDynamics
+
+    if init_state not in INIT_POPULATIONS:
+        raise ValueError(f"init_state must be one of {', '.join(INIT_POPULATIONS)}, got {init_state!r}")
+    om, ga = omega.to_units(x_unit="K", y_unit="Hz"), gamma.to_units(x_unit="K", y_unit="Hz")
+    lo, hi = max(om.x[0], ga.x[0]), min(om.x[-1], ga.x[-1])
+    temps = np.unique(np.concatenate([om.x, ga.x]))
+    temps = temps[(temps >= lo) & (temps <= hi)]
+    if len(temps) == 0:
+        raise ValueError(
+            f"{omega.source}: Omega ({om.x[0]:g}-{om.x[-1]:g} K) and gamma ({ga.x[0]:g}-{ga.x[-1]:g} K) "
+            "share no temperature range"
+        )
+    w, g = _log_interp(temps, om.x, om.y), _log_interp(temps, ga.x, ga.y)
+    rates = {"0_to_1": w, "0_to_-1": w, "1_to_0": w, "-1_to_0": w, "1_to_-1": g, "-1_to_1": g}
+    buffer = io.BytesIO()
+    np.savez(buffer, temperatures=temps, **rates)
+    buffer.seek(0)
+    t1 = np.asarray(RelaxationDynamics(INIT_POPULATIONS[init_state], buffer).compute_T1_range(), dtype=float)
+    label = f"T1 {init_state} from {omega.label} and {gamma.label}"
+    return ExperimentalSeries(label, temps, t1, "K", "s", omega.source, "relaxation")
+
+
+def relaxation_series(series: list[ExperimentalSeries], init_state: str = "ms_0") -> list[ExperimentalSeries]:
+    """The T1 / 1/T1 data of ``series``, plus T1 of ``init_state`` for every source that gives Omega and gamma.
+
+    A source with only one of Omega and gamma contributes nothing from it. The relaxation data are
+    returned as measured; which state they start from is the source's (Jarmola et al.: m_s = 0).
+    """
+    out = [s for s in series if s.kind == "relaxation"]
+    by_source: dict[str, dict[str, ExperimentalSeries]] = {}
+    for s in series:
+        if s.kind != "relaxation":
+            by_source.setdefault(s.source, {})[s.kind] = s
+    for rates in by_source.values():
+        if "omega" in rates and "gamma" in rates:
+            out.append(t1_from_rates(rates["omega"], rates["gamma"], init_state))
+    return out
 
 
 def load_experimental_data(folder: str | Path = "experimental_data") -> dict[str, list[ExperimentalSeries]]:

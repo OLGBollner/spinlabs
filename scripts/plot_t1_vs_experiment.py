@@ -5,9 +5,10 @@ Edit the settings block and run from the repo root:
     python scripts/plot_t1_vs_experiment.py
 
 Each case is one raw ZFS package (data/NV_<cell>/pert_<step>/<method>/<date>/) and how its rates are
-computed. The experiment (experimental_data/*.csv, read by spinlabs.experimental) gives 1/T1 of an
-m_s = 0 polarization (Jarmola et al. 2012); its decay rate is Gamma(+-1 -> 0) + 2 Gamma(0 -> +-1)
-(about 3 Omega) whatever gamma is, so compare it with INIT_STATE = "ms_0".
+computed. The experiment (experimental_data/*.csv, read by spinlabs.experimental) gives T1 or 1/T1
+directly (Jarmola et al. 2012, an m_s = 0 polarization: decay rate Gamma(+-1 -> 0) + 2 Gamma(0 -> +-1),
+about 3 Omega, whatever gamma is; so compare it with INIT_STATE = "ms_0"), or Omega and gamma
+(Lin et al. 2021), from which T1 of INIT_STATE is solved as for the computed rates.
 The computed numbers go to <OUTPUT>.json next to the figure.
 """
 
@@ -24,7 +25,7 @@ import numpy as np  # noqa: E402
 from plot_t1_comparison import coupling_manager  # noqa: E402
 
 from spinlabs.constants import CONSTANTS  # noqa: E402
-from spinlabs.experimental import load_experimental_data  # noqa: E402
+from spinlabs.experimental import load_experimental_data, relaxation_series  # noqa: E402
 from spinlabs.pipeline import solve_t1  # noqa: E402
 from spinlabs.transition_rate import TransitionRate  # noqa: E402
 
@@ -32,7 +33,7 @@ from spinlabs.transition_rate import TransitionRate  # noqa: E402
 DATA = Path("data")  # raw ZFS packages, as data/NV_<cell>/pert_<step>/<method>/<date>/
 EXPERIMENT_DIR = Path("experimental_data")
 EXPERIMENT_SOURCES = None  # e.g. ["Jarmola_2012"]; None: every CSV in EXPERIMENT_DIR
-EXPERIMENT_SERIES = None  # e.g. ["S3", "S8"]; None: every series of those sources
+EXPERIMENT_SERIES = None  # e.g. ["S3", "S8", "T1 ms_0 from omega and gamma"]; None: every series of those sources
 
 # One curve per case:
 #   cell, step, method   the package: NV_<cell>, step <step>, "all_bands" or "defect_band_approx"
@@ -139,7 +140,8 @@ def main():
     for source, series_list in experiments.items():
         if EXPERIMENT_SOURCES is not None and source not in EXPERIMENT_SOURCES:
             continue
-        for s in series_list:
+        # T1 / 1/T1 as measured, and T1 of INIT_STATE solved from a source's Omega and gamma
+        for s in relaxation_series(series_list, INIT_STATE):
             if EXPERIMENT_SERIES is not None and s.label not in EXPERIMENT_SERIES:
                 continue
             # T1 in s or 1/T1 in Hz, whichever the source reports (a time or a rate): to_units inverts as needed

@@ -3,7 +3,24 @@
 import numpy as np
 import pytest
 
-from spinlabs.experimental import ExperimentalSeries, load_experimental_data, read_experimental_csv
+from spinlabs.experimental import (
+    ExperimentalSeries,
+    load_experimental_data,
+    read_experimental_csv,
+    relaxation_series,
+    t1_from_rates,
+)
+
+# The layout of experimental_data/Lin_2021.csv: Omega and gamma in kHz on different temperature grids.
+LIN_LIKE = """K,kHz
+omega,,gamma,
+X,Y,X,Y
+300,0.1,300,0.2
+350,0.15,400,0.3
+400,0.2,500,0.5
+450,0.3,,
+500,0.4,,
+"""
 
 # The layout of experimental_data/Jarmola_2012.csv: shared units, three ragged, unsorted series.
 JARMOLA_LIKE = """K,Hz
@@ -96,3 +113,45 @@ def test_load_folder_keyed_by_source(tmp_path):
     assert [s.label for s in data["Jarmola_2012"]] == ["S8", "S3", "S2"]
     with pytest.raises(FileNotFoundError):
         load_experimental_data(tmp_path / "missing")
+
+
+def test_omega_and_gamma_labels_mark_single_transition_rates(tmp_path):
+    omega, gamma = read_experimental_csv(_write(tmp_path, LIN_LIKE, "Lin_2021.csv"))
+    assert (omega.kind, gamma.kind) == ("omega", "gamma")
+    greek = read_experimental_csv(_write(tmp_path, "K,Hz\nΩ,,γ,\nX,Y,X,Y\n1,2,1,3\n", "Greek_2000.csv"))
+    assert [s.kind for s in greek] == ["omega", "gamma"]
+    assert all(s.kind == "relaxation" for s in read_experimental_csv(_write(tmp_path, JARMOLA_LIKE)))
+
+
+def test_t1_of_ms0_from_omega_and_gamma_is_one_over_three_omega(tmp_path):
+    """An m_s = 0 polarization decays at Gamma(+-1 -> 0) + 2 Gamma(0 -> +-1) = 3 Omega, whatever gamma is."""
+    omega, gamma = read_experimental_csv(_write(tmp_path, LIN_LIKE, "Lin_2021.csv"))
+    t1 = t1_from_rates(omega, gamma, "ms_0")
+    assert (t1.kind, t1.x_unit, t1.y_unit, t1.source) == ("relaxation", "K", "s", "Lin_2021")
+    np.testing.assert_allclose(t1.x, [300, 350, 400, 450, 500])  # union of both grids within the overlap
+    np.testing.assert_allclose(t1.y, 1 / (3 * np.array([100, 150, 200, 300, 400.0])), rtol=1e-6)
+    ms1 = t1_from_rates(omega, gamma, "ms_1")
+    faster = ExperimentalSeries("gamma", gamma.x, gamma.y * 10, "K", "kHz", "Lin_2021", "gamma")
+    assert np.all(t1_from_rates(omega, faster, "ms_1").y < ms1.y)  # an m_s = +1 polarization does feel gamma
+
+
+def test_rates_between_measured_points_are_interpolated_in_log(tmp_path):
+    """gamma at 350 K, between 200 Hz (300 K) and 300 Hz (400 K): the geometric mean, sqrt(200 * 300) Hz."""
+    from spinlabs.experimental import _log_interp
+
+    assert _log_interp(np.array([350.0]), np.array([300.0, 400.0]), np.array([200.0, 300.0]))[0] == pytest.approx(
+        np.sqrt(200 * 300)
+    )
+
+
+def test_relaxation_series_keeps_measured_t1_and_adds_t1_from_rates(tmp_path):
+    lin = read_experimental_csv(_write(tmp_path, LIN_LIKE, "Lin_2021.csv"))
+    jarmola = read_experimental_csv(_write(tmp_path, JARMOLA_LIKE))
+    out = relaxation_series(jarmola + lin, "ms_0")
+    assert [s.label for s in out] == ["S8", "S3", "S2", "T1 ms_0 from omega and gamma"]
+    assert relaxation_series([lin[0]]) == []  # Omega alone gives no T1
+    with pytest.raises(ValueError, match="share no temperature range"):
+        late = ExperimentalSeries("gamma", np.array([600.0, 700.0]), np.array([1.0, 2.0]), "K", "kHz", "X", "gamma")
+        t1_from_rates(lin[0], late)
+    with pytest.raises(ValueError, match="init_state"):
+        t1_from_rates(lin[0], lin[1], "ms_2")
