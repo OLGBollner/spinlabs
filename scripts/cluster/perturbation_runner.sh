@@ -186,6 +186,22 @@ trap 'release_lock; exit 143' TERM
 trap 'release_lock; exit 130' INT
 # ---- end lock ----
 
+# ---- job state ----
+# A job past its time limit stops accepting steps -- srun fails at once with "Unable to create step
+# ... Job/step already completing or completed" -- but its batch shell is not always signalled: on
+# Dardel (job 27178920, 2026-11-03) a task past its 45 min limit got no TERM, ran on for 4 min and
+# stamped 58 runs it never started as attempted. So before each run, and when srun fails, the task
+# asks Slurm whether the job still runs, and stops if not. No answer (no squeue, not in a SLURM job)
+# counts as running, as before.
+STOP=no
+JOB_STATE=""
+job_ending() {
+  [ -n "${SLURM_JOB_ID:-}" ] || return 1
+  JOB_STATE=$(squeue -h -j "$SLURM_JOB_ID" -o %T 2>/dev/null | head -n 1)
+  [ -n "$JOB_STATE" ] && [ "$JOB_STATE" != "RUNNING" ]
+}
+# ---- end job state ----
+
 # The submission this task belongs to: a run directory's .attempted names the last one that
 # started it. A failed run is retried by the next submission, not by the other tasks of this one.
 ARRAY_TAG=${SLURM_ARRAY_JOB_ID:-${SLURM_JOB_ID:-local-$$}}
@@ -220,6 +236,10 @@ run_one() {
     echo "$ID: skipping $label -- already attempted by another task of this array"
     return 0
   fi
+  if job_ending; then  # past the time limit (or cancelled): no step would start
+    STOP=yes
+    return 0
+  fi
   acquire_lock "$TARGET_DIR" || return 0
   # Another job may have finished this directory before the lock was ours.
   if is_done "$TARGET_DIR"; then
@@ -232,6 +252,7 @@ run_one() {
     release_lock
     return 0
   fi
+  PREV_ATTEMPT=$(cat "$TARGET_DIR/.attempted" 2>/dev/null || true)
   printf '%s\n' "$ARRAY_TAG" > "$TARGET_DIR/.attempted"
   rm -f "$TARGET_DIR"/CHECK "$TARGET_DIR"/.done  # from an earlier attempt
   cp "$INPUT_DIR"/* "$TARGET_DIR"/
@@ -264,12 +285,22 @@ run_one() {
     echo "$ID: Done! $label"
   else
     status=$?
+    if job_ending; then
+      # srun was refused (or cut off) because the job is ending, not because VASP failed: the run
+      # keeps the .attempted it had before, so it is not counted as a failure of this submission.
+      if [ -n "$PREV_ATTEMPT" ]; then printf '%s\n' "$PREV_ATTEMPT" > .attempted; else rm -f .attempted; fi
+      echo "$ID: $label not run -- the job is $JOB_STATE"
+      cd "$HEAD_DIR"
+      release_lock
+      STOP=yes
+      return 0
+    fi
     echo "$ID: VASP exited with $status for $label"
     VASP_FAILED=$((VASP_FAILED + 1))
   fi
   # The one read of this OUTCAR's ZFS block: only a complete run gets .done and loses its
   # restart files. VASP can exit 0 without writing a ZFS block; such a directory gets no .done,
-  # so it is retried and needs CHGCAR/CHG to resume. (A cancelled job never reaches this line.)
+  # so it is retried and needs CHGCAR/CHG to resume. (A job that ends meanwhile returns above.)
   if [ -f OUTCAR ] && grep -qzP "$ZFS_REGEX_PATTERN" OUTCAR; then
     : > .done
     echo "$ID: removing excess VASP results (WAVECAR, CHGCAR, CHG)"
@@ -295,6 +326,7 @@ VASP_FAILED=0
 # still have theirs left. A run another task of this array has already attempted (.attempted)
 # is skipped in both passes, so one that failed is not retried by every task.
 visit() {
+  [ "$STOP" = yes ] && return 0  # the job is ending: start nothing more
   mine=no
   [ $((ITEM % NJOBS)) -eq "$ID" ] && mine=yes
   ITEM=$((ITEM + 1))
@@ -334,10 +366,13 @@ walk() {
 
 PASS=own
 walk
-if [ "$NJOBS" -gt 1 ]; then
+if [ "$NJOBS" -gt 1 ] && [ "$STOP" != yes ]; then
   echo "$ID: own share done -- taking free runs of the other tasks"
   PASS=rest
   walk
+fi
+if [ "$STOP" = yes ]; then
+  echo "$ID: job ${SLURM_JOB_ID:-} is $JOB_STATE (past its time limit or cancelled) -- stopped; the next submission picks up the runs left"
 fi
 
 if [ "$VASP_FAILED" -gt 0 ]; then
