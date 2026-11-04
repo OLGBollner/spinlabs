@@ -1022,20 +1022,40 @@ def _decode_order_dict(value: Any, data: Any) -> dict:
     return out
 
 
-# Factor 3/2 scaling applied to defect_band_approx (ZFS_occup) tensors: the
-# defect-band approximation overestimates the ZFS splitting. The parser applies
-# this factor at intake and stores spin_correction_applied=True; legacy npz
-# files (unscaled, flag=False) are scaled by RawZFSData.load once on load.
-SPIN_CORRECTION_SCALE = 1.5
+# Scaling applied to defect_band_approx (ZFS_occup) tensors to correct the
+# defect-band approximation. The factor depends on the defect's spin S, which the
+# parser reads from NUPDOWN (S = NUPDOWN / 2) in the runs' input/INCAR. The parser
+# applies it at intake and stores spin_correction_applied=True; legacy npz files
+# (unscaled, flag=False) are scaled by RawZFSData.load once on load.
+SPIN_CORRECTION_SCALES = {1.0: 3 / 2, 1.5: 2 / 3}
+# Factor for data without a recorded spin: everything packaged before the spin was
+# read from NUPDOWN is S = 1 (NV, ClV, the divacancy).
+SPIN_CORRECTION_SCALE = SPIN_CORRECTION_SCALES[1.0]
 
 
-def apply_spin_correction(tensor: ZFSTensor) -> ZFSTensor:
-    """A defect-band-approx ZFS tensor scaled by :data:`SPIN_CORRECTION_SCALE` (3/2)."""
-    return ZFSTensor(matrix=tensor.matrix * SPIN_CORRECTION_SCALE, unit=tensor.unit)
+def spin_correction_scale(spin: Optional[float]) -> float:
+    """Defect-band-approx correction factor for spin S (3/2 for S = 1, 2/3 for S = 3/2).
+
+    ``None`` (no spin recorded) gives the S = 1 factor; any other spin raises.
+    """
+    if spin is None:
+        return SPIN_CORRECTION_SCALE
+    for known, scale in SPIN_CORRECTION_SCALES.items():
+        if np.isclose(float(spin), known):
+            return scale
+    raise ValueError(
+        f"no defect-band spin correction known for S = {float(spin):g} "
+        f"(known: {', '.join(f'S = {k:g}' for k in SPIN_CORRECTION_SCALES)})"
+    )
 
 
-def _scale_correction_fields(fields: dict) -> dict:
-    """Returns a copy of RawZFSData constructor kwargs with approx tensors scaled by 3/2.
+def apply_spin_correction(tensor: ZFSTensor, scale: float = SPIN_CORRECTION_SCALE) -> ZFSTensor:
+    """A defect-band-approx ZFS tensor scaled by ``scale`` (see :func:`spin_correction_scale`)."""
+    return ZFSTensor(matrix=tensor.matrix * scale, unit=tensor.unit)
+
+
+def _scale_correction_fields(fields: dict, scale: float = SPIN_CORRECTION_SCALE) -> dict:
+    """Returns a copy of RawZFSData constructor kwargs with approx tensors scaled by ``scale``.
 
     Shared by RawZFSData.load (per-file, before merging) and _apply_spin_correction,
     so both paths scale identically. NOTE: PerturbationEntry objects inside the
@@ -1044,16 +1064,16 @@ def _scale_correction_fields(fields: dict) -> dict:
     out = dict(fields)
     gs = out.get("ground_state_zfs")
     if gs is not None:
-        out["ground_state_zfs"] = apply_spin_correction(gs)
+        out["ground_state_zfs"] = apply_spin_correction(gs, scale)
     for name in ("first_order", "second_order", "first_order_minus"):
         if name not in out:
             continue
         entries = dict(out.get(name) or {})
         for key, entry in entries.items():
             if isinstance(entry, PerturbationEntry):
-                entry.zfs_tensor = apply_spin_correction(entry.zfs_tensor)
+                entry.zfs_tensor = apply_spin_correction(entry.zfs_tensor, scale)
             elif isinstance(entry, dict) and entry.get("tensor") is not None:
-                entry["tensor"] = np.asarray(entry["tensor"], dtype=float) * SPIN_CORRECTION_SCALE
+                entry["tensor"] = np.asarray(entry["tensor"], dtype=float) * scale
         out[name] = entries
     return out
 
@@ -1080,6 +1100,14 @@ def _merge_vasp_settings(a: Optional[dict], b: Optional[dict]) -> Optional[dict]
     }
 
 
+def _merged_spin(spins: list, paths: list) -> Optional[float]:
+    """The one spin of files loaded together (None if none records it); raises if they differ."""
+    known = {float(s) for s in spins if s is not None}
+    if len(known) > 1:
+        raise ValueError(f"Cannot load files with different spins together ({sorted(known)}): {[str(p) for p in paths]}")
+    return known.pop() if known else None
+
+
 @dataclass
 class RawZFSData:
     """Container for raw unperturbed and perturbed ZFS simulation data."""
@@ -1089,6 +1117,9 @@ class RawZFSData:
     pert_scale: float
     calc_method: Optional[str] = None
     spin_correction_applied: bool = False
+    # Defect spin S from NUPDOWN (S = NUPDOWN / 2); sets the defect-band correction
+    # factor (spin_correction_scale). None for data packaged before it was recorded.
+    spin: Optional[float] = None
     # False for runs displaced by Q * e instead of Q * e / sqrt(m) (before mass
     # weighting was added); the couplings then rescale q, see PhononSpectrum.get_phonon_pert.
     mass_weighted: bool = True
@@ -1230,10 +1261,14 @@ class RawZFSData:
         if self.spin_correction_applied != other.spin_correction_applied:
             raise ValueError(
                 "Cannot combine datasets with inconsistent spin-correction flags: "
-                "one part is corrected (x3/2) and the other is not. Scaling the "
+                "one part is spin-corrected and the other is not. Scaling the "
                 "merged tensors would silently mix corrected and uncorrected values. "
                 "Correct the raw dataset first (RawZFSData.load with apply_corrections=True)."
             )
+
+        if self.spin is not None and other.spin is not None and not np.isclose(self.spin, other.spin):
+            raise ValueError(f"Cannot combine RawZFSData: spin mismatch (S = {self.spin:g} != {other.spin:g}).")
+        merged_spin = self.spin if self.spin is not None else other.spin
 
         if self.displacement_convention != other.displacement_convention:
             raise ValueError(
@@ -1261,6 +1296,7 @@ class RawZFSData:
             pert_scale=merged_scale,
             calc_method=merged_method,
             spin_correction_applied=merged_correction,
+            spin=merged_spin,
             mass_weighted=self.mass_weighted,
             displacement=self.displacement,
             order=eff_order,
@@ -1325,6 +1361,7 @@ class RawZFSData:
             pert_scale=self.pert_scale,
             calc_method=self.calc_method,
             spin_correction_applied=self.spin_correction_applied,
+            spin=self.spin,
             mass_weighted=self.mass_weighted,
             displacement=self.displacement,
             order=self.order,
@@ -1394,6 +1431,7 @@ class RawZFSData:
         FieldSpec("pert_scale", "float"),
         FieldSpec("calc_method", "str", optional=True, decode=_decode_calc_method),
         FieldSpec("spin_correction_applied", "bool", optional=True),
+        FieldSpec("spin", "float", optional=True),
         FieldSpec("mass_weighted", "bool", optional=True),
         FieldSpec("displacement", "str", optional=True),
         FieldSpec("order", "int", optional=True),
@@ -1458,8 +1496,9 @@ class RawZFSData:
         """
         Loads RawZFSData from one or more .npz files.
         Maintains backward compatibility with legacy keys (zfs_tensors, zfs_tensors_2d, zfs_relaxed).
-        If apply_corrections is True (default), defect_band_approx tensors are scaled by 3/2
-        exactly once on load; files already carrying the correction are skipped.
+        If apply_corrections is True (default), defect_band_approx tensors are scaled by the
+        factor of their spin (spin_correction_scale) exactly once on load; files already
+        carrying the correction are skipped.
         """
         if isinstance(in_path, (list, tuple)):
             paths = [Path(p) for p in in_path]
@@ -1486,7 +1525,8 @@ class RawZFSData:
                     "first_order": fields.get("first_order"),
                     "second_order": fields.get("second_order"),
                     "first_order_minus": fields.get("first_order_minus"),
-                }
+                },
+                spin_correction_scale(fields.get("spin")),
             )
             fields.update(scaled)
             fields["spin_correction_applied"] = True
@@ -1530,6 +1570,7 @@ class RawZFSData:
             # all(): if some files are uncorrected (only possible with
             # apply_corrections=False), never report the merge as corrected.
             spin_correction_applied=all(f.get("spin_correction_applied") for f in scaled_fields),
+            spin=_merged_spin([f.get("spin") for f in scaled_fields], paths),
             mass_weighted=convention != "unweighted",
             displacement=convention,
             order=order,
@@ -1541,13 +1582,14 @@ class RawZFSData:
         )
         for fields in scaled_fields:
             obj.vasp_settings = _merge_vasp_settings(obj.vasp_settings, fields.get("vasp_settings"))
-        for p, (_, scaled_now) in zip(paths, scaled_pairs):
+        for p, (fields, scaled_now) in zip(paths, scaled_pairs):
             if apply_corrections and scaled_now:
-                LOGGER.info(f"applied spin correction (defect_band_approx, x{SPIN_CORRECTION_SCALE:g}): {p}")
+                scale = spin_correction_scale(fields.get("spin"))
+                LOGGER.info(f"applied spin correction (defect_band_approx, x{scale:.4g}): {p}")
         return obj.to_unit("J")
 
     def _apply_spin_correction(self) -> None:
-        """Scales defect_band_approx tensors by 3/2 exactly once.
+        """Scales defect_band_approx tensors by the factor of ``self.spin`` exactly once.
 
         npz files written before the correction moved into the loader/parser
         store unscaled tensors and carry spin_correction_applied=False; they
@@ -1565,14 +1607,15 @@ class RawZFSData:
                 "first_order": self.first_order,
                 "second_order": self.second_order,
                 "first_order_minus": self.first_order_minus,
-            }
+            },
+            scale := spin_correction_scale(self.spin),
         )
         self.ground_state_zfs = scaled["ground_state_zfs"]
         self.first_order = scaled["first_order"]
         self.second_order = scaled["second_order"]
         self.first_order_minus = scaled["first_order_minus"]
         self.spin_correction_applied = True
-        LOGGER.info(f"applied spin correction (defect_band_approx, x{SPIN_CORRECTION_SCALE:g})")
+        LOGGER.info(f"applied spin correction (defect_band_approx, S = {self.spin}, x{scale:.4g})")
 
 
 @dataclass

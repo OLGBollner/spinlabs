@@ -363,10 +363,10 @@ def collect_outcar_rows(folder: Path) -> list[dict]:
     found recursively. ZFS_hyp/OUTCAR is the contaminated (all-electron bands)
     ground state, ZFS_occup/OUTCAR the corrected one (defect-band approx),
     which gets the same spin-correction scaling as RawZFSData.load applies
-    to packaged approx data.
+    to packaged approx data (its factor from the run's NUPDOWN).
     """
-    from spinlabs.models import SPIN_CORRECTION_SCALE, apply_spin_correction
-    from spinlabs.parsers import parse_outcar_zfs
+    from spinlabs.models import apply_spin_correction, spin_correction_scale
+    from spinlabs.parsers import defect_spin, parse_outcar_zfs
 
     rows: list[dict] = []
     for zfs_dir in sorted(folder.rglob("ZFS_hyp")) + sorted(folder.rglob("ZFS_occup")):
@@ -384,8 +384,13 @@ def collect_outcar_rows(folder: Path) -> list[dict]:
             LOGGER.warning(f"no ZFS block in {outcar}; left out")
             continue
         if corrected:
-            LOGGER.debug(f"applied spin correction (defect_band_approx, x{SPIN_CORRECTION_SCALE:g}): {outcar}")
-            zfs = apply_spin_correction(zfs)
+            # The spin (S = NUPDOWN / 2) of the ZFS_occup run sets the correction factor.
+            spin, _ = defect_spin(zfs_dir)
+            if spin is None:
+                LOGGER.warning(f"no NUPDOWN in {zfs_dir}/INCAR or OUTCAR; spin correction assumes S = 1 (x3/2)")
+            scale = spin_correction_scale(spin)
+            LOGGER.debug(f"applied spin correction (defect_band_approx, S = {spin}, x{scale:.4g}): {outcar}")
+            zfs = apply_spin_correction(zfs, scale)
         rows.append({
             "defect": infer_defect(defect_root),
             "column": "corrected" if corrected else "contaminated",

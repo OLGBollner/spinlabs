@@ -5,7 +5,30 @@ import pytest
 
 import spinlabs.cli as cli
 import spinlabs.registry as registry
-from spinlabs.tables import _fmt_ms, collect_t1_rows, format_t1_table, t1_at
+from spinlabs.tables import _fmt_ms, collect_outcar_rows, collect_t1_rows, format_t1_table, t1_at
+
+ZFS_BLOCK = (
+    " Spin-spin contribution to zero-field splitting tensor (MHz)\n"
+    " -------------------------------------------------------------\n"
+    "      D_xx      D_yy      D_zz      D_xy      D_xz      D_yz\n"
+    " -------------------------------------------------------------\n"
+    "   -100.00   -100.00    200.00      0.00      0.00      0.00\n"
+    " -------------------------------------------------------------\n"
+)
+
+
+def test_outcar_rows_scale_the_corrected_d_by_the_spin_from_nupdown(tmp_path):
+    for name, nupdown in (("V_Si_128", 3), ("NV_64", 2)):
+        for sub in ("ZFS_hyp", "ZFS_occup"):
+            run = tmp_path / name / sub
+            run.mkdir(parents=True)
+            (run / "OUTCAR").write_text(ZFS_BLOCK)
+            (run / "INCAR").write_text(f"NUPDOWN = {nupdown}\n")
+    d = {(r["defect"], r["column"]): r["d_mhz"] for r in collect_outcar_rows(tmp_path)}
+    # D = 3/2 D_zz = 300 MHz before the correction
+    assert d[("V_Si", "contaminated")] == pytest.approx(300.0)
+    assert d[("V_Si", "corrected")] == pytest.approx(300.0 * 2 / 3)
+    assert d[("NV", "corrected")] == pytest.approx(300.0 * 3 / 2)
 
 
 def _add_run(conn, tmp_path, name, *, t1_s, init_state="ms_0", method="all_bands", defect="NV",
