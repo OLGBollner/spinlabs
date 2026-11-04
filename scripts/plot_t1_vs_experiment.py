@@ -46,13 +46,13 @@ EXPERIMENT_SERIES = None  # e.g. ["S3", "S8", "T1 ms_0 from omega and gamma"]; N
 #   displacement         None: the package's own; or "normalized", "mass_weighted", "unweighted"
 #   label                legend text; None: built from the settings
 CASES = [
-    dict(cell=64, step=0.1, method="all_bands", date="20261029", pairs="computed", nogap=True, sigma=3.5,
+    dict(cell=512, step=0.05, method="defect_band_approx", pairs="diagonal-sqrt", nogap=True, sigma=0.5,
          displacement=None, label=None),
-    dict(cell=512, step=0.05, method="all_bands", date="20261030", pairs="diagonal-sqrt", nogap=True, sigma=0.5,
+    dict(cell=512, step=0.05, method="all_bands", pairs="diagonal-sqrt", nogap=True, sigma=0.5,
          displacement=None, label=None),
 ]
 
-TEMPERATURES = np.arange(10.0, 501.0, 10.0)  # K
+TEMPERATURES = np.arange(0.0, 501.0, 10.0)  # K
 INIT_STATE = "ms_0"  # "ms_0", "ms_1" or "ms_-1"; the experiment is an m_s = 0 polarization
 INCLUDE_DIRECT = False  # one-phonon rate: a smearing-tail artifact without acoustic phonons, off by default
 # How the one-phonon rate is computed when INCLUDE_DIRECT: "debye" (J = C E^3 from the supercell's folded
