@@ -1350,7 +1350,9 @@ class RawZFSData:
 
         signed = [(1, e) for e in self.first_order.items()] + [(-1, e) for e in self.first_order_minus.items()]
         for sign, (idx, entry) in signed:
-            disp = sign * disps[idx] if idx < len(disps) else None
+            disp = disps[idx] if idx < len(disps) else None
+            if disp is not None:  # None for modes with frequency <= 0 (acoustic)
+                disp = sign * disp
             sym = syms[idx] if idx < len(syms) else None
             ipr = iprs[idx] if idx < len(iprs) else None
             if isinstance(entry, PerturbationEntry):

@@ -117,7 +117,7 @@ def t1_curve(case):
             branches = ", ".join(f"{len(b['modes'])} {name} at {b['energy_mev']:.0f} meV" for name, b in fit.branches.items())
             print(f"  Debye fit: C = {fit.C:.3e} 1/meV^2 from {branches}")
         else:
-            calc.direct = DIRECT_MODEL
+            calc.direct = DIRECT_MODEL if INCLUDE_DIRECT else "none"
         omega, j0pm, jpm, j00 = calc.get_spectral_density(res=0.02, sigma=case["sigma"])
         lines = calc.get_line_spectral_density(case["sigma"], zero_gap_tol=ZERO_GAP_TOL_MEV if case["nogap"] else None)
         zfs = calc.data["zfs"] / CONSTANTS["meV2J"]
