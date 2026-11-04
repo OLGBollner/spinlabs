@@ -142,9 +142,9 @@ def main():
         for s in series_list:
             if EXPERIMENT_SERIES is not None and s.label not in EXPERIMENT_SERIES:
                 continue
-            rate = s.to_units(x_unit="K", y_unit="Hz")
-            y = rate.y if PLOT == "rate" else 1.0 / rate.y
-            ax.plot(rate.x, y, ls="none", marker=EXP_MARKERS[m % len(EXP_MARKERS)], ms=6, mfc="white", mew=1.4,
+            # T1 in s or 1/T1 in Hz, whichever the source reports (a time or a rate): to_units inverts as needed
+            exp = s.to_units(x_unit="K", y_unit="Hz" if PLOT == "rate" else "s")
+            ax.plot(exp.x, exp.y, ls="none", marker=EXP_MARKERS[m % len(EXP_MARKERS)], ms=6, mfc="white", mew=1.4,
                     color="black", label=f"{source.replace('_', ' ')}, {s.label}")
             m += 1
 

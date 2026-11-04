@@ -19,7 +19,8 @@ from pathlib import Path
 
 import numpy as np
 
-# Scale factors to a base unit per dimension; conversions stay within one dimension.
+# Scale factors to a base unit per dimension (K, s, Hz). Within a dimension a conversion rescales;
+# between time and rate it inverts (a T1 in ms is a 1/T1 in Hz), so data reported either way compare.
 UNITS: dict[str, tuple[str, float]] = {
     "K": ("temperature", 1.0),
     "s": ("time", 1.0),
@@ -50,10 +51,12 @@ class ExperimentalSeries:
         return len(self.x)
 
     def to_units(self, x_unit: str | None = None, y_unit: str | None = None) -> ExperimentalSeries:
-        """The same series in other units of the same dimension (e.g. Hz -> kHz, ms -> s)."""
+        """The same series in other units: rescaled within a dimension (Hz -> kHz, ms -> s), inverted between
+        time and rate (ms -> Hz gives 1/T1 from T1). Re-sorted by x, which an inverted x would reverse."""
         x = self.x if x_unit is None else _convert(self.x, self.x_unit, x_unit)
         y = self.y if y_unit is None else _convert(self.y, self.y_unit, y_unit)
-        return replace(self, x=x, y=y, x_unit=x_unit or self.x_unit, y_unit=y_unit or self.y_unit)
+        order = np.argsort(x, kind="stable")
+        return replace(self, x=x[order], y=y[order], x_unit=x_unit or self.x_unit, y_unit=y_unit or self.y_unit)
 
 
 def _convert(values: np.ndarray, from_unit: str, to_unit: str) -> np.ndarray:
@@ -61,9 +64,13 @@ def _convert(values: np.ndarray, from_unit: str, to_unit: str) -> np.ndarray:
         if unit not in UNITS:
             raise ValueError(f"unknown unit {unit!r}; known: {', '.join(UNITS)}")
     (dim_from, scale_from), (dim_to, scale_to) = UNITS[from_unit], UNITS[to_unit]
-    if dim_from != dim_to:
-        raise ValueError(f"cannot convert {from_unit} ({dim_from}) to {to_unit} ({dim_to})")
-    return np.asarray(values, dtype=float) * (scale_from / scale_to)
+    base = np.asarray(values, dtype=float) * scale_from
+    if dim_from == dim_to:
+        return base / scale_to
+    if {dim_from, dim_to} == {"time", "rate"}:
+        with np.errstate(divide="ignore"):
+            return 1.0 / base / scale_to  # 1/s = Hz: a time and its rate are reciprocal
+    raise ValueError(f"cannot convert {from_unit} ({dim_from}) to {to_unit} ({dim_to})")
 
 
 def read_experimental_csv(path: str | Path) -> list[ExperimentalSeries]:

@@ -49,9 +49,27 @@ def test_unit_conversion_within_a_dimension():
     rate = ExperimentalSeries("S", np.array([300.0]), np.array([2.0]), "K", "kHz", "X_2000")
     assert rate.to_units(y_unit="Hz").y[0] == pytest.approx(2000.0)
     with pytest.raises(ValueError, match="cannot convert"):
-        rate.to_units(y_unit="s")  # a rate is not a time; 1/T1 vs T1 is for the caller
+        rate.to_units(y_unit="K")  # a rate is not a temperature
     with pytest.raises(ValueError, match="unknown unit"):
         rate.to_units(y_unit="furlong")
+
+
+def test_time_and_rate_convert_by_inverting():
+    """T1 = 0.34 ms (Toyli et al. 2012 at 600 K) is 1/T1 = 2941 Hz, and back."""
+    t1 = ExperimentalSeries("Toyli", np.array([600.0]), np.array([0.340]), "K", "ms", "Toyli_2012")
+    rate = t1.to_units(y_unit="Hz")
+    assert rate.y_unit == "Hz" and rate.y[0] == pytest.approx(1 / 0.340e-3)
+    assert rate.to_units(y_unit="kHz").y[0] == pytest.approx(1 / 0.340)
+    assert rate.to_units(y_unit="ms").y[0] == pytest.approx(0.340)
+    s_rate = ExperimentalSeries("S", np.array([10.0, 300.0]), np.array([0.05, 200.0]), "K", "Hz", "X")
+    np.testing.assert_allclose(s_rate.to_units(y_unit="s").y, [20.0, 5e-3])
+
+
+def test_inverting_x_keeps_the_series_sorted_by_x():
+    s = ExperimentalSeries("S", np.array([1.0, 2.0, 4.0]), np.array([1.0, 2.0, 3.0]), "ms", "K", "X")
+    hz = s.to_units(x_unit="Hz")
+    np.testing.assert_allclose(hz.x, [250.0, 500.0, 1000.0])
+    np.testing.assert_allclose(hz.y, [3.0, 2.0, 1.0])  # each y stays with its x
 
 
 @pytest.mark.parametrize(
