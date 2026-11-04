@@ -42,12 +42,20 @@ class Phonons:
 
 
 class TransitionRate:
+    # How the one-phonon (direct) rate gets the spectral function at the spin splitting D:
+    #   "gaussian": the smeared J(D), only the Gaussian tails of modes tens of meV up (no physics at D)
+    #   "debye":    J(D) = C D^3 from the supercell's folded acoustic modes (set_debye_from_spectrum)
+    #   "none":     no direct rate
+    DIRECT_MODELS = ("gaussian", "debye", "none")
+
     def __init__(self, data_file: str | None = None, two_phonon_data_file: Path | None = None):
         self.transition_rate: dict[str, dict[str, float]] = {"first_order": {}, "second_order": {}, "two_phonon": {}}
         self.ms_values = [1, 0, -1]
         self.Fz_elements = {1: 1.0, 0: -2.0, -1: 1.0}
         self.data = None
         self.data_2ph = None
+        self.direct = "gaussian"
+        self.debye_fit = None  # spinlabs.debye.DebyeFit, from set_debye_from_spectrum
         if data_file:
             self.load_data(data_file)
         if two_phonon_data_file is not None:
@@ -112,6 +120,24 @@ class TransitionRate:
         x = energy_mev / (Cn.k / Cn.e * 1000 * T)
         return 0.0 if x > 700 else float(1.0 / np.expm1(x))
 
+    def set_debye_from_spectrum(self, spectrum, min_weight: float | None = None):
+        """Fit the Debye direct-rate model (spinlabs.debye) to this coupling data's acoustic modes and use it.
+
+        ``spectrum`` is the PhononSpectrum the couplings were computed on (same modes, same order): its
+        geometry and eigenvectors identify the folded acoustic modes. Returns the DebyeFit.
+        """
+        from spinlabs.debye import MIN_ACOUSTIC_WEIGHT, debye_coefficient
+
+        if self.data is None:
+            raise ValueError("Data not loaded. Please call load_data() first.")
+        freqs = np.asarray(self.data["freqs"], dtype=float) / CONSTANTS["meV2J"]
+        v0pm = np.asarray(self.data["V_0_pm"], dtype=float) / CONSTANTS["meV2J"]
+        self.debye_fit = debye_coefficient(
+            spectrum, freqs, v0pm, MIN_ACOUSTIC_WEIGHT if min_weight is None else min_weight
+        )
+        self.direct = "debye"
+        return self.debye_fit
+
     def compute_transition_rates(self, T, omega, J_0_pm, J_p_m, J_0_0, omega_zfs):
         if self.data is None:
             raise ValueError("Data not loaded. Please call load_data() first.")
@@ -127,7 +153,16 @@ class TransitionRate:
         # At zero field m_s = +1 and -1 lie at D and m_s = 0 at 0; D < 0 swaps which is upper.
         f1 = 2 * np.pi / (Cn.hbar / CONSTANTS["meV2J"])
         split = abs(float(omega_zfs))
-        J_split = float(np.interp(split, omega, J_0_pm))
+        if self.direct == "gaussian":
+            J_split = float(np.interp(split, omega, J_0_pm))
+        elif self.direct == "debye":
+            if self.debye_fit is None:
+                raise ValueError("direct='debye' needs the acoustic fit: call set_debye_from_spectrum(spectrum)")
+            J_split = self.debye_fit.C * split**3
+        elif self.direct == "none":
+            J_split = 0.0
+        else:
+            raise ValueError(f"direct must be one of {self.DIRECT_MODELS}, got {self.direct!r}")
         n_split = self._bose_at(split, T)
         up, down = f1 * J_split * n_split, f1 * J_split * (n_split + 1)
         zero_is_lower = omega_zfs >= 0

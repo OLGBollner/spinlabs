@@ -55,6 +55,9 @@ CASES = [
 TEMPERATURES = np.arange(10.0, 501.0, 10.0)  # K
 INIT_STATE = "ms_0"  # "ms_0", "ms_1" or "ms_-1"; the experiment is an m_s = 0 polarization
 INCLUDE_DIRECT = False  # one-phonon rate: a smearing-tail artifact without acoustic phonons, off by default
+# How the one-phonon rate is computed when INCLUDE_DIRECT: "debye" (J = C E^3 from the supercell's folded
+# acoustic modes, spinlabs.debye; an order-of-magnitude estimate) or "gaussian" (the smeared tail at D)
+DIRECT_MODEL = "debye"
 INCLUDE_VIRTUAL_RAMAN = True  # first-order coupling at second order; ~1e-7 of the two-phonon rate
 PLOT = "T1"  # "T1" (seconds) or "rate" (1/T1 in Hz, as the experiment is reported)
 LOG_X = False
@@ -109,6 +112,12 @@ def t1_curve(case):
         base = str(Path(tmp) / "coupling")
         manager.process_both_orders(output_filename=base)
         calc = TransitionRate(f"{base}.npz")
+        if INCLUDE_DIRECT and DIRECT_MODEL == "debye":
+            fit = calc.set_debye_from_spectrum(manager.spectrum)
+            branches = ", ".join(f"{len(b['modes'])} {name} at {b['energy_mev']:.0f} meV" for name, b in fit.branches.items())
+            print(f"  Debye fit: C = {fit.C:.3e} 1/meV^2 from {branches}")
+        else:
+            calc.direct = DIRECT_MODEL
         omega, j0pm, jpm, j00 = calc.get_spectral_density(res=0.02, sigma=case["sigma"])
         lines = calc.get_line_spectral_density(case["sigma"], zero_gap_tol=ZERO_GAP_TOL_MEV if case["nogap"] else None)
         zfs = calc.data["zfs"] / CONSTANTS["meV2J"]
@@ -130,7 +139,7 @@ def main():
     logging.disable(logging.WARNING)  # the per-run pipeline warnings would bury the summary
     fig, ax = plt.subplots(figsize=(8.5, 6))
     result = {"temperature_K": TEMPERATURES.tolist(), "init_state": INIT_STATE, "include_direct": INCLUDE_DIRECT,
-              "include_virtual_raman": INCLUDE_VIRTUAL_RAMAN, "cases": []}
+              "direct_model": DIRECT_MODEL, "include_virtual_raman": INCLUDE_VIRTUAL_RAMAN, "cases": []}
 
     for n, case in enumerate(CASES):
         t1, convention = t1_curve(case)
@@ -162,7 +171,7 @@ def main():
         ax.set_xscale("log")
     ax.set_xlabel("Temperature (K)")
     ax.set_ylabel(r"$1/T_1$ (s$^{-1}$)" if PLOT == "rate" else r"$T_1$ (s)")
-    included = "two-phonon" + (" + direct" if INCLUDE_DIRECT else "") + (" + virtual Raman" if INCLUDE_VIRTUAL_RAMAN else "")
+    included = "two-phonon" + (f" + direct ({DIRECT_MODEL})" if INCLUDE_DIRECT else "") + (" + virtual Raman" if INCLUDE_VIRTUAL_RAMAN else "")
     ax.set_title(f"NV in diamond, {STATE_TITLES.get(INIT_STATE, INIT_STATE)} ({included})", fontsize=11)
     ax.grid(True, which="both", ls=":", alpha=0.5)
     ax.legend(fontsize=8, loc="best")

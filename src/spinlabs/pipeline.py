@@ -327,6 +327,8 @@ def compute_rates(
     two_phonon_file: str | Path | None = None,
     has_second_order: bool = False,
     zero_gap_tol: float | None = None,
+    direct: str = "gaussian",
+    spectrum=None,
 ) -> tuple[np.ndarray, dict, dict]:
     """Transition rates of a coupling file at each temperature.
 
@@ -334,12 +336,21 @@ def compute_rates(
     standing in for the continuous phonon bands of a macroscopic crystal. The
     two-phonon rates integrate the 2D spectral function along each transition's
     energy-conservation line (TransitionRate.get_line_spectral_density); ``zero_gap_tol``
-    (meV) leaves out the pairs with (near) zero frequency gap there. Returns the
-    temperatures with a result, the total rates per process and the
-    directional rates.
+    (meV) leaves out the pairs with (near) zero frequency gap there. ``direct`` picks the
+    one-phonon rate (TransitionRate.DIRECT_MODELS); "debye" needs the ``spectrum`` the
+    couplings were computed on. Returns the temperatures with a result, the total rates
+    per process and the directional rates.
     """
     two_ph_p = Path(two_phonon_file) if two_phonon_file else None
     calculator = TransitionRate(str(coupling_path), two_phonon_data_file=two_ph_p)
+    if direct == "debye":
+        if spectrum is None:
+            raise ValueError("direct='debye' needs the phonon spectrum of the couplings (spectrum=...)")
+        calculator.set_debye_from_spectrum(spectrum)
+    elif direct in TransitionRate.DIRECT_MODELS:
+        calculator.direct = direct
+    else:
+        raise ValueError(f"direct must be one of {TransitionRate.DIRECT_MODELS}, got {direct!r}")
     two_phonon = two_ph_p is not None or has_second_order
     # For combined 1d+2d runs the coupling file itself carries the second-order
     # coefficients (V2_*); make sure the calculator sees them as the 2-phonon source.
