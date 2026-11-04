@@ -65,6 +65,14 @@ ZERO_GAP_TOL_MEV = 1e-3  # symmetry-degenerate partners; accidental near-degener
 STATE_TITLES = {"ms_0": "$m_s=0$", "ms_1": "$m_s=+1$", "ms_-1": "$m_s=-1$"}
 DIRECTIONS = ("0_to_1", "0_to_-1", "1_to_0", "-1_to_0", "1_to_-1", "-1_to_1")
 COLORS = ["#2a78d6", "#1baf7a", "#eb6834", "#8e5bd0", "#c9a227", "#555555"]
+# Experimental data: one colour per source (paper), one marker per series within it. The three hues are the
+# palette slots the first three curves do not use, chosen to stay apart from them (red sits by orange, violet
+# by blue) and validated as markers against each other (green, magenta, yellow: worst pair Delta E 19.6
+# normal, 16.2 colour-blind). A source keeps its colour when others are filtered out (its place among all
+# CSVs); sources past the third are drawn in grey, told apart by marker and legend, not by a made-up hue.
+EXP_COLORS = ["#008300", "#e87ba4", "#eda100"]
+EXP_OVERFLOW_COLOR = "#898781"
+EXP_EDGE = "#52514e"  # dark outline: magenta and yellow are below 3:1 against the white background
 EXP_MARKERS = "osD^vP"
 
 
@@ -136,19 +144,18 @@ def main():
         print(f"{label} ({convention}): T1({TEMPERATURES[i300]:g} K) = {t1[i300] * 1e3:.3g} ms")
 
     experiments = load_experimental_data(EXPERIMENT_DIR)
-    m = 0
-    for source, series_list in experiments.items():
+    for k, (source, series_list) in enumerate(experiments.items()):  # sorted by source name
         if EXPERIMENT_SOURCES is not None and source not in EXPERIMENT_SOURCES:
             continue
+        color = EXP_COLORS[k] if k < len(EXP_COLORS) else EXP_OVERFLOW_COLOR
         # T1 / 1/T1 as measured, and T1 of INIT_STATE solved from a source's Omega and gamma
-        for s in relaxation_series(series_list, INIT_STATE):
+        for m, s in enumerate(relaxation_series(series_list, INIT_STATE)):
             if EXPERIMENT_SERIES is not None and s.label not in EXPERIMENT_SERIES:
                 continue
             # T1 in s or 1/T1 in Hz, whichever the source reports (a time or a rate): to_units inverts as needed
             exp = s.to_units(x_unit="K", y_unit="Hz" if PLOT == "rate" else "s")
-            ax.plot(exp.x, exp.y, ls="none", marker=EXP_MARKERS[m % len(EXP_MARKERS)], ms=6, mfc="white", mew=1.4,
-                    color="black", label=f"{source.replace('_', ' ')}, {s.label}")
-            m += 1
+            ax.plot(exp.x, exp.y, ls="none", marker=EXP_MARKERS[m % len(EXP_MARKERS)], ms=7, mfc=color,
+                    mec=EXP_EDGE, mew=0.8, label=f"{source.replace('_', ' ')}, {s.label}", zorder=3)
 
     ax.set_yscale("log")
     if LOG_X:
