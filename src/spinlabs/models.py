@@ -701,7 +701,10 @@ class PhononSpectrum:
 
         The perturbation amplitude for each mode follows the mass-weighted
         phonon coordinate  q = Q * sqrt(2*omega/hbar), with Q the mode's normal
-        coordinate for a step q0 (the scale). Modes with frequency <= 0 get None.
+        coordinate for a step q0 (the scale). Modes with frequency <= 0 get None, and so do the
+        rigid translations (:meth:`translation_modes`) whatever the sign of their numerical
+        frequency: a translation does not change the ZFS, and the 1/sqrt(omega) of a frequency
+        near zero would turn the noise of its runs into a coupling.
 
         ``displacement`` (else ``mass_weighted``) names how the runs were displaced
         (see DISPLACEMENTS): mass_weighted runs have Q = q0; unweighted runs (q0 * e)
@@ -718,9 +721,10 @@ class PhononSpectrum:
             weights = self.effective_sqrt_mass()
         else:
             weights = np.ones(self.n_modes)
+        translation = self.translation_modes()
         displacements = [
-            scale * w * np.sqrt(2.0 * omega / Cn.hbar) if freq > 0 else None
-            for freq, omega, w in zip(self.frequencies_mev, omega_rads, weights)
+            scale * w * np.sqrt(2.0 * omega / Cn.hbar) if freq > 0 and not rigid else None
+            for freq, omega, w, rigid in zip(self.frequencies_mev, omega_rads, weights, translation)
         ]
         freqs_j = self.frequencies_to_unit("J")
         iprs = self.get_ipr()
@@ -733,6 +737,23 @@ class PhononSpectrum:
             "ipr": iprs,
             "eigs": self.eigenvectors,
         }
+
+    def translation_modes(self, min_weight: float = 0.5, max_mev: float = 1.0) -> np.ndarray:
+        """Per mode, whether it is a rigid translation of the whole cell (the three acoustic modes at Gamma).
+
+        A translation along a direction is the mass-weighted uniform displacement sqrt(m_j) along it; a mode
+        counts as one when more than ``min_weight`` of its (normalized, mass-weighted) eigenvector lies in
+        the span of the three and its |frequency| is below ``max_mev`` (numerical noise about zero; the
+        lowest real modes of the supercells lie above 10 meV). Without eigenvectors or masses no mode is flagged.
+        """
+        if self.eigenvectors is None or self.atomic_masses is None or len(self.eigenvectors) == 0:
+            return np.zeros(self.n_modes, dtype=bool)
+        eigs = np.asarray(self.eigenvectors).reshape(len(self.eigenvectors), -1, 3)
+        eigs = eigs / np.linalg.norm(eigs.reshape(len(eigs), -1), axis=1)[:, None, None]
+        sqrt_m = np.sqrt(np.asarray(self.atomic_masses, dtype=float))
+        unit = sqrt_m / np.linalg.norm(sqrt_m)  # one translation per Cartesian direction, normalized
+        weight = np.sum(np.abs(np.einsum("kja,j->ka", eigs, unit)) ** 2, axis=1)
+        return (weight > min_weight) & (np.abs(np.asarray(self.frequencies_mev, dtype=float)) < max_mev)
 
     def effective_sqrt_mass(self) -> np.ndarray:
         """Per-mode sum_j sqrt(m_j) |e_kj|^2 / sum_j |e_kj|^2, in sqrt(amu).
