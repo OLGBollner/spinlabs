@@ -9,8 +9,8 @@ unless the path exists as given) and which second-order pairs to use:
   diagonal-sqrt   only the diagonal pairs, the rest filled with sqrt(V_ii V_jj)
 
 A MODE ending in +nogap (e.g. computed+nogap) leaves the zero-gap pairs out of the two-phonon
-rates: the diagonal (i, i) and the partners of degenerate E doublets (|w_i - w_j| < ZERO_GAP_TOL_MEV),
-whose ~1/sigma contribution a phonon continuum does not have.
+rates: the diagonal (i, i) and the partners of symmetry-degenerate E doublets (the spectrum's degenerate
+groups), whose ~1/sigma contribution a phonon continuum does not have; accidental near-degeneracies are kept.
 
 DISPLACEMENT (normalized, mass_weighted, unweighted) overrides the package's displacement convention.
 Inconsistent second-order entries are excluded. Without --case, the NV_64 / NV_512 comparison of
@@ -37,7 +37,6 @@ from spinlabs.zfs_manager import ZFSManager  # noqa: E402
 
 MODES = ("computed", "sqrt", "diagonal", "diagonal-sqrt")
 NOGAP = "+nogap"
-ZERO_GAP_TOL_MEV = 1e-3  # symmetry-degenerate partners; accidental near-degeneracies start near 0.01 meV
 STATES = (("ms_0", "$m_s=0$"), ("ms_1", "$m_s=\\pm1$"))
 DEFAULT_SIGMAS = [0.1, 0.15, 0.2, 0.3, 0.5, 1.0, 2.0, 3.5, 5.0, 6.0, 7.0, 7.5, 8.0, 8.5, 9.0, 9.5, 10.0, 11.0, 12.0]
 NV64 = "NV_64/pert_0.1/all_bands/20261029/NV_64_raw_zfs_data_all_bands_12d.npz"  # repackaged as unweighted
@@ -53,6 +52,30 @@ DEFAULT_CASES = [
     ("NV 64 step 0.1, diagonal only", NV64, "diagonal"),
 ]
 DEFAULT_CASES_TEMPERATURE = DEFAULT_CASES[:4] + DEFAULT_CASES[6:]  # without the NV_512 diagonal-only curves
+# --by-system: the paper figure, one panel per system at its production package and sigma
+NV512_PRODUCTION = "NV_512/pert_0.05/all_bands/20261030/NV_512_raw_zfs_data_all_bands_12d.npz"
+VV128_PRODUCTION = "DiV_128/pert_0.05/all_bands/20261105/DiV_128_raw_zfs_data_all_bands_12d.npz"
+SYSTEM_MODES = {  # mode -> legend label, in drawing order
+    "diagonal": "diagonal only",
+    "diagonal-sqrt": "diagonal + geometric mean",
+    "diagonal-sqrt+nogap": "geometric mean, zero-gap pairs excluded",
+    "computed+nogap": "all pairs computed, zero-gap pairs excluded",
+    "diagonal-sqrt+nogap|gaussian": "geometric mean, zero-gap pairs excluded, Gaussian direct rate",
+}
+GAUSSIAN_DIRECT = "|gaussian"  # a --by-system mode ending in this uses the smeared J at D for the direct rate
+SYSTEM_STYLES = {
+    "diagonal": dict(color="#555555", ls=":"),
+    "diagonal-sqrt": dict(color="#eb6834", ls="--"),
+    "diagonal-sqrt+nogap": dict(color="#2a78d6", ls="-."),
+    "computed+nogap": dict(color="#1baf7a", ls="-"),
+    "diagonal-sqrt+nogap|gaussian": dict(color="#8e5bd0", ls="-", lw=2.4, zorder=1),  # under the Debye curve
+}
+DEFAULT_SYSTEMS = [  # (file, production sigma in meV, modes); all pairs are computed only for NV 64
+    (NV64, 3.5, list(SYSTEM_MODES)),
+    (NV512_PRODUCTION, 0.5, ["diagonal", "diagonal-sqrt", "diagonal-sqrt+nogap", "diagonal-sqrt+nogap|gaussian"]),
+    (VV128_PRODUCTION, 3.5, ["diagonal", "diagonal-sqrt", "diagonal-sqrt+nogap", "diagonal-sqrt+nogap|gaussian"]),
+]
+DEFECT_NAMES = {"NV": "NV$^{-}$", "DiV": "VV$^0$", "ClV": "ClV$^{+}$"}  # as in the text
 COLORS = ["#2a78d6", "#eb6834", "#1baf7a", "#8e5bd0", "#c9a227", "#555555"]  # one per raw file
 MARKERS = "osD^vP"
 MODE_STYLES = {
@@ -81,7 +104,7 @@ def coupling_manager(raw_file, mode, displacement=None):
     return manager, f"{raw.defect}_{raw.cell_size} step {raw.pert_scale:g}: {manager.displacement}"
 
 
-def t1_grid(manager, sigmas, temps, zero_gap_tol=None):
+def t1_grid(manager, sigmas, temps, nogap=False, direct="gaussian"):
     """T1 (s) per initial state and the 0<->1 one- and two-phonon rates (1/s), as [sigma][temperature]."""
     t1 = {state: [] for state, _ in STATES}
     rates_0_1 = {"first_order": [], "two_phonon": []}
@@ -90,7 +113,9 @@ def t1_grid(manager, sigmas, temps, zero_gap_tol=None):
         manager.process_both_orders(output_filename=base)
         for n, sigma in enumerate(sigmas):
             valid, rates, directional = compute_rates(
-                Path(f"{base}.npz"), temps, sigma=sigma, has_second_order=True, zero_gap_tol=zero_gap_tol
+                Path(f"{base}.npz"), temps, sigma=sigma, has_second_order=True,
+                degenerate_groups=(manager.spectrum.deg_groups or []) if nogap else None,
+                direct=direct, spectrum=manager.spectrum,
             )
             if len(valid) != len(temps):
                 raise SystemExit(f"rates missing at some temperatures for sigma {sigma:g}: got {list(valid)}")
@@ -103,13 +128,18 @@ def t1_grid(manager, sigmas, temps, zero_gap_tol=None):
     return t1, rates_0_1
 
 
-def compute(kind, cases, sigmas, temps):
-    """Run every case; the result dict that plot() draws and the JSON stores."""
-    result = {"kind": kind, "sigma_mev": sigmas, "temperature_K": temps, "cases": []}
+def compute(kind, cases, sigmas, temps, direct="gaussian"):
+    """Run every case; the result dict that plot() draws and the JSON stores.
+
+    ``direct`` is the one-phonon model (TransitionRate.DIRECT_MODELS): "gaussian" reads the smeared J at D,
+    which grows with sigma as the tails of the optical modes reach down; "debye" is the production model.
+    """
+    result = {"kind": kind, "sigma_mev": sigmas, "temperature_K": temps, "direct": direct, "cases": []}
     for label, raw_file, mode, displacement in cases:
-        nogap = mode.endswith(NOGAP)
-        manager, convention = coupling_manager(raw_file, mode.removesuffix(NOGAP), displacement)
-        t1, rates_0_1 = t1_grid(manager, sigmas, temps, zero_gap_tol=ZERO_GAP_TOL_MEV if nogap else None)
+        pairs, _, case_direct = mode.partition("|")  # "<pairs>|gaussian" overrides the direct model for one case
+        nogap = pairs.endswith(NOGAP)
+        manager, convention = coupling_manager(raw_file, pairs.removesuffix(NOGAP), displacement)
+        t1, rates_0_1 = t1_grid(manager, sigmas, temps, nogap=nogap, direct=case_direct or direct)
         result["cases"].append(
             {
                 "label": label,
@@ -170,6 +200,37 @@ def plot(result, out, mark):
     print(f"saved figure: {out}")
 
 
+def plot_by_system(result, out, marks, font=9):
+    """One panel per system (raw file), T1 of m_s = 0 against sigma; a dotted line at each system's mark."""
+    files = list(dict.fromkeys(case["file"] for case in result["cases"]))
+    with plt.rc_context({"font.size": font, "axes.labelsize": font, "axes.titlesize": font,
+                         "xtick.labelsize": font - 1, "ytick.labelsize": font - 1, "legend.fontsize": font - 1}):
+        fig, axes = plt.subplots(1, len(files), figsize=(7.0, 2.7), sharey=True, squeeze=False)
+        handles = {}
+        for n, (ax, path) in enumerate(zip(axes[0], files)):
+            for case in (c for c in result["cases"] if c["file"] == path):
+                t1 = np.asarray(case["t1_s"]["ms_0"], dtype=float)[:, 0]
+                (line,) = ax.plot(result["sigma_mev"], t1, label=SYSTEM_MODES[case["mode"]],
+                                  **{"lw": 1.5, **SYSTEM_STYLES[case["mode"]]})
+                handles.setdefault(case["mode"], line)
+            ax.axvline(marks[n], color="#888888", lw=0.8, ls=":")
+            defect, cell = Path(path).name.split("_")[:2]
+            ax.text(0.04, 0.95, f"({chr(ord('a') + n)}) {DEFECT_NAMES.get(defect, defect)} ({cell})",
+                    transform=ax.transAxes, va="top")
+            ax.set_xscale("log")
+            ax.set_yscale("log")
+            ax.set_xlabel(r"$\sigma$ (meV)")
+            ax.grid(True, which="major", ls=":", alpha=0.6, lw=0.5)
+        axes[0, 0].set_ylabel(rf"$T_1$ (s), $m_s = 0$, {result['temperature_K'][0]:g} K")
+        order = [m for m in SYSTEM_MODES if m in handles]
+        fig.legend([handles[m] for m in order], [SYSTEM_MODES[m] for m in order], loc="upper center", ncol=2,
+                   frameon=False, bbox_to_anchor=(0.5, 1.0), handlelength=2.4, columnspacing=1.2)
+        fig.tight_layout(pad=0.3, rect=(0, 0, 1, 0.80))
+        fig.savefig(out, dpi=300, bbox_inches="tight")
+        plt.close(fig)
+    print(f"saved figure: {out}")
+
+
 def parse_cases(raw_cases, defaults, data):
     """(label, path, mode, displacement) per --case; the defaults when none is given."""
     cases = []
@@ -200,6 +261,11 @@ if __name__ == "__main__":
             p.add_argument("--sigmas", nargs="+", type=float, default=DEFAULT_SIGMAS, help="Broadenings in meV")
             p.add_argument("--temperature", type=float, default=300.0, help="Temperature in K (default: 300)")
             p.add_argument("--mark", type=float, default=7.5, help="Sigma to mark with a dotted line (default: 7.5)")
+            p.add_argument("--by-system", action="store_true",
+                           help="Paper figure: one panel per system (NV 64, NV 512, VV0 128 at their production "
+                                "packages), m_s = 0 only, Debye direct rate plus one curve with the Gaussian one, marked at each "
+                                "production sigma; "
+                                "ignores --case")
         else:
             p.add_argument("--sigma", type=float, default=7.5, help="Broadening in meV (default: 7.5)")
             p.add_argument("--t-range", nargs=3, type=float, default=[10.0, 500.0, 10.0],
@@ -212,13 +278,24 @@ if __name__ == "__main__":
     if args.replot:
         result = json.loads(out.with_suffix(".json").read_text())
     else:
-        if args.kind == "sigma":
+        if args.kind == "sigma" and args.by_system:
+            sigmas, temps = args.sigmas, [args.temperature]
+            cases = [(SYSTEM_MODES[m], Path(args.data) / f, m, None) for f, _, modes in DEFAULT_SYSTEMS for m in modes]
+        elif args.kind == "sigma":
             sigmas, temps, defaults = args.sigmas, [args.temperature], DEFAULT_CASES
         else:
             start, end, step = args.t_range
             sigmas, temps = [args.sigma], np.arange(start, end + step / 2, step).tolist()
             defaults = DEFAULT_CASES_TEMPERATURE
-        result = compute(args.kind, parse_cases(args.case, defaults, args.data), sigmas, temps)
+        if not (args.kind == "sigma" and args.by_system):
+            cases = parse_cases(args.case, defaults, args.data)
+        # the paper figure uses the production direct rate (Debye), so only the two-phonon rate depends on sigma;
+        # its "|gaussian" curve repeats the production method with the smeared-tail direct rate to show why
+        direct = "debye" if args.kind == "sigma" and args.by_system else "gaussian"
+        result = compute(args.kind, cases, sigmas, temps, direct=direct)
         out.parent.mkdir(parents=True, exist_ok=True)
         out.with_suffix(".json").write_text(json.dumps(result, indent=1))
-    plot(result, out, args.mark)
+    if args.kind == "sigma" and args.by_system:
+        plot_by_system(result, out, [sigma for _, sigma, _ in DEFAULT_SYSTEMS])
+    else:
+        plot(result, out, args.mark)
