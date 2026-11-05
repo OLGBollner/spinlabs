@@ -326,7 +326,7 @@ def compute_rates(
     sigma: float = DEFAULT_SIGMA_MEV,
     two_phonon_file: str | Path | None = None,
     has_second_order: bool = False,
-    zero_gap_tol: float | None = None,
+    degenerate_groups=None,
     direct: str = "gaussian",
     spectrum=None,
 ) -> tuple[np.ndarray, dict, dict]:
@@ -335,8 +335,9 @@ def compute_rates(
     ``sigma`` (meV) broadens each mode in the 1D and 2D spectral functions,
     standing in for the continuous phonon bands of a macroscopic crystal. The
     two-phonon rates integrate the 2D spectral function along each transition's
-    energy-conservation line (TransitionRate.get_line_spectral_density); ``zero_gap_tol``
-    (meV) leaves out the pairs with (near) zero frequency gap there. ``direct`` picks the
+    energy-conservation line (TransitionRate.get_line_spectral_density); with
+    ``degenerate_groups`` (PhononSpectrum.deg_groups) the pairs at zero frequency gap by symmetry,
+    (i, i) and degenerate partners, are left out there. ``direct`` picks the
     one-phonon rate (TransitionRate.DIRECT_MODELS); "debye" needs the ``spectrum`` the
     couplings were computed on. Returns the temperatures with a result, the total rates
     per process and the directional rates.
@@ -359,7 +360,7 @@ def compute_rates(
 
     omega, J_0_pm, J_p_m, J_0_0 = calculator.get_spectral_density(res=0.02, sigma=sigma)
     if two_phonon:
-        lines = calculator.get_line_spectral_density(sigma, zero_gap_tol=zero_gap_tol)
+        lines = calculator.get_line_spectral_density(sigma, degenerate_groups=degenerate_groups)
     omega_zfs = calculator.data["zfs"] / CONSTANTS["meV2J"]
 
     rate_results = {k: {"0_1": [], "1_-1": []} for k in ("first_order", "second_order", "two_phonon")}

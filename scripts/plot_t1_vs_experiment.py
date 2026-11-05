@@ -80,7 +80,6 @@ FONT_SIZE = 20  # axis labels and ticks; the legend is two points smaller
 OUTPUT = Path("figures/t1/DiV_t1_vs_experiment_300K.png")
 # ==================================================================================
 
-ZERO_GAP_TOL_MEV = 1e-3  # symmetry-degenerate partners; accidental near-degeneracies start near 0.01 meV
 STATE_TITLES = {"ms_0": "$m_s=0$", "ms_1": "$m_s=+1$", "ms_-1": "$m_s=-1$"}
 DIRECTIONS = ("0_to_1", "0_to_-1", "1_to_0", "-1_to_0", "1_to_-1", "-1_to_1")
 COLORS = ["#2a78d6", "#1baf7a", "#eb6834", "#8e5bd0", "#c9a227", "#555555"]
@@ -155,7 +154,9 @@ def t1_curve(case):
         else:
             calc.direct = DIRECT_MODEL if INCLUDE_DIRECT else "none"
         omega, j0pm, jpm, j00 = calc.get_spectral_density(res=0.02, sigma=case["sigma"])
-        lines = calc.get_line_spectral_density(case["sigma"], zero_gap_tol=ZERO_GAP_TOL_MEV if case["nogap"] else None)
+        # nogap: leave out the pairs at zero gap by symmetry, (i, i) and degenerate E partners
+        groups = (manager.spectrum.deg_groups or []) if case["nogap"] else None
+        lines = calc.get_line_spectral_density(case["sigma"], degenerate_groups=groups)
         zfs = calc.data["zfs"] / CONSTANTS["meV2J"]
         processes = ["two_phonon"] + (["first_order"] if INCLUDE_DIRECT else []) + (
             ["second_order"] if INCLUDE_VIRTUAL_RAMAN else [])

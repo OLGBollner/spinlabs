@@ -286,9 +286,22 @@ class TransitionRate:
         density = np.convolve(hist, kernel, mode="full")[half : half + len(omega)]
         return omega, density
 
-    def get_line_spectral_density(
-        self, sigma: float, res: float | None = None, zero_gap_tol: float | None = None
-    ) -> dict:
+    @staticmethod
+    def symmetry_zero_gap_pairs(n_modes: int, degenerate_groups) -> np.ndarray:
+        """Pairs (i, j) at zero frequency difference by symmetry: every (i, i), and i != j in one degenerate group.
+
+        ``degenerate_groups`` are lists of mode indices (PhononSpectrum.deg_groups). Accidental
+        near-degeneracies between modes of different groups are not among them.
+        """
+        pairs = np.eye(n_modes, dtype=bool)
+        for group in degenerate_groups or ():
+            idx = np.asarray(group, dtype=int)
+            if idx.size and (idx.min() < 0 or idx.max() >= n_modes):
+                raise ValueError(f"degenerate group {list(group)} is outside the {n_modes} modes of the couplings")
+            pairs[np.ix_(idx, idx)] = True
+        return pairs
+
+    def get_line_spectral_density(self, sigma: float, res: float | None = None, degenerate_groups=None) -> dict:
         """Temperature-independent input of compute_two_phonon_rates: J2 on each transition's energy line.
 
         A transition m_s -> m_s' changes the spin energy by gap = E(m_s') - E(m_s), with
@@ -296,10 +309,12 @@ class TransitionRate:
         |dm| = 1 uses V2_0pm, |dm| = 2 V2_+-. ``res`` defaults to sigma/20 (at most 0.05 meV),
         fine against the sigma/sqrt2 width along the line.
 
-        ``zero_gap_tol`` (meV) leaves out every pair whose frequencies differ by less: the
-        diagonal pairs (i, i) and the partners of a degenerate E doublet. Their gap is zero at any
-        sigma, so they add a term ~ 1/sigma that a phonon continuum does not have (there such
-        pairs have measure zero); without them the rate is the supercell's continuum estimate.
+        ``degenerate_groups`` (PhononSpectrum.deg_groups; [] for none) leaves out the pairs at zero
+        frequency difference by symmetry: the diagonal pairs (i, i) and the partners of each
+        degenerate group (symmetry_zero_gap_pairs). Their gap is zero at any sigma, so they add a
+        term ~ 1/sigma that a phonon continuum does not have (there such pairs have measure zero);
+        without them the rate is the supercell's continuum estimate. Accidental near-degeneracies
+        are kept: they sample the continuum of pair splittings like any other pair. None keeps all.
         """
         res = min(0.05, sigma / 20) if res is None else res
         freqs = self.data["freqs"] / CONSTANTS["meV2J"]
@@ -308,8 +323,8 @@ class TransitionRate:
         weights = {
             dm: self.pair_weights(self.get_2ph_coupling(key) / CONSTANTS["meV2J"]) for dm, key in couplings.items()
         }
-        if zero_gap_tol is not None:
-            zero_gap = np.abs(freqs[:, None] - freqs[None, :]) < zero_gap_tol
+        if degenerate_groups is not None:
+            zero_gap = self.symmetry_zero_gap_pairs(len(freqs), degenerate_groups)
             weights = {dm: np.where(zero_gap, 0.0, w) for dm, w in weights.items()}
 
         lines, cache = {}, {}

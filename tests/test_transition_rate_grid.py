@@ -180,14 +180,28 @@ def test_direct_rate_vanishes_at_zero_temperature_only_for_absorption():
 
 
 def test_zero_gap_pairs_are_left_out():
-    """FREQS_MEV holds a degenerate doublet (30, 30): with a tolerance, it and every (i, i) drop out."""
+    """FREQS_MEV holds a degenerate doublet (30, 30) as group [0, 1]: it and every (i, i) drop out."""
     calc = _calculator()
-    calc.compute_two_phonon_rates(T, calc.get_line_spectral_density(SIGMA, zero_gap_tol=1e-3))
+    calc.compute_two_phonon_rates(T, calc.get_line_spectral_density(SIGMA, degenerate_groups=[[0, 1]]))
     rates = dict(calc.transition_rate["two_phonon"])
     D = calc.data["zfs"] / MEV
-    keep = np.abs(FREQS_MEV[:, None] - FREQS_MEV[None, :]) >= 1e-3
-    assert not keep[0, 1] and not keep[2, 2] and keep[0, 2]
+    keep = ~np.eye(len(FREQS_MEV), dtype=bool)
+    keep[0, 1] = keep[1, 0] = False
     assert rates["0_to_1"] == pytest.approx(_line_integral(calc, "V2_0_pm", D, keep=keep), rel=2e-3)
     assert rates["1_to_-1"] == pytest.approx(_line_integral(calc, "V2_p_m", 0.0, keep=keep), rel=2e-3)
     full = _two_phonon(calc)
     assert rates["0_to_1"] < full["0_to_1"]
+
+
+def test_zero_gap_exclusion_follows_symmetry_not_frequency():
+    """Modes 0 and 1 share a frequency, but outside a degenerate group they are an accidental pair and stay;
+    only the diagonal goes."""
+    calc = _calculator()
+    calc.compute_two_phonon_rates(T, calc.get_line_spectral_density(SIGMA, degenerate_groups=[]))
+    rates = dict(calc.transition_rate["two_phonon"])
+    keep = ~np.eye(len(FREQS_MEV), dtype=bool)
+    assert rates["1_to_-1"] == pytest.approx(_line_integral(calc, "V2_p_m", 0.0, keep=keep), rel=2e-3)
+    pairs = calc.symmetry_zero_gap_pairs(len(FREQS_MEV), [[0, 1]])
+    assert pairs[0, 1] and pairs[1, 0] and pairs[2, 2] and not pairs[0, 2]
+    with pytest.raises(ValueError, match="outside"):
+        calc.symmetry_zero_gap_pairs(3, [[2, 3]])
