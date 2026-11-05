@@ -35,6 +35,9 @@ DATA = Path("data")  # raw ZFS packages, as data/<defect>_<cell>/pert_<step>/<me
 EXPERIMENT_DIR = Path("experimental_data")  # one subfolder per defect: <EXPERIMENT_DIR>/<defect>/*.csv
 EXPERIMENT_SOURCES = None  # e.g. ["Jarmola_2012"]; None: every CSV in the subfolders of the cases' defects
 EXPERIMENT_SERIES = None  # e.g. ["S3", "S8", "T1 ms_0 from omega and gamma"]; None: every series of those sources
+# Series left out, by label. S2 (Jarmola et al.): [NV] ~ 16 ppm, T1 limited by NV-NV cross-relaxation below ~200 K,
+# which the calculation (a single defect) does not include
+EXPERIMENT_EXCLUDE = ["S2"]
 
 # One curve per case:
 #   defect               "NV", "DiV", ...: the package and the experimental data subfolder
@@ -49,22 +52,22 @@ EXPERIMENT_SERIES = None  # e.g. ["S3", "S8", "T1 ms_0 from omega and gamma"]; N
 #   label                legend text; None: the method, "AE" (all_bands) or "UE" (defect_band_approx), with the
 #                        cell size and the pairs ("explicit", "geometric mean") when the cases differ in them
 
-CASES = [
-    dict(defect="NV", cell=64, step=0.1, method="all_bands", pairs="diagonal-sqrt", nogap=True, sigma=3.5,
-         displacement=None, label=None),
-    dict(defect="NV", cell=64, step=0.1, method="all_bands", pairs="computed", nogap=True, sigma=3.5,
-         displacement=None, label=None),
-    dict(defect="NV", cell=512, step=0.05, method="all_bands", pairs="diagonal-sqrt", nogap=True, sigma=0.5,
-         displacement=None, label=None),
-]
 # CASES = [
-#     dict(defect="DiV", cell=128, step=0.05, method="all_bands", pairs="diagonal-sqrt", nogap=True, sigma=3.5,
+#     dict(defect="NV", cell=64, step=0.1, method="all_bands", pairs="diagonal-sqrt", nogap=True, sigma=3.5,
 #          displacement=None, label=None),
-#     dict(defect="DiV", cell=128, step=0.05, method="all_bands", pairs="computed", nogap=True, sigma=3.5,
+#     dict(defect="NV", cell=64, step=0.1, method="all_bands", pairs="computed", nogap=True, sigma=3.5,
+#          displacement=None, label=None),
+#     dict(defect="NV", cell=512, step=0.05, method="all_bands", pairs="diagonal-sqrt", nogap=True, sigma=0.5,
 #          displacement=None, label=None),
 # ]
+CASES = [
+    dict(defect="DiV", cell=128, step=0.05, method="all_bands", pairs="diagonal-sqrt", nogap=True, sigma=3.5,
+         displacement=None, label=None),
+    dict(defect="DiV", cell=128, step=0.05, method="all_bands", pairs="computed", nogap=True, sigma=3.5,
+         displacement=None, label=None),
+]
 
-TEMPERATURES = np.arange(0.0, 601.0, 10.0)  # K
+TEMPERATURES = np.arange(0.0, 301.0, 10.0)  # K
 INIT_STATE = "ms_0"  # "ms_0", "ms_1" or "ms_-1"; the experiment is an m_s = 0 polarization
 INCLUDE_DIRECT = True  # one-phonon rate: a smearing-tail artifact without acoustic phonons, off by default
 # How the one-phonon rate is computed when INCLUDE_DIRECT: "debye" (J = C E^3 from the supercell's folded
@@ -74,7 +77,7 @@ INCLUDE_VIRTUAL_RAMAN = True  # first-order coupling at second order; ~1e-7 of t
 PLOT = "T1"  # "T1" (seconds) or "rate" (1/T1 in Hz, as the experiment is reported)
 LOG_X = False
 FONT_SIZE = 20  # axis labels and ticks; the legend is two points smaller
-OUTPUT = Path("figures/t1/NV_t1_vs_experiment_600K.png")
+OUTPUT = Path("figures/t1/DiV_t1_vs_experiment_300K.png")
 # ==================================================================================
 
 ZERO_GAP_TOL_MEV = 1e-3  # symmetry-degenerate partners; accidental near-degeneracies start near 0.01 meV
@@ -105,6 +108,8 @@ def package(case):
         path = found[-1]
     if not path.exists():
         raise SystemExit(f"no such package: {path}")
+
+    print("Using package from: ", path)
     return path
 
 
@@ -195,7 +200,7 @@ def main():
         color = EXP_COLORS[k] if k < len(EXP_COLORS) else EXP_OVERFLOW_COLOR
         # T1 / 1/T1 as measured, and T1 of INIT_STATE solved from a source's Omega and gamma
         for m, s in enumerate(relaxation_series(series_list, INIT_STATE)):
-            if EXPERIMENT_SERIES is not None and s.label not in EXPERIMENT_SERIES:
+            if (EXPERIMENT_SERIES is not None and s.label not in EXPERIMENT_SERIES) or s.label in EXPERIMENT_EXCLUDE:
                 continue
             entries.append((color, EXP_MARKERS[m % len(EXP_MARKERS)], defect, s))
     # Legend: one entry per citation, showing the markers of all its series side by side
