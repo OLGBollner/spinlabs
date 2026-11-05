@@ -35,6 +35,7 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 import numpy as np
 from matplotlib.colors import LinearSegmentedColormap, LogNorm
+from matplotlib.ticker import LogFormatterSciNotation
 
 from spinlabs.convergence import principal_frame
 from spinlabs.models import RawZFSData, ZFSTensor
@@ -43,7 +44,7 @@ from spinlabs.parsers import parse_phonon_data
 DEFECTS = ("NV_512", "DiV_128", "ClV_128", "ClV_576")
 TEX_NAMES = {"NV_512": r"NV$^-$ (512)", "DiV_128": r"V$_\text{Si}$V$_\text{C}$ (128)",
              "ClV_128": r"Cl$_\text{C}$V$_\text{Si}$ (128)", "ClV_576": r"Cl$_\text{C}$V$_\text{Si}$ (576)"}
-PLOT_NAMES = {"NV_512": "NV (512)", "DiV_128": "DiV (128)", "ClV_128": "ClV (128)", "ClV_576": "ClV (576)"}
+PLOT_NAMES = {"NV_512": "NV$^{-}$ (512)", "DiV_128": "VV$^0$ (128)", "ClV_128": "ClV$^{+}$ (128)", "ClV_576": "ClV$^{+}$ (576)"}
 CHANNELS = ("V00", "Vpm", "V0pm")
 CH_LABEL = {"V00": r"$V_{00}$", "Vpm": r"$V_{+-}$", "V0pm": r"$V_{0\pm}$"}
 CH_COLOR = {"V00": "#2a78d6", "Vpm": "#eb6834", "V0pm": "#1baf7a"}  # validated, all pairs (light)
@@ -134,26 +135,6 @@ def strength_ratio(rows: list[dict], ch: str) -> float:
     return float(np.sqrt((b**2).sum() / (a**2).sum())) if len(a) else np.nan
 
 
-def running_spread(a: np.ndarray, b: np.ndarray, ratio: float, n_grid: int = 60) -> tuple[np.ndarray, np.ndarray]:
-    """RMS deviation of log10(V_UE / V_AE) from log10(ratio) along the AE coupling strength.
-
-    On a log grid of V_AE from the weakest to the strongest mode, each point takes the modes within
-    SMOOTH_DEX decades, or the SMOOTH_MIN nearest in log V_AE where fewer lie that close (as
-    running_quartiles). Modes with V_UE = 0 are left out. Returns the grid and the deviation (decades).
-    """
-    ok = b > 0
-    lx, dev = np.log10(a[ok]), np.log10(b[ok] / a[ok]) - np.log10(ratio)
-    grid = np.linspace(lx.min(), lx.max(), n_grid)
-    spread = np.empty(n_grid)
-    for k, g in enumerate(grid):
-        d = np.abs(lx - g)
-        sel = d <= SMOOTH_DEX
-        if sel.sum() < SMOOTH_MIN:
-            sel = d <= np.sort(d)[min(SMOOTH_MIN, len(d)) - 1]
-        spread[k] = np.sqrt(np.mean(dev[sel] ** 2))
-    return 10**grid, spread
-
-
 def ipr_bins(rows: list[dict]) -> list[tuple[str, list[dict]]]:
     """IPR-rank groups: lowest 50 %, 50-90 %, 90-99 %, top 1 %."""
     if not rows:
@@ -192,9 +173,12 @@ def _plot_scatter(results: list[dict], out: Path, small: float) -> None:
     fig, axes = plt.subplots(len(results), 3, figsize=(10.5, 3.1 * len(results)), squeeze=False)
     # room for each panel's own y tick labels next to its left neighbour
     fig.subplots_adjust(wspace=0.45, hspace=0.3)
-    iprs = [r["ipr"] for res in results for r in res["rows"]]
-    norm = LogNorm(vmin=min(iprs), vmax=max(iprs))
     for row, res in enumerate(results):
+        # Colour scale per row (defect): the IPR range of the modes drawn in that row, so the differences in
+        # localization within a panel stand out; each row gets its own colour bar
+        iprs = [r["ipr"] for ch in CHANNELS for r in channel_rows(res, ch)]
+        norm = LogNorm(vmin=min(iprs), vmax=max(iprs))
+        sc = None
         for col, ch in enumerate(CHANNELS):
             ax = axes[row, col]
             rows = channel_rows(res, ch)
@@ -212,26 +196,25 @@ def _plot_scatter(results: list[dict], out: Path, small: float) -> None:
             ax.plot(line, line, color=INK2, lw=0.8, ls="--", zorder=1)
             ratio = strength_ratio(rows, ch)
             ax.plot(line, ratio * line, color=CH_COLOR[ch], lw=1.4, zorder=3)
-            # The running RMS deviation of the per-mode log10(V_UE / V_AE) from the ratio, along V_AE: how far the
-            # modes of that strength scatter about the ratio line
-            gx, spread = running_spread(a, b, ratio)
-            ax.fill_between(gx, ratio * gx / 10**spread, ratio * gx * 10**spread, color=CH_COLOR[ch],
-                            alpha=0.18, lw=0, zorder=1)
             ax.set_xscale("log")
             ax.set_yscale("log")
             ax.set_xlim(lo / 1.5, hi * 1.5)
             ax.set_ylim(lo / 1.5, hi * 1.5)
             ax.grid(True, color=GRID, lw=0.5, zorder=0)
-            ax.text(0.04, 0.95, f"{PLOT_NAMES[res['defect']]}\nratio {ratio:.2f}", transform=ax.transAxes,
-                    va="top", fontsize=small, color=INK)
+            panel = chr(ord("a") + row * len(CHANNELS) + col)  # (a)-(i), row by row, for the text to refer to
+            ax.text(0.04, 0.95, f"({panel}) {PLOT_NAMES[res['defect']]}\n$\\rho = {ratio:.2f}$",
+                    transform=ax.transAxes, va="top", fontsize=small, color=INK)
             if row == 0:
                 ax.set_title(CH_LABEL[ch])
             if row == len(results) - 1:
-                ax.set_xlabel("AE (MHz)")
+                ax.set_xlabel(r"$|V_\mathrm{AE}|$ (MHz)")
             if col == 0:
-                ax.set_ylabel("UE (MHz)")
-    cbar = fig.colorbar(sc, ax=axes, shrink=0.5, pad=0.02)
-    cbar.set_label("mode IPR (localization)")
+                ax.set_ylabel(r"$|V_\mathrm{UE}|$ (MHz)")
+        if sc is not None:
+            cbar = fig.colorbar(sc, ax=axes[row, :].tolist(), pad=0.02, fraction=0.03)
+            cbar.set_label("mode IPR")
+            # a row's range can be under a decade: label the minor ticks too, so every bar reads off a range
+            cbar.ax.yaxis.set_minor_formatter(LogFormatterSciNotation(labelOnlyBase=False, minor_thresholds=(1.5, 0.3)))
     fig.savefig(out)
     plt.close(fig)
 
@@ -240,7 +223,7 @@ N_BINS = 10  # log-spaced N_eff bins per defect
 MIN_BIN = 3  # fewest modes in a bin; sparser bins are merged with their neighbour
 
 
-SMOOTH_DEX = 0.35  # half-width of the running windows in decades (of N_eff, or of V_AE in the scatter band)
+SMOOTH_DEX = 0.35  # half-width of the running window in decades of N_eff
 SMOOTH_MIN = 20  # fewest modes in the running window; widened to the nearest ones where sparse
 
 
