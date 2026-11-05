@@ -5,6 +5,10 @@ One row per spin-flip coupling (J_0pm, J_pm): the two maps on one log colour sca
 (absorb one phonon, emit another, w_x - w_y = w_ZFS ~ 0) samples. The cut also shows the computed
 pairs without the A x E pairs, which the sqrt(V_ii V_jj) fill cannot supply.
 
+The approximation is kept only on the pairs that were computed (the computed pair keys plus any pair
+with a nonzero computed coupling), so a package with only part of the (i, j) plane computed compares
+like for like. --full-fill keeps the approximation on every pair.
+
     python scripts/plot_spectral_comparison.py data/NV_64/pert_0.1/all_bands/20261021/NV_64_raw_zfs_data_all_bands_12d.npz \\
         --sigma 7.5 -o figures/sigma_scan/NV_64_spectral_2d_comparison.png
 """
@@ -46,6 +50,18 @@ def drop_a_x_e(manager):
         k: v for k, v in manager.zfs_tensors_2d.items() if not (set(v["symmetry"]) & a and set(v["symmetry"]) & e)
     }
     return manager
+
+
+def computed_pair_mask(manager, couplings):
+    """(N, N) bool: the computed (i, j) pairs, both orders, plus any pair with a nonzero computed coupling
+    (pairs the pipeline adds from symmetry-degenerate partners)."""
+    n = len(next(iter(couplings.values())))
+    mask = np.zeros((n, n), dtype=bool)
+    for i, j in manager.zfs_tensors_2d:
+        mask[int(i), int(j)] = mask[int(j), int(i)] = True
+    for values in couplings.values():
+        mask |= values != 0
+    return mask
 
 
 def plot(w, sets, sigma, title, approx_label, out):
@@ -119,6 +135,8 @@ if __name__ == "__main__":
     parser.add_argument("--displacement", choices=("normalized", "mass_weighted", "unweighted"),
                         help="Override the package's displacement convention")
     parser.add_argument("--sigma", type=float, default=7.5, help="Broadening in meV (default: 7.5)")
+    parser.add_argument("--full-fill", action="store_true",
+                        help="Keep the approximation on every pair, not only on the computed ones")
     parser.add_argument("--title", help="Figure title (default: <defect> <cell> step <pert>)")
     parser.add_argument("-o", "--output", type=Path, help="Figure path (default: <defect>_<cell>_spectral_2d_comparison.png)")
     args = parser.parse_args()
@@ -132,7 +150,12 @@ if __name__ == "__main__":
         drop_a_x_e(coupling_manager(args.raw_file, "computed", args.displacement)[0])
     )
     approx_label = {"diagonal-sqrt": "diagonal + sqrt fill", "sqrt": "sqrt fill", "diagonal": "diagonal only"}[args.approx]
-    print(f"{convention}; {len(w)} modes")
+    mask = computed_pair_mask(manager, computed)
+    print(f"{convention}; {len(w)} modes; {np.count_nonzero(np.triu(mask))} of {len(w) * (len(w) + 1) // 2} "
+          f"pairs computed")
+    if not args.full_fill and not mask.all():
+        approx = {name: np.where(mask, values, 0.0) for name, values in approx.items()}
+        approx_label += ", computed pairs"
     plot(w, {"computed": computed, approx_label: approx, "computed without A x E": without_a_e}, args.sigma,
          args.title or f"{raw.defect} {raw.cell_size} step {raw.pert_scale:g}", approx_label,
          args.output or Path(f"{raw.defect}_{raw.cell_size}_spectral_2d_comparison.png"))
