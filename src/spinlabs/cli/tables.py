@@ -40,7 +40,7 @@ def build_table_parser(subparsers: argparse._SubParsersAction) -> None:  # noqa:
     defects = subparsers.add_parser(
         "defects",
         help="LaTeX table of ground-state D and the latest T1 per initial state for each defect",
-        description="Ground-state D (corrected/contaminated) per defect, with the latest "
+        description="Ground-state D (UE/AE) per defect, with the latest "
         "T1 per initial spin state and method appended. Values of different supercells share a row "
         "and get a superscript letter explained in the caption.",
     )
@@ -51,7 +51,7 @@ def build_table_parser(subparsers: argparse._SubParsersAction) -> None:  # noqa:
     )
     _add_run_filter_args(defects)
     defects.add_argument("--no-t1", action="store_true", help="Leave out the T1 columns (D only)")
-    defects.add_argument("--label", default="tab:defects", help="LaTeX \\label (default: tab:defects)")
+    defects.add_argument("--label", default="tab:zfs_d", help="LaTeX \\label (default: tab:zfs_d)")
     _add_output_args(defects)
     defects.set_defaults(func=_run_defects)
 
