@@ -59,6 +59,7 @@ def plot(w, sets, sigma, title, approx_label, out):
         for label, couplings in sets.items():
             X, Y, J = MathUtils.get_2d_spectral_density(w, couplings[name] ** 2, res, sigma)
             maps[label] = J
+        top = float(np.max(X))  # the grid ends a few sigma past the highest mode
         vmax = max(float(maps[computed].max()), float(maps[approx].max()))
         norm = LogNorm(vmin=vmax * DYNAMIC_RANGE, vmax=vmax)
         for col, label in enumerate((computed, approx)):
@@ -79,9 +80,9 @@ def plot(w, sets, sigma, title, approx_label, out):
         fig.colorbar(mesh, ax=ax, fraction=0.046, pad=0.04, label="ratio")
 
         for ax in axes[row, :3]:
-            ax.plot([0, 200], [0, 200], color="white" if ax is not axes[row, 2] else "black", lw=0.8, ls="--")
-            ax.set_xlim(0, 180)
-            ax.set_ylim(0, 180)
+            ax.plot([0, top], [0, top], color="white" if ax is not axes[row, 2] else "black", lw=0.8, ls="--")
+            ax.set_xlim(0, top)
+            ax.set_ylim(0, top)
             ax.set_aspect("equal")
             ax.set_xlabel(r"$\omega_x$ (meV)")
             ax.set_ylabel(r"$\omega_y$ (meV)")
@@ -93,7 +94,7 @@ def plot(w, sets, sigma, title, approx_label, out):
             ax.plot(omega, np.diag(J), lw=2, label=label, **style)
         ax.set_yscale("log")
         ax.set_ylim(vmax * 1e-4, vmax * 3)
-        ax.set_xlim(0, 180)
+        ax.set_xlim(0, top)
         ax.set_xlabel(r"$\omega_x = \omega_y$ (meV)")
         ax.set_ylabel(r"MHz$^2$/meV$^2$")
         ax.set_title(f"${tex}$ along the diagonal (difference process)", fontsize=11)
