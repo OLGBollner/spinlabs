@@ -102,6 +102,8 @@ EXPERIMENT_STYLES = {
     ("Jarmola_2012", "S8"): ("#a8201a", "D"),
     ("Lin_2021", "omega"): ("#eda100", "^"),
     ("Toyli_2012", "toyli"): ("#5f3dc4", "v"),
+    ("Cambria_2023_NVA", "omega"): ("#2f9e44", "P"),
+    ("Cambria_2023_NVB", "omega"): ("#2f9e44", "X"),
 }
 EXP_EDGE = "#52514e"
 CHANNEL_MARKERS = {"V00": "o", "Vpm": "s", "V0pm": "^"}
