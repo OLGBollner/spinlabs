@@ -33,7 +33,8 @@ from spinlabs.transition_rate import TransitionRate  # noqa: E402
 # ============================== settings: edit these ==============================
 DATA = Path("data")  # raw ZFS packages, as data/<defect>_<cell>/pert_<step>/<method>/<date>/
 EXPERIMENT_DIR = Path("experimental_data")  # one subfolder per defect: <EXPERIMENT_DIR>/<defect>/*.csv
-EXPERIMENT_SOURCES = None  # e.g. ["Jarmola_2012"]; None: every CSV in the subfolders of the cases' defects
+EXPERIMENT_SOURCES = None  # e.g. ["Jarmola_2012"]; None: every CSV in the subfolders of the cases' defects; []: none
+# A defect without a subfolder (e.g. ClV) is drawn without experimental data
 EXPERIMENT_SERIES = None  # e.g. ["S3", "S8", "T1 ms_0 from omega and gamma"]; None: every series of those sources
 # Series left out, by label. S2 (Jarmola et al.): [NV] ~ 16 ppm, T1 limited by NV-NV cross-relaxation below ~200 K,
 # which the calculation (a single defect) does not include
@@ -42,7 +43,7 @@ EXPERIMENT_EXCLUDE = ["S2"]
 # One curve per case:
 #   defect               "NV", "DiV", ...: the package and the experimental data subfolder
 #   cell, step, method   the package: <defect>_<cell>, step <step>, "all_bands" or "defect_band_approx"
-#   date                 package folder (YYYYMMDD); None: the newest one with a 12d package
+#   date                 package folder (YYYYMMDD); None: the newest one with a 12d (or central) package
 #   pairs                second-order pairs: "computed" (as computed), "diagonal" (only (i, i)),
 #                        "diagonal-sqrt" (diagonal + sqrt(V_ii V_jj) fill: "fill"),
 #                        "sqrt" (computed pairs + fill for the uncomputed ones)
@@ -94,22 +95,24 @@ EXP_EDGE = "#52514e"  # dark outline: yellow is below 3:1 against the white back
 EXP_MARKERS = "sD^vPX"  # no plain circles
 
 
-def package(case):
-    """The raw second-order package of a case."""
-    folder = DATA / f"{case['defect']}_{case['cell']}" / f"pert_{case['step']:g}" / case["method"]
-    name = f"{case['defect']}_{case['cell']}_raw_zfs_data_{case['method']}_12d.npz"
-    if case.get("date"):
-        path = folder / case["date"] / name
-    else:
-        found = sorted(folder.glob(f"*/{name}"))
-        if not found:
-            raise SystemExit(f"no {name} under {folder}")
-        path = found[-1]
-    if not path.exists():
-        raise SystemExit(f"no such package: {path}")
+# Second-order package names, preferred first when a date folder holds both: <stem>_12d.npz, or
+# <stem>_central.npz (central-difference packages, e.g. ClV_576 step 0.05)
+PACKAGE_SUFFIXES = ("12d", "central")
 
-    print("Using package from: ", path)
-    return path
+
+def package(case):
+    """The raw second-order package of a case: in its date folder, or the newest date folder that has one."""
+    folder = DATA / f"{case['defect']}_{case['cell']}" / f"pert_{case['step']:g}" / case["method"]
+    stem = f"{case['defect']}_{case['cell']}_raw_zfs_data_{case['method']}"
+    names = [f"{stem}_{suffix}.npz" for suffix in PACKAGE_SUFFIXES]
+    dates = [folder / case["date"]] if case.get("date") else sorted(folder.glob("*/"), reverse=True)
+    for date in dates:
+        for name in names:
+            if (date / name).exists():
+                print("Using package from: ", date / name)
+                return date / name
+    where = dates[0] if case.get("date") else folder
+    raise SystemExit(f"no {' or '.join(names)} under {where}")
 
 
 # How the legend names the second-order pairs, shown only when the cases differ in them
@@ -192,7 +195,11 @@ def main():
         print(f"{description} ({convention}): T1({TEMPERATURES[i300]:g} K) = {t1[i300] * 1e3:.3g} ms")
 
     defects = list(dict.fromkeys(case["defect"] for case in CASES))
+    missing = [d for d in defects if not (EXPERIMENT_DIR / d).is_dir()]
+    if missing and EXPERIMENT_SOURCES != []:  # [] asks for no experiment: nothing to report
+        print(f"no experimental data for {', '.join(missing)} (no folder under {EXPERIMENT_DIR})")
     experiments = [(defect, source, series_list) for defect in defects  # each folder sorted by source name
+                   if defect not in missing
                    for source, series_list in load_experimental_data(EXPERIMENT_DIR / defect).items()]
     entries = []  # (colour, marker, defect, series) per plotted experimental series
     for k, (defect, source, series_list) in enumerate(experiments):
