@@ -6,7 +6,7 @@ import numpy as np
 
 import config as C
 
-ORDER = ["M1", "M2", "M3", "M4", "S1a", "S1b", "S2", "S3", "S4", "S5", "S6"]
+ORDER = ["M1", "M2", "M3", "M4", "S1a", "S1b", "S2", "S3", "S4", "S4_UO", "S5", "S6"]
 
 
 def fmt(v):
