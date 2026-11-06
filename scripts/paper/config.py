@@ -89,7 +89,7 @@ COLORS = {
     "cambria": "#2b2b2b",  # analytical model
     "V00": "#0f766e", "Vpm": "#7048e8", "V0pm": "#c9a227",  # coupling channels
     "computed": "#0b0b0b", "fill": "#1baf7a", "diagonal-sqrt": "#8a5a2b", "diagonal": "#898781",
-    "no_axe": "#c9a227", "fill-computed": "#b8457a",  # pair treatments
+    "no_axe": "#d6336c", "fill-computed": "#b8457a",  # pair treatments
     "rho_line": "#d6336c",  # rho = 1 reference / rho line in scatter (not in the IPR Blues map)
     "longitudinal": "#c9a227", "transverse": "#0f766e", "other_modes": "#b8b6b0",  # Debye fit
     "ref": "#52514e",  # reference lines (125 K, rho = 1)
