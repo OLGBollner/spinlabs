@@ -40,11 +40,11 @@ def main():
         lo = min(np.nanmin(res[(s, sch, st)]) for sch in C.SCHEMES for st in STATES)
         ax.set_ylim(lo / 3, 1e3)
         ax.set_ylabel(r"$T_1$ (s)")
-        ax.text(0.97, 0.75, C.SYSTEMS[s]["label"], transform=ax.transAxes, ha="right", va="top")
+        ax.text(0.97, 0.96, C.SYSTEMS[s]["label"], transform=ax.transAxes, ha="right", va="top")
         C.panel_letter(ax, k, x=-0.16, y=0.98)
     axes[-1].set_xlim(0, 600)
     axes[-1].set_xlabel("Temperature (K)")
-    axes[0].legend(loc="lower left", fontsize=C.FONT - 2, handlelength=2.2)
+    axes[0].legend(loc="upper right", bbox_to_anchor=(1.0, 0.88), fontsize=C.FONT - 2, handlelength=2.2)
     fig.tight_layout()
     rec.data["files"] = C.save(fig, C.MAIN, "M4_VV128_ClV576_T1_vs_T")
 
