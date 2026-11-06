@@ -328,6 +328,7 @@ def compute_rates(
     has_second_order: bool = False,
     degenerate_groups=None,
     direct: str = "gaussian",
+    b_field_mt: float = 0.0,
     spectrum=None,
 ) -> tuple[np.ndarray, dict, dict]:
     """Transition rates of a coupling file at each temperature.
@@ -339,11 +340,13 @@ def compute_rates(
     ``degenerate_groups`` (PhononSpectrum.deg_groups) the pairs at zero frequency gap by symmetry,
     (i, i) and degenerate partners, are left out there. ``direct`` picks the
     one-phonon rate (TransitionRate.DIRECT_MODELS); "debye" needs the ``spectrum`` the
-    couplings were computed on. Returns the temperatures with a result, the total rates
+    couplings were computed on. ``b_field_mt`` is an axial magnetic field (mT): it splits +1 and -1,
+    which gives the +1 <-> -1 direct rate (C_+- with "debye") and moves every gap. Returns the temperatures with a result, the total rates
     per process and the directional rates.
     """
     two_ph_p = Path(two_phonon_file) if two_phonon_file else None
     calculator = TransitionRate(str(coupling_path), two_phonon_data_file=two_ph_p)
+    calculator.b_field_mt = b_field_mt
     if direct == "debye":
         if spectrum is None:
             raise ValueError("direct='debye' needs the phonon spectrum of the couplings (spectrum=...)")
@@ -420,6 +423,7 @@ def run_full_pipeline(
     degenerate_pairs_from_symmetry: bool = False,
     offdiag_from_diagonal: bool = False,
     sigma: float = DEFAULT_SIGMA_MEV,
+    b_field_mt: float = 0.0,
 ) -> dict[str, Any]:
     """
     Executes the entire end-to-end pipeline:
@@ -465,6 +469,7 @@ def run_full_pipeline(
             degenerate_pairs_from_symmetry=degenerate_pairs_from_symmetry,
             offdiag_from_diagonal=offdiag_from_diagonal,
             sigma=sigma,
+            b_field_mt=b_field_mt,
         )
     finally:
         if owns_db_logging:
@@ -499,6 +504,7 @@ def _execute_pipeline(
     degenerate_pairs_from_symmetry: bool = False,
     offdiag_from_diagonal: bool = False,
     sigma: float = DEFAULT_SIGMA_MEV,
+    b_field_mt: float = 0.0,
 ) -> dict[str, Any]:
     """Pipeline body of :func:`run_full_pipeline` (DB logging already owned)."""
 
@@ -719,6 +725,7 @@ def _execute_pipeline(
         sigma=sigma,
         two_phonon_file=two_phonon_file,
         has_second_order=coupling_data is not None and coupling_data.has_second_order,
+        b_field_mt=b_field_mt,
     )
 
     # Save rates
@@ -805,6 +812,7 @@ def _execute_pipeline(
         },
         "init_state": init_states,
         "sigma_mev": sigma,
+        "b_field_mt": b_field_mt,
         # Second-order entries departing from the first-order expectation (run folders, 1-based).
         "inconsistent_second_order": {
             "excluded": bool(inconsistent_pairs) and exclude_inconsistent_pairs,

@@ -102,6 +102,15 @@ def build_run_parser(parser: argparse.ArgumentParser) -> None:
         f"bands of a macroscopic crystal (default: {DEFAULT_SIGMA_MEV:g}; see run sigma-scan)",
     )
     opt.add_argument(
+        "--b-field",
+        type=float,
+        default=0.0,
+        metavar="MT",
+        help="Axial magnetic field along the defect axis in mT (default: 0). It shifts the spin levels by "
+        "g mu_B B m_s, which splits +1 and -1 and opens a +1 <-> -1 direct rate; an estimate only: the "
+        "couplings are the zero-field ones and level mixing (transverse fields, anticrossings) is not included",
+    )
+    opt.add_argument(
         "--exclude-inconsistent-pairs",
         action="store_true",
         help="Drop second-order entries whose ZFS change departs from the one expected from the first-order runs "
@@ -249,6 +258,7 @@ def _run(args: argparse.Namespace) -> None:
         degenerate_pairs_from_symmetry=args.degenerate_pairs_from_symmetry,
         offdiag_from_diagonal=args.offdiag_from_diagonal,
         sigma=args.sigma,
+        b_field_mt=args.b_field,
     )
 
 
@@ -353,4 +363,5 @@ def _run_one_query_dataset(
         degenerate_pairs_from_symmetry=args.degenerate_pairs_from_symmetry,
         offdiag_from_diagonal=args.offdiag_from_diagonal,
         sigma=args.sigma,
+        b_field_mt=args.b_field,
     )

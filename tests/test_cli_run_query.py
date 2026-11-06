@@ -82,6 +82,7 @@ def _query_args(tmp_path, out_root, run_name="spi17"):
         degenerate_pairs_from_symmetry=False,
         offdiag_from_diagonal=False,
         sigma=7.5,
+        b_field=0.0,
     )
 
 
