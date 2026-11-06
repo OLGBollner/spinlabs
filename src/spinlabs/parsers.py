@@ -531,6 +531,31 @@ def parse_perturbation_directory(
     return results
 
 
+def defect_spin(*run_dirs: str | Path) -> tuple[float | None, Path | None]:
+    """Defect spin S = NUPDOWN / 2 from the first of ``run_dirs`` that sets NUPDOWN.
+
+    Each folder is tried by its INCAR, then by the parameter echo of its OUTCAR. Returns
+    ``(S, source file)``, or ``(None, None)`` when none of them fixes NUPDOWN (unset, or
+    VASP's default -1).
+    """
+    from spinlabs.vasp.settings import outcar_settings, read_incar
+
+    for run_dir in run_dirs:
+        run_dir = Path(run_dir)
+        for name, reader in (("INCAR", read_incar), ("OUTCAR", outcar_settings)):
+            path = run_dir / name
+            if not path.is_file():
+                continue
+            value = reader(path).get("NUPDOWN")
+            if value is None:
+                continue
+            nupdown = float(value)
+            if nupdown < 0:
+                continue
+            return nupdown / 2, path
+    return None, None
+
+
 def sim_folder_order(sim_folder: str | Path) -> int | None:
     """Perturbation order named by a simulation folder's parent ('first_order' -> 1, 'second_order' -> 2)."""
     parent = Path(sim_folder).parent.name
@@ -586,6 +611,17 @@ def parse_zfs_simulation_dataset(
         raise ValueError(f"Relaxed ZFS tensor not found in: {relaxed_outcar}")
 
     search_path = sim_path / calc_method
+    # The runs' input/INCAR fixes the spin (S = NUPDOWN / 2), which sets the
+    # defect-band correction factor; the ground-state ZFS run is the fallback.
+    spin, spin_source = defect_spin(search_path / "input", relaxed_outcar.parent)
+    if spin is None:
+        if calc_method == "defect_band_approx":
+            LOGGER.warning(
+                f"{sim_path}: no NUPDOWN in {search_path / 'input' / 'INCAR'} or {relaxed_outcar.parent}; "
+                "spin correction assumes S = 1 (x3/2)"
+            )
+    else:
+        LOGGER.debug(f"spin S = {spin:g} from NUPDOWN in {spin_source}")
     first_order = {}
     second_order = {}
 
@@ -606,6 +642,7 @@ def parse_zfs_simulation_dataset(
         cell_size=cell_size,
         pert_scale=pert_scale,
         calc_method=calc_method,
+        spin=spin,
         ground_state_zfs=ground_state_zfs,
         order=order,
         first_order=first_order,
