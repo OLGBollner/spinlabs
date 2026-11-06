@@ -44,8 +44,8 @@ def s2(plt, data):
             ax = axes[row, col]
             cuts = {k: np.diag(J[(k, key)]) for k in ("computed", "fill", "no_axe")}
             for k, cut in cuts.items():
-                label = C.PAIR_LABELS["fill-computed" if k == "fill" else k]  # the fill is kept on the computed pairs
-                ax.plot(omega, cut, color=C.COLORS[k], ls=C.PAIR_STYLES[k], lw=1.1, label=label)
+                style = "fill-computed" if k == "fill" else k  # the fill is kept on the computed pairs (as in S4)
+                ax.plot(omega, cut, color=C.COLORS[style], ls=C.PAIR_STYLES[style], lw=1.1, label=C.PAIR_LABELS[style])
             top = max(float(c.max()) for c in cuts.values())
             ax.set_yscale("log")
             ax.set_ylim(top * 1e-4, top * 20)
