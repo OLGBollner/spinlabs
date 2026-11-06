@@ -44,7 +44,9 @@ def s2(plt, data):
             ax = axes[row, col]
             cuts = {k: np.diag(J[(k, key)]) for k in ("computed", "fill", "no_axe")}
             for k, cut in cuts.items():
-                ax.plot(omega, cut, color=C.COLORS[k], ls=C.PAIR_STYLES[k], lw=1.1, label=C.PAIR_LABELS[k])
+                style = "fill-computed" if k == "fill" else k  # the fill here is kept on the computed pairs (as S4)
+                ax.plot(omega, cut, color=C.COLORS[style], ls=C.PAIR_STYLES[style], lw=1.1,
+                        label=C.PAIR_LABELS[style])
             top = max(float(c.max()) for c in cuts.values())
             ax.set_yscale("log")
             ax.set_ylim(top * 1e-4, top * 20)
@@ -60,10 +62,9 @@ def s2(plt, data):
                                   f"integral ratio no AxE/computed": float(cuts["no_axe"].sum() / cuts["computed"].sum())}
     fig.supylabel(r"$J^{(2)}(\omega, \omega)$ (MHz$^2$/meV$^2$)", fontsize=C.FONT, x=0.01)
     h, l = axes[0, 0].get_legend_handles_labels()
-    short = {C.PAIR_LABELS["no_axe"]: r"no $A\times E$", C.PAIR_LABELS["computed"]: "all pairs",
-             C.PAIR_LABELS["fill"]: "fill"}
-    fig.legend(h, [short.get(x, x) for x in l], loc="upper center", ncol=3, bbox_to_anchor=(0.53, 1.02),
-               handlelength=1.8, columnspacing=1.0)
+    short = {C.PAIR_LABELS["no_axe"]: r"computed, no $A\times E$"}
+    fig.legend(h, [short.get(x, x) for x in l], loc="upper center", ncol=2, bbox_to_anchor=(0.53, 1.04),
+               handlelength=2.4, columnspacing=1.0, fontsize=C.FONT - 1.5)
     fig.tight_layout(pad=0.3, w_pad=0.4, h_pad=0.8, rect=(0.02, 0, 1, 0.93))
     rec.data["files"] = C.save(fig, C.SM, "S2_spectral_diagonal_cuts")
     plt.close(fig)
@@ -73,7 +74,7 @@ def s2(plt, data):
 def s3(plt, data):
     rec = Record("S3", "Two-phonon spectral density maps", "scripts/paper/s2_s3_spectral.py", "sm")
     fig, axes = plt.subplots(4, 3, figsize=(C.DOUBLE, 7.6))
-    col_titles = ("all pairs computed", "geometric-mean fill", "fill / computed")
+    col_titles = ("computed pairs", "fill on computed pairs", "fill / computed")
     k = 0
     for i, s in enumerate(SYSTEMS):
         omega, J, res = data[s]
@@ -83,7 +84,7 @@ def s3(plt, data):
             comp, fill = J[("computed", key)], J[("fill", key)]
             vmax = max(comp.max(), fill.max())
             norm = LogNorm(vmin=vmax * DYNAMIC_RANGE, vmax=vmax)
-            for col, (m, name) in enumerate(((comp, "all pairs computed"), (fill, "geometric-mean fill"))):
+            for col, (m, name) in enumerate(((comp, "computed pairs"), (fill, "fill on computed pairs"))):
                 ax = axes[row, col]
                 mesh = ax.pcolormesh(omega, omega, np.clip(m.T, vmax * DYNAMIC_RANGE, None), norm=norm,
                                      cmap="viridis", shading="auto", rasterized=True)
