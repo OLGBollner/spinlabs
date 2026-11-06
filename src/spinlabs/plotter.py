@@ -174,6 +174,21 @@ def plot_transition_rates_stacked(
     process_labels = ["Direct (1-phonon)", "1st-order Raman", "2nd-order Raman"]
 
     transitions = [("0_1", r"$0 \leftrightarrow \pm 1$"), ("1_-1", r"$+1 \leftrightarrow -1$")]
+    spin = float(data["spin"]) if "spin" in data else 1.0
+    if spin != 1.0:  # one panel per transition class of the spin (spinlabs.spin.transition_class)
+        from fractions import Fraction
+
+        from spinlabs.spin import transition_classes
+
+        def _m(text):
+            value = Fraction(text).limit_denominator(2)
+            return ("+" if value > 0 else "") + str(value)
+
+        transitions = [
+            (name, rf"${_m(a)} \leftrightarrow {_m(b)}$ (and time-reversed)")
+            for name in transition_classes(spin)
+            for a, b in [name.split("_")]
+        ]
     figures = []
 
     for trans_key, trans_title in transitions:

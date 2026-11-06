@@ -1669,6 +1669,9 @@ class SpinPhononCouplingData:
     V2_p_m: Optional[np.ndarray] = None
     V2_0_pm: Optional[np.ndarray] = None
     zfs_2nd_derivs: Optional[np.ndarray] = None
+    # Defect spin S (RawZFSData.spin, from NUPDOWN): the levels m = S..-S of the rates (TransitionRate).
+    # None for data without a recorded spin, which the rates treat as S = 1.
+    spin: Optional[float] = None
 
     @property
     def has_second_order(self) -> bool:
@@ -1729,6 +1732,7 @@ class SpinPhononCouplingData:
             zfs_2nd_derivs=convert_energy(self.zfs_2nd_derivs, self.derivs_unit, target_unit)
             if self.zfs_2nd_derivs is not None
             else None,
+            spin=self.spin,
         )
 
     def frequencies_to_unit(self, target_unit: str) -> SpinPhononCouplingData:
@@ -1760,6 +1764,7 @@ class SpinPhononCouplingData:
             V2_p_m=self.V2_p_m.copy() if self.V2_p_m is not None else None,
             V2_0_pm=self.V2_0_pm.copy() if self.V2_0_pm is not None else None,
             zfs_2nd_derivs=self.zfs_2nd_derivs.copy() if self.zfs_2nd_derivs is not None else None,
+            spin=self.spin,
         )
 
     SCHEMA = [
@@ -1783,6 +1788,7 @@ class SpinPhononCouplingData:
         FieldSpec("V2_p_m", "array", optional=True, decode=_decode_2d_array),
         FieldSpec("V2_0_pm", "array", optional=True, decode=_decode_2d_array),
         FieldSpec("zfs_2nd_derivs", "array", optional=True, decode=_decode_2d_array),
+        FieldSpec("spin", "float", optional=True),
     ]
 
     def save(self, out_path: Union[str, Path]) -> str:
