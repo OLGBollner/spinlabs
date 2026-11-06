@@ -38,13 +38,39 @@ def manager_for(system, scheme, pairs):
     """ZFSManager of a production package with a second-order pair treatment.
 
     pairs: "sqrt" (computed + fill for the rest: production), "computed", "diagonal", "diagonal-sqrt"
-    (diagonal + fill everywhere off the diagonal), "no_axe" (computed without the A x E pairs).
+    (diagonal + fill everywhere off the diagonal), "no_axe" (computed without the A x E pairs),
+    "fill-on-computed" (diagonal + fill, kept on the computed pairs only: the S3 filter, see mask_to_computed).
     """
-    mode = "computed" if pairs == "no_axe" else pairs
+    mode = {"no_axe": "computed", "fill-on-computed": "diagonal-sqrt"}.get(pairs, pairs)
     manager, convention = coupling_manager(C.package(system, scheme), mode)
     if pairs == "no_axe":
         drop_a_x_e(manager)
     return manager, convention
+
+
+def mask_to_computed(system, scheme, coupling_npz):
+    """Zero the second-order couplings of ``coupling_npz`` outside the computed pairs, in place.
+
+    The filter of S3 (plot_spectral_comparison.computed_pair_mask): the computed pair keys, both orders, plus any
+    pair with a nonzero computed coupling (pairs the pipeline adds from symmetry-degenerate partners).
+    """
+    computed, _ = manager_for(system, scheme, "computed")
+    with tempfile.TemporaryDirectory() as tmp:
+        base = str(Path(tmp) / "computed")
+        computed.process_both_orders(output_filename=base)
+        ref = np.load(f"{base}.npz", allow_pickle=True)
+        n = ref["V2_0_0"].shape[0]
+        mask = np.zeros((n, n), dtype=bool)
+        for i, j in computed.zfs_tensors_2d:
+            mask[int(i), int(j)] = mask[int(j), int(i)] = True
+        for k in ("V2_0_0", "V2_p_m", "V2_0_pm"):
+            mask |= np.asarray(ref[k]) != 0
+    d = dict(np.load(coupling_npz, allow_pickle=True))
+    for k in ("V2_0_0", "V2_p_m", "V2_0_pm"):
+        d[k] = np.where(mask, d[k], 0.0)
+    d["zfs_2nd_derivs"] = np.where(mask[:, :, None, None], d["zfs_2nd_derivs"], 0.0)
+    np.savez(coupling_npz, **d)
+    return int(np.count_nonzero(np.triu(mask))), n * (n + 1) // 2
 
 
 def _key(*parts):
@@ -83,6 +109,10 @@ def rates(system, scheme, pairs=C.PAIRS, nogap=C.NOGAP, sigma=C.SIGMA, direct=C.
     with tempfile.TemporaryDirectory() as tmp:
         base = str(Path(tmp) / "coupling")
         manager.process_both_orders(output_filename=base)
+        if pairs == "fill-on-computed":
+            kept, total = mask_to_computed(system, scheme, f"{base}.npz")
+            out["pairs_kept"] = f"{kept} of {total}"
+            print(f"    fill kept on {kept} of {total} pairs (the computed ones)")
         calc = TransitionRate(f"{base}.npz")
         calc.data_2ph = calc.data  # the coupling file carries the second-order coefficients
         if direct == "debye":

@@ -1,10 +1,8 @@
 """S5: T1(fill) / T1(all pairs computed) against temperature for NV- (64) and VV0 (128), AO, m_s = 0 and +-1.
 
-fill: diagonal + sqrt(V_ii V_jj) geometric-mean fill on every off-diagonal pair; all pairs: the computed pairs.
-Both with zero-gap pairs excluded, sigma 3.5 meV, Debye direct rate, no first-order Raman.
-VV0 (128): the computed pairs stop at |gap| ~ 10 meV, where the pair weight g_{sqrt2 sigma}(gap) is still ~0.13 of
-its peak, so "all pairs computed" there misses pairs; the record also gives the ratio against computed + fill outside
-the computed window (production pairs).
+fill: diagonal + sqrt(V_ii V_jj) geometric-mean fill, kept on the computed pairs only (the filter of S3: like for
+like); all pairs: the computed pairs. Both with zero-gap pairs excluded, sigma 3.5 meV, Debye direct rate, no
+first-order Raman. VV0 (128) was computed for |gap| <~ 10 meV only, so both curves cover that window.
 """
 
 import numpy as np
@@ -20,18 +18,17 @@ def main():
     plt = C.style()
     rec = Record("S5", "T1(fill)/T1(all pairs) vs temperature", "scripts/paper/s5_fill_ratio.py", "sm")
     T = C.TEMPERATURES
-    ratio, alt = {}, {}
+    ratio = {}
     for s in SYSTEMS:
         t1 = {}
-        for pairs in ("diagonal-sqrt", "computed", "sqrt"):
+        for pairs in ("fill-on-computed", "computed"):
             r = rates(s, "AO", pairs=pairs)
             for st in STATES:
                 v, eig, src = t1_details(T, directional(r), st)
                 rec.t1_curve(f"{s} AO {st} pairs={pairs}", T, v, eig, src)
                 t1[(pairs, st)] = v
         for st in STATES:
-            ratio[(s, st)] = t1[("diagonal-sqrt", st)] / t1[("computed", st)]
-            alt[(s, st)] = t1[("diagonal-sqrt", st)] / t1[("sqrt", st)]
+            ratio[(s, st)] = t1[("fill-on-computed", st)] / t1[("computed", st)]
     rec.check_fallbacks()
 
     fig, axes = plt.subplots(2, 1, figsize=(C.SINGLE, 3.6), sharex=True)
@@ -55,14 +52,13 @@ def main():
         "systems": {s: f"{C.SYSTEMS[s]['label']}, step {C.SYSTEMS[s]['step']:g}, AO {C.SYSTEMS[s]['packages']['AO']}"
                     for s in SYSTEMS},
         "scheme": "AO", "sigma_meV": C.SIGMA, "direct": C.DIRECT, "zero-gap pairs": "excluded in both",
-        "fill": "diagonal + geometric-mean fill on every off-diagonal pair",
+        "fill": "diagonal + geometric-mean fill, kept on the computed pairs only (S3 filter: computed pair keys "
+                "plus pairs with a nonzero computed coupling); NV_64: 17954 of 17955 pairs, DiV_128: computed window",
         "all pairs": "computed pairs only (NV_64: 17954 of 17955; DiV_128: |gap| <~ 10 meV)",
         "initial states": "m_s = 0 and m_s = +1", "plotted from": "20 K (both T1 very large below)",
         "T1 extraction": "population fit, eigenvalue only as fallback",
     }
     nums = {f"T1(fill)/T1(all pairs) {s} {st}": at(T, ratio[(s, st)], C.QUOTE_T_RATIO) for s in SYSTEMS for st in STATES}
-    nums |= {f"T1(fill)/T1(computed + fill outside window) {s} {st} [alternative reference]":
-             at(T, alt[(s, st)], C.QUOTE_T_RATIO) for s in SYSTEMS for st in STATES}
     rec.data["numbers"] = nums
     rec.write()
     for k, v in nums.items():
