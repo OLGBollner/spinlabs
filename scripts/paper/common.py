@@ -17,7 +17,8 @@ from plot_t1_comparison import coupling_manager  # noqa: E402
 
 from spinlabs.constants import CONSTANTS  # noqa: E402
 from spinlabs.models import SpinPhononCouplingData  # noqa: E402
-from spinlabs.relaxation_dynamics import INIT_POPULATIONS, RelaxationDynamics  # noqa: E402
+from spinlabs.relaxation_dynamics import RelaxationDynamics, init_populations  # noqa: E402
+from spinlabs.spin import directions  # noqa: E402
 from spinlabs.transition_rate import TransitionRate  # noqa: E402
 
 logging.disable(logging.WARNING)  # per-run pipeline warnings would bury the summaries
@@ -151,12 +152,15 @@ def rates(system, scheme, pairs=C.PAIRS, nogap=C.NOGAP, sigma=C.SIGMA, direct=C.
         lines = calc.get_line_spectral_density(sigma, degenerate_groups=groups)
         zfs = calc.data["zfs"] / CONSTANTS["meV2J"]
         out["zfs_mev"] = float(zfs)
-        series = {f"{p}:{d}": [] for p in ALL_PROCESSES for d in DIRECTIONS}
+        out["spin"] = calc.spin
+        if calc.debye_fit_pm is not None:
+            out["debye_C_pm"] = calc.debye_fit_pm.C
+        series = {f"{p}:{d}": [] for p in ALL_PROCESSES for d in calc.directions}  # DIRECTIONS for S = 1
         for T in temps:
             calc.compute_transition_rates(T, omega, j0pm, jpm, j00, zfs)
             calc.compute_two_phonon_rates(T, lines)
             for p in ALL_PROCESSES:
-                for d in DIRECTIONS:
+                for d in calc.directions:
                     series[f"{p}:{d}"].append(float(calc.transition_rate[p].get(d, 0.0)))
     out.update({k: np.asarray(v) for k, v in series.items()})
     C.CACHE.mkdir(parents=True, exist_ok=True)
@@ -165,17 +169,21 @@ def rates(system, scheme, pairs=C.PAIRS, nogap=C.NOGAP, sigma=C.SIGMA, direct=C.
 
 
 def directional(rate_data, processes=C.PROCESSES):
-    """Total directional rates over ``processes`` (production: direct + two-phonon)."""
-    return {d: sum(np.asarray(rate_data[f"{p}:{d}"], dtype=float) for p in processes) for d in DIRECTIONS}
+    """Total directional rates over ``processes`` (production: direct + two-phonon), every direction of the spin."""
+    spin = float(rate_data["spin"]) if "spin" in rate_data else 1.0
+    return {d: sum(np.asarray(rate_data[f"{p}:{d}"], dtype=float) for p in processes) for d in directions(spin)}
 
 
-def t1_details(temps, directional_rates, state):
+def t1_details(temps, directional_rates, state, spin=1.0):
     """T1 (s) by the population fit, T1 by the eigenvalue, and the source per temperature
-    (RelaxationDynamics.get_T1_fit_details: "fit", "eigenvalue" fallback, or "none" at 0 K)."""
+    (RelaxationDynamics.get_T1_fit_details: "fit", "eigenvalue" fallback, or "none" at 0 K).
+
+    ``state`` is a state of ``spin`` (spinlabs.relaxation_dynamics.init_populations: ms_0, ms_1 for S = 1;
+    ms_pm1_2, ms_pm3_2 for S = 3/2, fitted to the doublet's summed population)."""
     with tempfile.TemporaryDirectory() as tmp:
         path = Path(tmp) / "directional.npz"
-        np.savez(path, temperatures=np.asarray(temps, dtype=float), **directional_rates)
-        dyn = RelaxationDynamics(INIT_POPULATIONS[state], str(path))
+        np.savez(path, temperatures=np.asarray(temps, dtype=float), spin=float(spin), **directional_rates)
+        dyn = RelaxationDynamics(init_populations(spin)[state], str(path))
         rows = [dyn.get_T1_fit_details(temp_index=i) for i in range(len(dyn.temperatures))]
     t1, t1_eig, source = zip(*rows)
     return np.asarray(t1, dtype=float), np.asarray(t1_eig, dtype=float), list(source)

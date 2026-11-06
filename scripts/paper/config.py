@@ -62,6 +62,10 @@ SYSTEMS = {
     "ClV_576": dict(defect="ClV", cell=576, step=0.05, label=r"ClV$^+$ (576)", packages={
         "AO": _pkg("ClV_576", 0.05, "all_bands", "20261103", "central"),
         "UO": _pkg("ClV_576", 0.05, "defect_band_approx", "20261103", "central")}),
+    # S = 3/2 (V2, k site), central differences like ClV_576; only in vsi_numbers.py so far, no figure lists it
+    "V_Si_128": dict(defect="V_Si", cell=128, step=0.05, label=r"V$_\mathrm{Si}^-$ (128)", packages={
+        "AO": _pkg("V_Si_128", 0.05, "all_bands", "20261105", "central"),
+        "UO": _pkg("V_Si_128", 0.05, "defect_band_approx", "20261105", "central")}),
 }
 
 
