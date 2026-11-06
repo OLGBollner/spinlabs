@@ -111,8 +111,9 @@ def s3(plt, data):
                     ax.set_title(col_titles[list(axes[row]).index(ax)], pad=8)
                 if row < 3:
                     ax.set_xlabel("")
-                if ax is not axes[row, 0]:
+                if ax is not axes[row, 0]:  # same omega_y axis as column 1: no labels next to the colour bars
                     ax.set_ylabel("")
+                    ax.tick_params(labelleft=False)
                 ax.text(0.04, 0.96, f"{C.SYSTEMS[s]['label']}\n${tex}$", transform=ax.transAxes, va="top",
                         fontsize=C.FONT - 1.5, color="white" if ax is not axes[row, 2] else "black")
     fig.tight_layout(h_pad=0.6, w_pad=0.8)
