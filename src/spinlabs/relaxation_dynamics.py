@@ -98,7 +98,10 @@ class RelaxationDynamics:
             raise ValueError(f"Incorrect temperature format: {T}")
         return temp_index
 
-    def fit_T1_exp(self, population, time_points, steady_state, T1_eigenval):
+    @staticmethod
+    def _fitted_T1(population, time_points, steady_state, T1_eigenval):
+        """T1 of a * exp(-t / T1) + c fitted to the population, or None when the fit fails."""
+
         def exp_func(t, T1, c, a):
             return a * np.exp(-t / T1) + c
 
@@ -111,12 +114,14 @@ class RelaxationDynamics:
                 # may overflow exp, and the result is checked below.
                 warnings.simplefilter("ignore", OptimizeWarning)
                 popt, _ = curve_fit(exp_func, time_points, population, p0=initial_guess, maxfev=5000)
-            extracted_T1 = float(popt[0])
-            if not np.isfinite(extracted_T1) or extracted_T1 <= 0:
-                return T1_eigenval
-            return extracted_T1
         except Exception:
-            return T1_eigenval
+            return None
+        extracted_T1 = float(popt[0])
+        return extracted_T1 if np.isfinite(extracted_T1) and extracted_T1 > 0 else None
+
+    def fit_T1_exp(self, population, time_points, steady_state, T1_eigenval):
+        fitted = self._fitted_T1(population, time_points, steady_state, T1_eigenval)
+        return T1_eigenval if fitted is None else fitted
 
     def simulate_relaxation(self, time_points, T=None, temp_index=None):
         if temp_index is None:
@@ -183,21 +188,30 @@ class RelaxationDynamics:
         return time_points
 
     def get_T1_fit(self, T=None, temp_index=None):
+        return self.get_T1_fit_details(T=T, temp_index=temp_index)[0]
+
+    def get_T1_fit_details(self, T=None, temp_index=None) -> tuple[float, float, str]:
+        """T1 (s) from the population fit, the eigenvalue T1 (s), and where the T1 came from.
+
+        The source is "fit" (exponential + offset fitted to the initial state's population), "eigenvalue"
+        (the fallback: no relaxation slower than 1/MIN_DECAY_RATE, or a failed fit) or "none" (0 K, NaN).
+        """
         T1_eigenval, _, _ = self.get_T1_eigenval(T=T, temp_index=temp_index)
         steady_state = self.get_steady_state(T=T, temp_index=temp_index)[self.population.argmax()]
 
         if T1_eigenval > 1.0 / MIN_DECAY_RATE:
-            return T1_eigenval
+            return T1_eigenval, T1_eigenval, "eigenvalue"
 
         time_points = self.get_time_estimate(T, temp_index)
         if time_points is None:
-            return np.nan
+            return np.nan, T1_eigenval, "none"
 
         population = self.simulate_relaxation(time_points, T=T, temp_index=temp_index)[:, self.population.argmax()]
 
-        T1_fit = self.fit_T1_exp(population, time_points, steady_state, T1_eigenval)
-
-        return T1_fit
+        fitted = self._fitted_T1(population, time_points, steady_state, T1_eigenval)
+        if fitted is None:
+            return T1_eigenval, T1_eigenval, "eigenvalue"
+        return fitted, T1_eigenval, "fit"
 
     def fit_rate_scaling(self, low_T, high_T, file=None):
         k_B = Cn.Boltzmann / Cn.e  # eV·K⁻¹
