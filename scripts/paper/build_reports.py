@@ -59,7 +59,7 @@ def production_block():
         "- T1: rate matrix A from the directional rates, p(t) = exp(A t) p0 from the polarized state (exact "
         "eigen-decomposition), a exp(-t/T1) + c fitted to p_init on 10000 points up to t = 10 T1_eig + 1/T "
         "(>= 5 T1_eig at every T, so no grid change was needed); the eigenvalue T1 only as fallback (fit failure or "
-        "T1_eig > 1e9 s). 0 K gives no T1 (NaN). Same procedure for computed, analytical and Lin 2021 curves",
+        "T1_eig > 1e9 s). 0 K gives no T1 (NaN). Same procedure for the computed curves, the Cambria ab initio curve and the Lin and Cambria data",
         "- V_Si^- excluded everywhere (its D_table row copied unchanged)",
         "- naming: AO = all orbitals (all_bands), UO = unpaired orbitals (defect_band_approx, 3/2 spin correction)",
         "",

@@ -33,7 +33,9 @@ FALLBACK_LIMIT_K = 50.0  # eigenvalue-fallback T1 points above this stop a figur
 QUOTE_T = (100.0, 300.0, 600.0)  # K, T1 values quoted in the text
 QUOTE_T_RATIO = (100.0, 300.0, 500.0)  # K, T1(fill)/T1(computed) quoted
 
-# Cambria et al., PRL 130, 256903 (2023): phonon-limited part (A3 = B3 = 0). Rates in s^-1, gaps in meV.
+# Cambria et al., PRL 130, 256903 (2023), supplement Table S3: their model fitted to their ab initio rates
+# (no sample-dependent terms, A3 = B3 = 0); their ab initio Omega is ~8x below experiment at room temperature.
+# Not Table S1 (the fit to the measured rates). Rates in s^-1, gaps in meV.
 # Omega: each 0 <-> +-1 transition; gamma: +1 <-> -1.
 CAMBRIA = dict(A1=0.0700e3, B1=0.910e3, Delta1=62.5, A2=0.169e3, B2=2.94e3, Delta2=139.0, A3=0.0, B3=0.0)
 

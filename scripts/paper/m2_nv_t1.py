@@ -1,4 +1,5 @@
-"""M2: NV- (512) T1 against temperature, AO and UO (m_s = 0), the Cambria et al. (2023) model, and experiment.
+"""M2: NV- (512) T1 against temperature, AO and UO (m_s = 0), the Cambria et al. (2023) ab initio
+prediction (their model fitted to their ab initio rates, supplement Table S3), and experiment.
 
 Experiment, only datasets in experimental_data/NV, never interpolated:
   Jarmola et al. 2012, samples S3 and S8 (1/T1 of an m_s = 0 polarization, as measured; S2 left out),
@@ -71,7 +72,7 @@ def main():
         curves[scheme] = (t1, r)
     cam, omega, gamma = cambria_rates(T)
     t1_cam, eig_cam, src_cam = t1_details(T, cam, STATE)
-    rec.t1_curve(f"Cambria model {STATE}", T, t1_cam, eig_cam, src_cam)
+    rec.t1_curve(f"Cambria ab initio {STATE}", T, t1_cam, eig_cam, src_cam)
     rec.check_fallbacks()
     exp = experiment()
 
@@ -80,7 +81,7 @@ def main():
         ok = np.isfinite(t1) & (t1 > 0)
         ax.plot(T[ok], t1[ok], color=C.COLORS[scheme], label=f"{scheme}")
     ok = np.isfinite(t1_cam) & (t1_cam > 0)
-    ax.plot(T[ok], t1_cam[ok], color=C.COLORS["cambria"], ls="-.", label="Cambria model")
+    ax.plot(T[ok], t1_cam[ok], color=C.COLORS["cambria"], ls="-.", label="Cambria et al. (ab initio)")
     for source, label, text, x, y in exp:
         color, marker = C.EXPERIMENT_STYLES[(source, label)]
         ax.plot(x, y, ls="none", marker=marker, ms=3.5, mfc=color, mec=C.EXP_EDGE, mew=0.5, label=text, zorder=3)
@@ -107,7 +108,8 @@ def main():
         "temperatures": f"{T[0]:g}-{T[-1]:g} K, step {T[1] - T[0]:g} K",
         "T1 extraction": "rate matrix -> dp/dt = A p from the polarized state, a exp(-t/T1) + c fitted to p_init "
                          "(t up to 10 T1_eig + 1/T, 10000 points); eigenvalue only as fallback",
-        "Cambria model": dict(C.CAMBRIA, reference="Cambria et al., PRL 130, 256903 (2023)",
+        "Cambria ab initio curve": dict(C.CAMBRIA, reference="Cambria et al., PRL 130, 256903 (2023), supplement Table S3: their model (Eqs. 4-5, no sample-dependent terms) fitted to their ab initio rates",
+                              note="the paper: ab initio Omega ~8 times smaller than measured at room temperature",
                               mapping="Omega on 0<->+1 and 0<->-1 (both directions), gamma on +1<->-1"),
         "experiment": {"found": ["Jarmola_2012 (S3, S8; S2 present but not used)", "Lin_2021 (Omega, gamma)",
                                  "Toyli_2012 (600 K)", "Cambria_2023_NVA (Omega, gamma; sample A)",
@@ -120,8 +122,8 @@ def main():
         "Debye C (1/meV^2)": {s: float(curves[s][1]["debye_C"]) for s in C.SCHEMES},
     }
     nums = {f"T1 {s} (s)": at(T, curves[s][0], C.QUOTE_T) for s in C.SCHEMES}
-    nums["T1 Cambria model (s)"] = at(T, t1_cam, C.QUOTE_T)
-    nums["Cambria Omega, gamma (1/s)"] = {"Omega": at(T, omega, C.QUOTE_T), "gamma": at(T, gamma, C.QUOTE_T)}
+    nums["T1 Cambria ab initio (Table S3) (s)"] = at(T, t1_cam, C.QUOTE_T)
+    nums["Cambria ab initio (Table S3) Omega, gamma (1/s)"] = {"Omega": at(T, omega, C.QUOTE_T), "gamma": at(T, gamma, C.QUOTE_T)}
     quoted = {}
     for source, label, text, x, y in exp:
         for Tq in C.QUOTE_T:

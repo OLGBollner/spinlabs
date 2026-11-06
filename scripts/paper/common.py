@@ -182,7 +182,7 @@ def t1_details(temps, directional_rates, state):
 
 
 def cambria_rates(temps, p=C.CAMBRIA):
-    """Directional rates of the Cambria et al. (2023) model: Omega on 0 <-> +-1, gamma on +1 <-> -1."""
+    """Directional rates of the Cambria et al. (2023) ab initio fit (Table S3): Omega on 0 <-> +-1, gamma on +1 <-> -1."""
     kT = Cn.k / Cn.e * 1e3 * np.asarray(temps, dtype=float)  # meV
 
     def nn(delta):
