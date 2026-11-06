@@ -1,14 +1,14 @@
-"""S5: T1(fill) / T1(all pairs computed) against temperature for NV- (64) and VV0 (128), AO, m_s = 0 and +-1.
+"""S5: T1(fill) / T1(computed) against temperature for NV- (64) and VV0 (128), AO, m_s = 0 and +-1.
 
 fill: diagonal + sqrt(V_ii V_jj) geometric-mean fill, kept on the computed pairs only (the filter of S3: like for
-like); all pairs: the computed pairs. Both with zero-gap pairs excluded, sigma 3.5 meV, Debye direct rate, no
+like); computed: the explicitly computed pairs. Both with zero-gap pairs excluded, sigma 3.5 meV, Debye direct rate, no
 first-order Raman. VV0 (128) was computed for |gap| <~ 10 meV only, so both curves cover that window.
 """
 
 import numpy as np
 
 import config as C
-from common import Record, at, directional, rates, t1_details
+from common import Record, at, directional, pair_coverage, rates, t1_details
 
 SYSTEMS = ("NV_64", "DiV_128")
 STATES = ("ms_0", "ms_1")
@@ -16,7 +16,7 @@ STATES = ("ms_0", "ms_1")
 
 def main():
     plt = C.style()
-    rec = Record("S5", "T1(fill)/T1(all pairs) vs temperature", "scripts/paper/s5_fill_ratio.py", "sm")
+    rec = Record("S5", "T1(fill)/T1(computed) vs temperature", "scripts/paper/s5_fill_ratio.py", "sm")
     T = C.TEMPERATURES
     ratio = {}
     for s in SYSTEMS:
@@ -38,7 +38,7 @@ def main():
             ok = np.isfinite(y) & (T >= 20)
             ax.plot(T[ok], y[ok], color=C.COLORS["AO"], ls=C.STATE_STYLES[st], label=C.STATE_LABELS[st])
         ax.axhline(1.0, color=C.COLORS["ref"], lw=0.7, ls=":")
-        ax.set_ylabel(r"$T_1^\mathrm{fill} / T_1^\mathrm{all\ pairs}$")
+        ax.set_ylabel(r"$T_1^\mathrm{fill} / T_1^\mathrm{computed}$")
         ax.set_title(C.SYSTEMS[s]["label"], pad=4)
         C.panel_letter(ax, k, x=0.0, y=1.02)
         ax.grid(True, ls=":", lw=0.5, alpha=0.6)
@@ -53,12 +53,13 @@ def main():
                     for s in SYSTEMS},
         "scheme": "AO", "sigma_meV": C.SIGMA, "direct": C.DIRECT, "zero-gap pairs": "excluded in both",
         "fill": "diagonal + geometric-mean fill, kept on the computed pairs only (S3 filter: computed pair keys "
-                "plus pairs with a nonzero computed coupling); NV_64: 17954 of 17955 pairs, DiV_128: computed window",
-        "all pairs": "computed pairs only (NV_64: 17954 of 17955; DiV_128: |gap| <~ 10 meV)",
+                "plus pairs with a nonzero computed coupling)",
+        "computed": "the explicitly computed pairs",
+        "pairs computed (AO)": {s: pair_coverage(s, "AO") for s in SYSTEMS},
         "initial states": "m_s = 0 and m_s = +1", "plotted from": "20 K (both T1 very large below)",
         "T1 extraction": "population fit, eigenvalue only as fallback",
     }
-    nums = {f"T1(fill)/T1(all pairs) {s} {st}": at(T, ratio[(s, st)], C.QUOTE_T_RATIO) for s in SYSTEMS for st in STATES}
+    nums = {f"T1(fill)/T1(computed) {s} {st}": at(T, ratio[(s, st)], C.QUOTE_T_RATIO) for s in SYSTEMS for st in STATES}
     rec.data["numbers"] = nums
     rec.write()
     for k, v in nums.items():

@@ -73,6 +73,32 @@ def mask_to_computed(system, scheme, coupling_npz):
     return int(np.count_nonzero(np.triu(mask))), n * (n + 1) // 2
 
 
+def pair_coverage(system, scheme):
+    """Which second-order pairs a package computed: complete or not, and if not, the |gap| window."""
+    from spinlabs.parsers import parse_phonon_data
+
+    f = np.asarray(parse_phonon_data(str(C.DATA / system / "phonon_data.npz")).frequencies_mev, dtype=float)
+    sym = [str(x) for x in parse_phonon_data(str(C.DATA / system / "phonon_data.npz")).symmetries]
+    d = np.load(C.package(system, scheme), allow_pickle=True)
+    keys = {tuple(sorted(map(int, k.split("_")))) for k in d["second_order"].item()}
+    run = sorted(int(k) for k in d["first_order"].item())
+    pairs = [(i, j) for a, i in enumerate(run) for j in run[a:]]
+    missing = [(i, j) for i, j in pairs if (i, j) not in keys]
+    not_run = sorted(set(sym[i] for i in range(len(f)) if i not in run))
+    head = (f"{len(f)} modes, {len(run)} run ({', '.join(sorted(set(sym[i] for i in run)))}"
+            + (f"; {', '.join(not_run)} partners from symmetry" if not_run else "") + f"); "
+            f"{len(keys)} of {len(pairs)} pairs among the run modes computed")
+    if not missing:
+        return head + ": all pairs"
+    if len(missing) <= 3:
+        return head + ": all except " + ", ".join(
+            f"({i + 1},{j + 1}) {sym[i]}x{sym[j]} at {f[i]:.2f}/{f[j]:.2f} meV" for i, j in missing)
+    full = min(abs(f[i] - f[j]) for i, j in missing)
+    top = max(abs(f[i] - f[j]) for i, j in keys)
+    return head + (f": every pair with |gap| < {full:.2f} meV, some with {full:.2f} <= |gap| <= {top:.2f} meV, "
+                   f"none beyond {top:.2f} meV")
+
+
 def _key(*parts):
     return hashlib.sha1(json.dumps(parts, sort_keys=True, default=str).encode()).hexdigest()[:12]
 

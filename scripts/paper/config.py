@@ -31,7 +31,7 @@ TEMPERATURES = np.arange(0.0, 601.0, 5.0)  # K
 PHONON_LIMITED_K = 125.0  # onset of the phonon-limited regime, dashed line in T1-vs-T figures
 FALLBACK_LIMIT_K = 50.0  # eigenvalue-fallback T1 points above this stop a figure before plotting
 QUOTE_T = (100.0, 300.0, 600.0)  # K, T1 values quoted in the text
-QUOTE_T_RATIO = (100.0, 300.0, 500.0)  # K, T1(fill)/T1(all pairs) quoted
+QUOTE_T_RATIO = (100.0, 300.0, 500.0)  # K, T1(fill)/T1(computed) quoted
 
 # Cambria et al., PRL 130, 256903 (2023): phonon-limited part (A3 = B3 = 0). Rates in s^-1, gaps in meV.
 # Omega: each 0 <-> +-1 transition; gamma: +1 <-> -1.
@@ -75,7 +75,8 @@ STATE_LABELS = {"ms_0": r"$m_s=0$", "ms_1": r"$m_s=\pm1$"}  # +1 and -1 relax al
 CHANNELS = ("V00", "Vpm", "V0pm")
 CHANNEL_LABELS = {"V00": r"$V_{00}$", "Vpm": r"$V_{+-}$", "V0pm": r"$V_{0\pm}$"}
 PAIR_LABELS = {  # second-order pair treatments of S2, S4, S5
-    "computed": "all pairs computed",
+    "computed": "computed pairs",
+    "fill-computed": "fill on computed pairs",
     "fill": "geometric-mean fill",
     "diagonal": "diagonal only",
     "diagonal-sqrt": "diagonal + fill",
@@ -88,13 +89,13 @@ COLORS = {
     "cambria": "#2b2b2b",  # analytical model
     "V00": "#0f766e", "Vpm": "#7048e8", "V0pm": "#c9a227",  # coupling channels
     "computed": "#0b0b0b", "fill": "#1baf7a", "diagonal-sqrt": "#8a5a2b", "diagonal": "#898781",
-    "no_axe": "#d6336c",  # pair treatments
+    "no_axe": "#d6336c", "fill-computed": "#b8457a",  # pair treatments
     "rho_line": "#d6336c",  # rho = 1 reference / rho line in scatter (not in the IPR Blues map)
     "longitudinal": "#c9a227", "transverse": "#0f766e", "other_modes": "#b8b6b0",  # Debye fit
     "ref": "#52514e",  # reference lines (125 K, rho = 1)
 }
 STATE_STYLES = {"ms_0": "-", "ms_1": "--"}
-PAIR_STYLES = {"computed": "-", "fill": "--", "diagonal-sqrt": "-.", "diagonal": ":", "no_axe": ":"}
+PAIR_STYLES = {"computed": "-", "fill": "--", "fill-computed": (0, (5, 1.5, 1, 1.5)), "diagonal-sqrt": "-.", "diagonal": ":", "no_axe": ":"}
 # Experimental datasets: (colour, marker), the same in every figure
 EXPERIMENT_STYLES = {
     ("Jarmola_2012", "S3"): ("#a8201a", "s"),

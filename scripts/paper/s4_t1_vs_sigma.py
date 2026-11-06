@@ -3,8 +3,11 @@
 Curves (second-order pairs):
   diagonal only        (l, l) pairs, zero-gap pairs kept (every diagonal pair is a zero-gap pair)
   diagonal + fill      diagonal + sqrt fill on every off-diagonal pair, zero-gap pairs kept
-  fill, no zero gap    the same, zero-gap pairs excluded by symmetry
-  all pairs computed   computed pairs, zero-gap pairs excluded (NV- (64) and VV0 (128) only)
+  fill, no zero gap    the same, zero-gap pairs excluded by symmetry (production fill)
+  computed pairs       the explicitly computed pairs, zero-gap pairs excluded (NV- (64) and VV0 (128) only)
+  fill on computed     the fill kept on the computed pairs only (the S3 filter), zero-gap pairs excluded
+                       (NV- (64) and VV0 (128) only)
+The first three curves are unfiltered.
 Row (a-c): Debye direct rate; row (d-f): Gaussian-smeared direct rate J(D). Vertical line: production sigma.
 Rates: direct + two-phonon (no first-order Raman); T1 by the population fit as everywhere else.
 """
@@ -16,7 +19,7 @@ from pathlib import Path
 import numpy as np
 
 import config as C
-from common import DIRECTIONS, Record, manager_for, t1_details
+from common import DIRECTIONS, Record, manager_for, mask_to_computed, pair_coverage, t1_details
 
 from spinlabs.constants import CONSTANTS
 from spinlabs.transition_rate import TransitionRate
@@ -29,8 +32,10 @@ CURVES = {  # key: (pairs, nogap, label)
     "diagonal": ("diagonal", False, "diagonal only"),
     "diagonal-sqrt": ("diagonal-sqrt", False, "diagonal + fill"),
     "fill": ("diagonal-sqrt", True, "fill, no zero-gap pairs"),
-    "computed": ("computed", True, "all pairs computed"),
+    "computed": ("computed", True, C.PAIR_LABELS["computed"]),
+    "fill-computed": ("fill-on-computed", True, C.PAIR_LABELS["fill-computed"]),
 }
+ONLY_WITH_COMPUTED = ("computed", "fill-computed")
 HAS_COMPUTED = {"NV_64", "DiV_128"}
 DIRECTS = ("debye", "gaussian")
 
@@ -46,6 +51,8 @@ def scan(system, pairs, nogap):
     with tempfile.TemporaryDirectory() as tmp:
         base = str(Path(tmp) / "coupling")
         manager.process_both_orders(output_filename=base)
+        if pairs == "fill-on-computed":
+            mask_to_computed(system, "AO", f"{base}.npz")
         calc = TransitionRate(f"{base}.npz")
         calc.data_2ph = calc.data
         calc.set_debye_from_spectrum(manager.spectrum)
@@ -71,7 +78,7 @@ def main():
     res = {}
     for s in SYSTEMS:
         for key, (pairs, nogap, _) in CURVES.items():
-            if key == "computed" and s not in HAS_COMPUTED:
+            if key in ONLY_WITH_COMPUTED and s not in HAS_COMPUTED:
                 continue
             sc = scan(s, pairs, nogap)
             for d in DIRECTS:
@@ -113,7 +120,7 @@ def main():
                 ax.set_ylabel(r"$T_1$(300 K) (s)" + "\n" + ("Debye direct" if d == "debye" else "Gaussian direct"))
     axes[0, 0].set_xlim(0, 12.5)
     h, l = axes[0, 0].get_legend_handles_labels()
-    fig.legend(h, l, loc="upper center", ncol=4, bbox_to_anchor=(0.5, 1.04))
+    fig.legend(h, l, loc="upper center", ncol=5, bbox_to_anchor=(0.5, 1.04), columnspacing=1.0, handlelength=2.6)
     fig.tight_layout(rect=(0, 0, 1, 0.97))
     rec.data["files"] = C.save(fig, C.SM, "S4_T1_vs_sigma")
 
@@ -123,7 +130,10 @@ def main():
         "scheme": "AO", "temperature_K": T, "initial state": STATE, "sigmas_meV": SIGMAS,
         "production sigma (vertical line)": C.SIGMA,
         "curves": {k: f"pairs={p}, zero-gap pairs {'excluded' if g else 'kept'}" for k, (p, g, _) in CURVES.items()},
-        "all pairs computed": "NV_64 (17954 of 17955 pairs) and DiV_128 (|gap| <~ 10 meV) only",
+        "computed pairs (AO)": {s: pair_coverage(s, "AO") for s in sorted(HAS_COMPUTED)},
+        "filtered curve": "fill on computed pairs: diagonal + geometric-mean fill, zeroed outside the computed pairs "
+                          "(computed pair keys plus pairs with a nonzero computed coupling, as S3); "
+                          "diagonal only, diagonal + fill and the production fill are unfiltered",
         "direct": "row 1 Debye (C from the folded acoustic modes, sigma independent); row 2 Gaussian-smeared J(D)",
         "processes": "direct + two-phonon (first-order Raman excluded)",
         "T1 extraction": "population fit, eigenvalue only as fallback",
