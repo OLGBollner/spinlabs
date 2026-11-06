@@ -41,10 +41,16 @@ class Phonons:
         return bose
 
 
+# Electron spin g-factor (NV ground state; isotropic to ~1e-4) and the Zeeman energy per field
+G_ELECTRON = 2.0028
+ZEEMAN_MEV_PER_MT = G_ELECTRON * Cn.physical_constants["Bohr magneton"][0] / Cn.e * 1e3 * 1e-3  # meV/mT
+
+
 class TransitionRate:
     # How the one-phonon (direct) rate gets the spectral function at the spin splitting D:
     #   "gaussian": the smeared J(D), only the Gaussian tails of modes tens of meV up (no physics at D)
-    #   "debye":    J(D) = C D^3 from the supercell's folded acoustic modes (set_debye_from_spectrum)
+    #   "debye":    J(E) = C E^3 from the supercell's folded acoustic modes (set_debye_from_spectrum): C from
+    #               V_0pm for |dm| = 1, from V_+- for |dm| = 2 (the +1 <-> -1 rate, non-zero only in a field)
     #   "none":     no direct rate
     DIRECT_MODELS = ("gaussian", "debye", "none")
 
@@ -55,7 +61,10 @@ class TransitionRate:
         self.data = None
         self.data_2ph = None
         self.direct = "gaussian"
-        self.debye_fit = None  # spinlabs.debye.DebyeFit, from set_debye_from_spectrum
+        self.debye_fit = None  # spinlabs.debye.DebyeFit of V_0pm (|dm| = 1), from set_debye_from_spectrum
+        self.debye_fit_pm = None  # ... of V_+- (|dm| = 2)
+        # Axial magnetic field along the defect axis (mT): E(m_s) = D m_s^2 + g mu_B B m_s (level_energies)
+        self.b_field_mt = 0.0
         if data_file:
             self.load_data(data_file)
         if two_phonon_data_file is not None:
@@ -124,19 +133,42 @@ class TransitionRate:
         """Fit the Debye direct-rate model (spinlabs.debye) to this coupling data's acoustic modes and use it.
 
         ``spectrum`` is the PhononSpectrum the couplings were computed on (same modes, same order): its
-        geometry and eigenvectors identify the folded acoustic modes. Returns the DebyeFit.
+        geometry and eigenvectors identify the folded acoustic modes. Fits V_0pm (the |dm| = 1 rates) and
+        V_+- (|dm| = 2, debye_fit_pm); returns the V_0pm DebyeFit.
         """
         from spinlabs.debye import MIN_ACOUSTIC_WEIGHT, debye_coefficient
 
         if self.data is None:
             raise ValueError("Data not loaded. Please call load_data() first.")
         freqs = np.asarray(self.data["freqs"], dtype=float) / CONSTANTS["meV2J"]
-        v0pm = np.asarray(self.data["V_0_pm"], dtype=float) / CONSTANTS["meV2J"]
-        self.debye_fit = debye_coefficient(
-            spectrum, freqs, v0pm, MIN_ACOUSTIC_WEIGHT if min_weight is None else min_weight
-        )
+        weight = MIN_ACOUSTIC_WEIGHT if min_weight is None else min_weight
+        couplings = {key: np.asarray(self.data[key], dtype=float) / CONSTANTS["meV2J"] for key in ("V_0_pm", "V_p_m")}
+        self.debye_fit = debye_coefficient(spectrum, freqs, couplings["V_0_pm"], weight)
+        self.debye_fit_pm = debye_coefficient(spectrum, freqs, couplings["V_p_m"], weight)
         self.direct = "debye"
         return self.debye_fit
+
+    def level_energies(self, d_mev: float) -> dict[int, float]:
+        """Spin level energies (meV): D m_s^2 + g mu_B B m_s, B the axial field b_field_mt."""
+        zeeman = ZEEMAN_MEV_PER_MT * self.b_field_mt
+        return {ms: d_mev * ms**2 + zeeman * ms for ms in self.ms_values}
+
+    def _direct_density(self, energy: float, dm: int, omega, J_0_pm, J_p_m) -> float:
+        """One-phonon spectral function (meV) at a level splitting ``energy`` for a |dm| transition."""
+        if energy <= 0 or dm not in (1, 2):
+            # degenerate levels: a phonon of zero energy, where a physical J vanishes (acoustic J ~ w^3, so
+            # J n ~ w^2 -> 0); the smeared J stays finite there only through its Gaussian tails
+            return 0.0
+        if self.direct == "gaussian":
+            return float(np.interp(energy, omega, J_0_pm if dm == 1 else J_p_m))
+        if self.direct == "debye":
+            fit = self.debye_fit if dm == 1 else self.debye_fit_pm
+            if fit is None:
+                raise ValueError("direct='debye' needs the acoustic fit: call set_debye_from_spectrum(spectrum)")
+            return fit.C * energy**3
+        if self.direct == "none":
+            return 0.0
+        raise ValueError(f"direct must be one of {self.DIRECT_MODELS}, got {self.direct!r}")
 
     def compute_transition_rates(self, T, omega, J_0_pm, J_p_m, J_0_0, omega_zfs):
         if self.data is None:
@@ -146,33 +178,23 @@ class TransitionRate:
         n = Phonons.bose_einstein(omega, T)
         mask = omega > 0.1
 
-        # Direct (one-phonon) process: energy conservation puts the phonon at the spin
-        # splitting, so the rate is 2pi/hbar J(dE) n(dE) (absorption, upward) or
-        # 2pi/hbar J(dE) (n(dE) + 1) (emission, downward). J is already a density, so it
-        # is read off at dE, not weighed with a second broadened delta.
-        # At zero field m_s = +1 and -1 lie at D and m_s = 0 at 0; D < 0 swaps which is upper.
+        # Direct (one-phonon) process: energy conservation puts the phonon at the splitting of the two levels,
+        # so the rate is 2pi/hbar J(dE) n(dE) (absorption, upward) or 2pi/hbar J(dE) (n(dE) + 1) (emission,
+        # downward). J is already a density, so it is read off at dE, not weighed with a second broadened
+        # delta. |dm| = 1 uses J_0pm, |dm| = 2 J_+- (in a field, where +1 and -1 split by 2 g mu_B B).
         f1 = 2 * np.pi / (Cn.hbar / CONSTANTS["meV2J"])
-        split = abs(float(omega_zfs))
-        if self.direct == "gaussian":
-            J_split = float(np.interp(split, omega, J_0_pm))
-        elif self.direct == "debye":
-            if self.debye_fit is None:
-                raise ValueError("direct='debye' needs the acoustic fit: call set_debye_from_spectrum(spectrum)")
-            J_split = self.debye_fit.C * split**3
-        elif self.direct == "none":
-            J_split = 0.0
-        else:
+        if self.direct not in self.DIRECT_MODELS:
             raise ValueError(f"direct must be one of {self.DIRECT_MODELS}, got {self.direct!r}")
-        n_split = self._bose_at(split, T)
-        up, down = f1 * J_split * n_split, f1 * J_split * (n_split + 1)
-        zero_is_lower = omega_zfs >= 0
+        levels = self.level_energies(float(omega_zfs))
         first = self.transition_rate["first_order"]
-        first["0_to_1"] = first["0_to_-1"] = up if zero_is_lower else down
-        first["1_to_0"] = first["-1_to_0"] = down if zero_is_lower else up
-        # +1 and -1 are degenerate at zero field: a direct process would need a phonon of
-        # zero energy, where a physical spectral function vanishes (acoustic J ~ w^3, so
-        # J n ~ w^2 -> 0). The smeared J stays finite there only through its Gaussian tails.
-        first["1_to_-1"] = first["-1_to_1"] = 0.0
+        for ms in self.ms_values:
+            for ms_prime in self.ms_values:
+                if ms == ms_prime:
+                    continue
+                gap = levels[ms_prime] - levels[ms]
+                J_gap = self._direct_density(abs(gap), abs(ms - ms_prime), omega, J_0_pm, J_p_m)
+                n_gap = self._bose_at(abs(gap), T)
+                first[f"{ms}_to_{ms_prime}"] = f1 * J_gap * (n_gap if gap > 0 else n_gap + 1)
 
         f2_factor = 2 * f1 * res
 
@@ -305,7 +327,8 @@ class TransitionRate:
         """Temperature-independent input of compute_two_phonon_rates: J2 on each transition's energy line.
 
         A transition m_s -> m_s' changes the spin energy by gap = E(m_s') - E(m_s), with
-        E(+-1) = D and E(0) = 0 at zero field, so the Raman line is w_absorbed - w_emitted = gap.
+        E(m_s) = D m_s^2 + g mu_B B m_s (level_energies; E(+-1) = D, E(0) = 0 at zero field), so the Raman line
+        is w_absorbed - w_emitted = gap.
         |dm| = 1 uses V2_0pm, |dm| = 2 V2_+-. ``res`` defaults to sigma/20 (at most 0.05 meV),
         fine against the sigma/sqrt2 width along the line.
 
@@ -327,12 +350,13 @@ class TransitionRate:
             zero_gap = self.symmetry_zero_gap_pairs(len(freqs), degenerate_groups)
             weights = {dm: np.where(zero_gap, 0.0, w) for dm, w in weights.items()}
 
+        levels = self.level_energies(D)
         lines, cache = {}, {}
         for ms in self.ms_values:
             for ms_prime in self.ms_values:
                 if ms == ms_prime:
                     continue
-                dm, gap = abs(ms - ms_prime), D * (ms_prime**2 - ms**2)
+                dm, gap = abs(ms - ms_prime), levels[ms_prime] - levels[ms]
                 if (dm, gap) not in cache:
                     cache[(dm, gap)] = self.line_spectral_density(freqs, weights[dm], sigma, gap, res)
                 lines[f"{ms}_to_{ms_prime}"] = (*cache[(dm, gap)], gap)

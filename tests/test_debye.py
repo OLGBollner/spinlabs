@@ -158,3 +158,45 @@ def test_set_debye_from_spectrum_uses_the_couplings_of_the_data():
     fit = calc.set_debye_from_spectrum(spectrum)
     assert calc.direct == "debye" and calc.debye_fit is fit
     assert fit.C == pytest.approx(debye_coefficient(spectrum, freqs, v).C, rel=1e-9)
+
+
+def test_axial_field_gives_a_c_pm_double_quantum_direct_rate():
+    """In a field B, +1 and -1 split by 2 g mu_B B: the +1 <-> -1 rate uses C_+- at that splitting, and the
+    0 <-> +-1 rates their own splittings D +- g mu_B B."""
+    from spinlabs.transition_rate import ZEEMAN_MEV_PER_MT
+
+    calc = _calculator()
+    fit = lambda C: DebyeFit(C=C, q=0.44, branches={}, acoustic_modes=np.array([]), weights=np.array([]))  # noqa: E731
+    calc.debye_fit, calc.debye_fit_pm, calc.direct = fit(2e-15), fit(5e-15), "debye"
+    calc.b_field_mt = 100.0
+    T = 300.0
+    D = calc.data["zfs"] / CONSTANTS["meV2J"]
+    z = ZEEMAN_MEV_PER_MT * 100.0
+    assert z == pytest.approx(2.0028 * 5.7883818060e-2 * 0.1, rel=1e-8)  # g mu_B B in meV
+    assert calc.level_energies(D) == pytest.approx({1: D + z, 0: 0.0, -1: D - z})
+    omega, j0pm, jpm, j00 = calc.get_spectral_density(res=0.05, sigma=3.0)
+    calc.compute_transition_rates(T, omega, j0pm, jpm, j00, D)
+    first = calc.transition_rate["first_order"]
+    f1 = 2 * np.pi / (Cn.hbar / CONSTANTS["meV2J"])
+    n = lambda E: 1 / np.expm1(E / (Cn.k / Cn.e * 1000 * T))  # noqa: E731
+    assert first["-1_to_1"] == pytest.approx(f1 * 5e-15 * (2 * z) ** 3 * n(2 * z), rel=1e-9)
+    assert first["1_to_-1"] == pytest.approx(f1 * 5e-15 * (2 * z) ** 3 * (n(2 * z) + 1), rel=1e-9)
+    # with D > g mu_B B, 0 is lowest: both 0 -> +-1 absorb, at D + z and D - z
+    assert first["0_to_1"] == pytest.approx(f1 * 2e-15 * (D + z) ** 3 * n(D + z), rel=1e-9)
+    assert first["0_to_-1"] == pytest.approx(f1 * 2e-15 * (D - z) ** 3 * n(D - z), rel=1e-9)
+    # the two-phonon lines follow the same gaps
+    calc.data_2ph = {"V2_0_pm": np.eye(2) * CONSTANTS["meV2J"], "V2_p_m": np.eye(2) * CONSTANTS["meV2J"]}
+    lines = calc.get_line_spectral_density(3.0)
+    assert lines["1_to_-1"][2] == pytest.approx(-2 * z) and lines["0_to_-1"][2] == pytest.approx(D - z)
+
+
+def test_zero_field_keeps_plus_minus_one_degenerate():
+    calc = _calculator()
+    calc.debye_fit = DebyeFit(C=2e-15, q=0.44, branches={}, acoustic_modes=np.array([]), weights=np.array([]))
+    calc.direct = "debye"  # no C_+- fit needed: the +1 <-> -1 splitting is zero
+    D = calc.data["zfs"] / CONSTANTS["meV2J"]
+    omega, j0pm, jpm, j00 = calc.get_spectral_density(res=0.05, sigma=3.0)
+    calc.compute_transition_rates(300.0, omega, j0pm, jpm, j00, D)
+    first = calc.transition_rate["first_order"]
+    assert first["1_to_-1"] == first["-1_to_1"] == 0.0
+    assert first["0_to_1"] == first["0_to_-1"] > 0.0
