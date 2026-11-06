@@ -92,7 +92,7 @@ def pair_coverage(system, scheme):
         return head + ": all pairs"
     if len(missing) <= 3:
         return head + ": all except " + ", ".join(
-            f"({i + 1},{j + 1}) {sym[i]}x{sym[j]} at {f[i]:.2f}/{f[j]:.2f} meV" for i, j in missing)
+            f"({i + 1},{j + 1}) {sym[i]} x {sym[j]} at {f[i]:.2f}/{f[j]:.2f} meV" for i, j in missing)
     full = min(abs(f[i] - f[j]) for i, j in missing)
     top = max(abs(f[i] - f[j]) for i, j in keys)
     return head + (f": every pair with |gap| < {full:.2f} meV, some with {full:.2f} <= |gap| <= {top:.2f} meV, "
