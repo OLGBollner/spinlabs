@@ -84,6 +84,7 @@ OUTPUT = Path("figures/t1/DiV_t1_vs_experiment_300K.png")
 STATE_TITLES = {"ms_0": "$m_s=0$", "ms_1": "$m_s=+1$", "ms_-1": "$m_s=-1$"}
 DIRECTIONS = ("0_to_1", "0_to_-1", "1_to_0", "-1_to_0", "1_to_-1", "-1_to_1")
 COLORS = ["#2a78d6", "#1baf7a", "#eb6834", "#8e5bd0", "#c9a227", "#555555"]
+LINESTYLES = {"all_bands": "-", "defect_band_approx": "--"}  # AE solid, UE dashed
 # Experimental data: one colour per source (paper), one marker per series within it. Dark red, yellow and
 # near-black, validated all-pairs together with the first two curves (blue, aqua): worst pair Delta E 22.9
 # normal, 9.1 colour-blind. Dark red sits near the third curve colour (orange), so with three or more cases
@@ -187,7 +188,8 @@ def main():
         label, description = legend_label(case), case_description(case)
         y = 1.0 / t1 if PLOT == "rate" else t1
         ok = np.isfinite(y) & (y > 0)
-        ax.plot(TEMPERATURES[ok], y[ok], color=COLORS[n % len(COLORS)], lw=2.2, label=label)
+        ax.plot(TEMPERATURES[ok], y[ok], color=COLORS[n % len(COLORS)], ls=LINESTYLES[case["method"]], lw=2.2,
+                label=label)
         result["cases"].append({**case, "package": str(package(case)), "convention": convention, "label": label,
                                 "description": description,
                                 "t1_s": [float(v) for v in t1]})
