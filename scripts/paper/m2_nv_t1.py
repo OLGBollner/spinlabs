@@ -69,7 +69,7 @@ def main():
         ax.plot(x, y, ls="none", marker=marker, ms=3.5, mfc=color, mec=C.EXP_EDGE, mew=0.5, label=text, zorder=3)
     C.phonon_limited_line(ax)
     ax.set_yscale("log")
-    ax.set_xlim(0, 600)
+    ax.set_xlim(0, 605)  # room for the full markers of the 600 K points
     lo = min(np.nanmin(c[0][(T >= 100)]) for c in curves.values())
     ax.set_ylim(lo / 3, 1e3)
     ax.set_xlabel("Temperature (K)")
