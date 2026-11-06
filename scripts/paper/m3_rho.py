@@ -1,0 +1,91 @@
+"""M3: coupling ratio rho = sqrt(sum V_UO^2 / sum V_AO^2) for NV- (512), VV0 (128), ClV+ (576).
+
+(a) first order, over the modes; (b) second order, over the diagonal pairs V^(ll). Channels V00, V+-, V0+-.
+Error bar: weighted SD of the per-mode (per-pair) ratios r = |V_UO| / |V_AO| about rho, weights V_AO^2
+(modes with V_AO = 0 carry no weight). No mode filter: every mode / diagonal pair of the production package.
+Couplings in MHz as they enter the rates (ZFSManager of the production packages).
+"""
+
+import numpy as np
+
+import config as C
+from common import Record, couplings
+
+SYSTEMS = ("NV_512", "DiV_128", "ClV_576")
+KEYS = {1: {"V00": "V_0_0", "Vpm": "V_p_m", "V0pm": "V_0_pm"},
+        2: {"V00": "V2_0_0", "Vpm": "V2_p_m", "V0pm": "V2_0_pm"}}
+
+
+def channel_values(system, scheme, order, ch):
+    c = couplings(system, scheme)
+    v = np.asarray(c[KEYS[order][ch]], dtype=float)
+    return np.abs(np.diag(v) if order == 2 else v)
+
+
+def rho_sd(ao, uo):
+    w = ao**2
+    if w.sum() == 0:
+        return np.nan, np.nan, 0
+    rho = float(np.sqrt((uo**2).sum() / w.sum()))
+    m = ao > 0
+    r = uo[m] / ao[m]
+    sd = float(np.sqrt((w[m] * (r - rho) ** 2).sum() / w[m].sum()))
+    return rho, sd, int(m.sum())
+
+
+def compute():
+    out = {}
+    for order in (1, 2):
+        for s in SYSTEMS:
+            for ch in C.CHANNELS:
+                ao, uo = (channel_values(s, sch, order, ch) for sch in ("AO", "UO"))
+                if len(ao) == 0 or len(uo) == 0 or not np.any(ao):
+                    raise SystemExit(f"{s}: no order-{order} {ch} couplings for AO or UO")
+                rho, sd, n = rho_sd(ao, uo)
+                out[(order, s, ch)] = dict(rho=rho, sd=sd, n=n)
+    return out
+
+
+def main():
+    plt = C.style()
+    rec = Record("M3", "Coupling ratio rho, first and second order", "scripts/paper/m3_rho.py", "main")
+    res = compute()
+    fig, axes = plt.subplots(1, 2, figsize=(C.SINGLE, 1.9), sharey=True)
+    offsets = {"V00": 0.22, "Vpm": 0.0, "V0pm": -0.22}
+    ys = {s: len(SYSTEMS) - 1 - k for k, s in enumerate(SYSTEMS)}
+    for k, (ax, order) in enumerate(zip(axes, (1, 2))):
+        for s in SYSTEMS:
+            for ch in C.CHANNELS:
+                v = res[(order, s, ch)]
+                ax.errorbar(v["rho"], ys[s] + offsets[ch], xerr=v["sd"], fmt=C.CHANNEL_MARKERS[ch], ms=3.5,
+                            color=C.COLORS[ch], mec=C.COLORS[ch], elinewidth=0.8, capsize=1.5,
+                            label=C.CHANNEL_LABELS[ch] if (k == 0 and s == SYSTEMS[0]) else None)
+        ax.axvline(1.0, color=C.COLORS["ref"], ls="--", lw=0.8, zorder=0)
+        ax.set_xlabel(r"$\rho$")
+        ax.set_xlim(left=0)
+        ax.set_title("first order" if order == 1 else r"second order, $V^{(ll)}$", fontsize=C.FONT - 1)
+        C.panel_letter(ax, k, x=0.0, y=1.02)
+        ax.grid(True, axis="x", ls=":", lw=0.5, alpha=0.6)
+    axes[0].set_yticks([ys[s] for s in SYSTEMS], [C.SYSTEMS[s]["label"] for s in SYSTEMS])
+    axes[0].set_ylim(-0.5, len(SYSTEMS) - 0.5)
+    fig.legend(loc="upper center", ncol=3, bbox_to_anchor=(0.6, 1.1), fontsize=C.FONT - 1, handletextpad=0.2)
+    fig.tight_layout()
+    rec.data["files"] = C.save(fig, C.MAIN, "M3_rho")
+    rec.data["settings"] = {
+        "systems": {s: f"{C.SYSTEMS[s]['label']}, step {C.SYSTEMS[s]['step']:g}, AO "
+                       f"{C.SYSTEMS[s]['packages']['AO']}, UO {C.SYSTEMS[s]['packages']['UO']}" for s in SYSTEMS},
+        "rho": "sqrt(sum V_UO^2 / sum V_AO^2) over all modes (first order) or all diagonal pairs (second order)",
+        "error bar": "sqrt(sum w (r - rho)^2 / sum w), r = |V_UO|/|V_AO| per mode/pair, w = V_AO^2",
+        "mode filter": "none",
+        "ClV_576 second order": "diagonal V^(ll) from central differences (f(+Q) + f(-Q) - 2 f(0)) / Q^2",
+        "units": "couplings in MHz (rho is dimensionless)",
+    }
+    rec.data["numbers"] = {f"order {o}": {s: {ch: res[(o, s, ch)] for ch in C.CHANNELS} for s in SYSTEMS}
+                           for o in (1, 2)}
+    rec.write()
+    for (o, s, ch), v in res.items():
+        print(f"order {o} {s:8s} {ch:5s} rho = {v['rho']:.3f} +- {v['sd']:.3f} (n = {v['n']})")
+
+
+if __name__ == "__main__":
+    main()
