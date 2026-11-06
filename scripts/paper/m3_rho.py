@@ -1,12 +1,13 @@
 """M3: coupling ratio rho = sqrt(sum V_UO^2 / sum V_AO^2) for NV- (512), VV0 (128), ClV+ (576).
 
 (a) first order, over the modes; (b) second order, over the diagonal pairs V^(ll). Channels V00, V+-, V0+-.
-Error bar: weighted SD of the per-mode (per-pair) ratios r = |V_UO| / |V_AO| about rho, weights V_AO^2
-(modes with V_AO = 0 carry no weight). No mode filter: every mode / diagonal pair of the production package.
+The weighted SD of the per-mode (per-pair) ratios r = |V_UO| / |V_AO| about rho, weights V_AO^2 (modes with
+V_AO = 0 carry no weight), goes to the numbers file only; it is not drawn. No mode filter: every mode / diagonal pair of the production package.
 Couplings in MHz as they enter the rates (ZFSManager of the production packages).
 """
 
 import numpy as np
+from matplotlib.ticker import MultipleLocator
 
 import config as C
 from common import Record, couplings
@@ -57,12 +58,12 @@ def main():
         for s in SYSTEMS:
             for ch in C.CHANNELS:
                 v = res[(order, s, ch)]
-                ax.errorbar(v["rho"], ys[s] + offsets[ch], xerr=v["sd"], fmt=C.CHANNEL_MARKERS[ch], ms=3.5,
-                            color=C.COLORS[ch], mec=C.COLORS[ch], elinewidth=0.8, capsize=1.5,
-                            label=C.CHANNEL_LABELS[ch] if (k == 0 and s == SYSTEMS[0]) else None)
+                ax.plot(v["rho"], ys[s] + offsets[ch], ls="none", marker=C.CHANNEL_MARKERS[ch], ms=4,
+                        color=C.COLORS[ch], label=C.CHANNEL_LABELS[ch] if (k == 0 and s == SYSTEMS[0]) else None)
         ax.axvline(1.0, color=C.COLORS["ref"], ls="--", lw=0.8, zorder=0)
         ax.set_xlabel(r"$\rho$")
-        ax.set_xlim(left=0)
+        ax.set_xlim(0, 1.1 * max(res[(order, s, ch)]["rho"] for s in SYSTEMS for ch in C.CHANNELS))
+        ax.xaxis.set_major_locator(MultipleLocator(0.5 if order == 1 else 1.0))
         ax.set_title("first order" if order == 1 else r"second order, $V^{(ll)}$", fontsize=C.FONT - 1)
         C.panel_letter(ax, k, x=0.0, y=1.02)
         ax.grid(True, axis="x", ls=":", lw=0.5, alpha=0.6)
@@ -75,7 +76,8 @@ def main():
         "systems": {s: f"{C.SYSTEMS[s]['label']}, step {C.SYSTEMS[s]['step']:g}, AO "
                        f"{C.SYSTEMS[s]['packages']['AO']}, UO {C.SYSTEMS[s]['packages']['UO']}" for s in SYSTEMS},
         "rho": "sqrt(sum V_UO^2 / sum V_AO^2) over all modes (first order) or all diagonal pairs (second order)",
-        "error bar": "sqrt(sum w (r - rho)^2 / sum w), r = |V_UO|/|V_AO| per mode/pair, w = V_AO^2",
+        "weighted SD (numbers only, not drawn)": "sqrt(sum w (r - rho)^2 / sum w), r = |V_UO|/|V_AO| per "
+                                                  "mode/pair, w = V_AO^2",
         "mode filter": "none",
         "ClV_576 second order": "diagonal V^(ll) from central differences (f(+Q) + f(-Q) - 2 f(0)) / Q^2",
         "units": "couplings in MHz (rho is dimensionless)",
