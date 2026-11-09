@@ -261,6 +261,14 @@ def insert_run_log(
     conn.commit()
 
 
+def insert_run_logs(conn: sqlite3.Connection, rows: list[tuple[int | None, str, str, str, str]]) -> None:
+    """Append several log records ``(run_id, ts, level, logger, message)`` to ``run_logs`` in one commit."""
+    if not rows:
+        return
+    conn.executemany("INSERT INTO run_logs (run_id, ts, level, logger, message) VALUES (?, ?, ?, ?, ?)", rows)
+    conn.commit()
+
+
 def list_run_logs(conn: sqlite3.Connection, run_id: int | None = None) -> list[dict]:
     """Return log records from ``run_logs`` (optionally for one run), oldest first."""
     if run_id is None:
