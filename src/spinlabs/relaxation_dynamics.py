@@ -74,14 +74,17 @@ def t1_file_name(init_state: str) -> str:
 
 
 def find_t1_files(run_dir: str | Path) -> list[Path]:
-    """T1 result files in a run directory, in :data:`INIT_STATES` order.
+    """T1 result files in a run directory: the :data:`INIT_STATES` of S = 1 in that order, then any other
+    state (S = 3/2: ms_pm1_2, ms_pm3_2) by name.
 
     Runs solve the dynamics for several initial states into
     ``t1_relaxation_<state>.npz``; older runs hold a single
     ``t1_relaxation.npz``, which is returned when no per-state file exists.
     """
     run_dir = Path(run_dir)
-    files = [run_dir / t1_file_name(s) for s in INIT_STATES if (run_dir / t1_file_name(s)).exists()]
+    prefix = t1_file_name("")[: -len(".npz")]
+    found = {p.name[len(prefix) : -len(".npz")]: p for p in run_dir.glob(f"{prefix}?*.npz")}
+    files = [found.pop(s) for s in INIT_STATES if s in found] + [found[s] for s in sorted(found)]
     legacy = run_dir / "t1_relaxation.npz"
     return files or ([legacy] if legacy.exists() else [])
 

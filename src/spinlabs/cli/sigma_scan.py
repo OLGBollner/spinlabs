@@ -191,7 +191,7 @@ def _plot_temperature(manager, t1, temps, states, path: Path, default_sigma) -> 
     import matplotlib.pyplot as plt
     from matplotlib.colors import LogNorm, Normalize
 
-    from spinlabs.plotter import _INIT_STATE_LABELS
+    from spinlabs.plotter import init_state_label
 
     sigmas = np.array(sorted(t1))
     panels: list[list[str]] = []
@@ -212,7 +212,7 @@ def _plot_temperature(manager, t1, temps, states, path: Path, default_sigma) -> 
             y = _gaps_as_nan(t1[sigma][group[0]])
             default = np.isclose(sigma, default_sigma)
             ax.plot(temps, y, "-", lw=2.6 if default else 1.6, color=cmap(norm(sigma)), zorder=3 if default else 2)
-        name = "$m_s=\\pm1$" if sorted(group) == ["ms_-1", "ms_1"] else ", ".join(_INIT_STATE_LABELS.get(g, g) for g in group)
+        name = "$m_s=\\pm1$" if sorted(group) == ["ms_-1", "ms_1"] else ", ".join(init_state_label(g) for g in group)
         ax.set_title(name, fontsize=10)
         ax.set_yscale("log")
         ax.set_xlabel("Temperature (K)")
@@ -235,7 +235,7 @@ def _plot(manager, t1, temps, states, path: Path, default_sigma) -> None:
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
-    from spinlabs.plotter import _INIT_STATE_LABELS
+    from spinlabs.plotter import init_state_label
 
     sigmas = np.array(list(t1))
     fig, ax = plt.subplots(figsize=(7, 4.5))
@@ -252,7 +252,7 @@ def _plot(manager, t1, temps, states, path: Path, default_sigma) -> None:
             else:
                 curves.append(([state], m, y))
     for k, (group, m, y) in enumerate(curves):
-        name = "$m_s=\\pm1$" if sorted(group) == ["ms_-1", "ms_1"] else ", ".join(_INIT_STATE_LABELS.get(g, g) for g in group)
+        name = "$m_s=\\pm1$" if sorted(group) == ["ms_-1", "ms_1"] else ", ".join(init_state_label(g) for g in group)
         label = name + (f", {temps[m]:g} K" if len(temps) > 1 else "")
         ax.plot(sigmas, _gaps_as_nan(y), styles[m % len(styles)], marker="o", ms=5, lw=2,
                 color=colors[k % len(colors)], label=label)

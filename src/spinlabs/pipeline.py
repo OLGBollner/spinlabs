@@ -802,6 +802,7 @@ def _execute_pipeline(
             calc_method=calc_method,
             order=analyzed,
             init_state=state,
+            spin=spin,
             pert_scale=pert_eff if pert_eff is not None else np.nan,
             sigma_mev=sigma,
             temperatures=valid_temps_arr,
