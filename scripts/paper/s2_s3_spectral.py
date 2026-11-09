@@ -132,7 +132,7 @@ def main():
         "sets": "all computed pairs; diagonal + geometric-mean fill on the computed pairs only (like for like); "
                 "computed without A x E pairs",
         "zero-gap pairs": "left out of every set (as in the production rates)",
-        "DiV_128 computed pairs": "|gap| <~ 10 meV (pairs further apart were not run)",
+        "DiV_128 computed pairs": "every pair with |gap| < 19.9 meV (pairs further apart were not run)",
     }
     rec, nums = s2(plt, data)
     rec.data["settings"] = settings

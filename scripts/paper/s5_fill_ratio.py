@@ -2,7 +2,7 @@
 
 fill: diagonal + sqrt(V_ii V_jj) geometric-mean fill, kept on the computed pairs only (the filter of S3: like for
 like); computed: the explicitly computed pairs. Both with zero-gap pairs excluded, sigma 3.5 meV, Debye direct rate, no
-first-order Raman. VV0 (128) was computed for |gap| <~ 10 meV only, so both curves cover that window.
+first-order Raman. VV0 (128) was computed for |gap| <~ 20 meV only (AO), so both curves cover that window.
 """
 
 import numpy as np

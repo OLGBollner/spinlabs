@@ -1,6 +1,6 @@
 """M4: T1 against temperature for VV0 (128) and ClV+ (576), AO and UO, m_s = 0 and m_s = +-1. No experiment.
 
-Production settings (config.py). VV0: computed second-order pairs (|gap| up to ~10 meV) + geometric-mean fill for
+Production settings (config.py). VV0: computed second-order pairs (|gap| up to ~20 meV AO, ~24 meV UO) + geometric-mean fill for
 the rest; ClV+ (576): diagonal pairs from central differences + fill for every off-diagonal pair.
 """
 
@@ -53,7 +53,7 @@ def main():
                     for s in SYSTEMS},
         "conventions": {f"{s} {sch}": str(rates(s, sch)["convention"]) for s in SYSTEMS for sch in C.SCHEMES},
         "sigma_meV": C.SIGMA, "direct": C.DIRECT, "zero-gap pairs": "excluded by symmetry",
-        "pairs": {"DiV_128": "computed pairs (|gap| <~ 10 meV AO, 11 meV UO) + geometric-mean fill for the rest",
+        "pairs": {"DiV_128": "computed pairs (every pair with |gap| < 19.9 meV AO, < 24.1 meV UO) + geometric-mean fill for the rest",
                   "ClV_576": "diagonal from central differences + geometric-mean fill for all off-diagonal pairs"},
         "first-order Raman": "excluded", "initial states": "m_s = 0 and m_s = +1 (= -1 at zero field)",
         "temperatures": f"{T[0]:g}-{T[-1]:g} K, step {T[1] - T[0]:g} K",

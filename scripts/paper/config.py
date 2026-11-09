@@ -56,8 +56,8 @@ SYSTEMS = {
         "AO": _pkg("NV_512", 0.05, "all_bands", "20261030"),
         "UO": _pkg("NV_512", 0.05, "defect_band_approx", "20261030")}),
     "DiV_128": dict(defect="DiV", cell=128, step=0.05, label=r"VV$^0$ (128)", packages={
-        "AO": _pkg("DiV_128", 0.05, "all_bands", "20261105"),
-        "UO": _pkg("DiV_128", 0.05, "defect_band_approx", "20261105")}),
+        "AO": _pkg("DiV_128", 0.05, "all_bands", "20261109"),
+        "UO": _pkg("DiV_128", 0.05, "defect_band_approx", "20261109")}),
     # central differences (+-Q first-order runs): diagonal second order (f+ + f- - 2 f0)/Q^2, no off-diagonal runs
     "ClV_576": dict(defect="ClV", cell=576, step=0.05, label=r"ClV$^+$ (576)", packages={
         "AO": _pkg("ClV_576", 0.05, "all_bands", "20261103", "central"),
