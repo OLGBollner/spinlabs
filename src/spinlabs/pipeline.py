@@ -311,20 +311,28 @@ def load_raw_inputs(
     return raw_data, spectrum, ph_path
 
 
-DEFAULT_SIGMA_MEV = 7.5  # Gaussian broadening of the spectral functions (meV)
+DEFAULT_SIGMA_MEV = 3.5  # Gaussian broadening of the spectral functions (meV)
+ALL_PROCESSES = ("first_order", "second_order", "two_phonon")
+# Production settings of the paper figures (scripts/paper/config.py), the defaults of `spinlabs run`:
+# Debye direct rate, zero-gap pairs left out of the two-phonon lines, sqrt(V_ii V_jj) fill of the pairs not
+# run, inconsistent pairs excluded, T1 from the direct and two-phonon rates (no first-order Raman), 0-600 K.
+PRODUCTION_DIRECT = "debye"
+PRODUCTION_PROCESSES = ("first_order", "two_phonon")
+PRODUCTION_T_END, PRODUCTION_T_STEP = 600.0, 5.0
 
 
 def temperature_grid(
     t_start: float = 0.0, t_end: float = 300.0, t_step: float = 10.0, temperatures: Sequence[float] | None = None
 ) -> np.ndarray:
-    """The run's temperature grid in K: ``temperatures`` if given, else t_start..t_end (finer below 1 K)."""
+    """The run's temperature grid in K: ``temperatures`` if given, else t_start..t_end in steps of t_step (finer
+    below 1 K)."""
     if temperatures is not None:
         return np.asarray(temperatures, dtype=float)
-    if t_start < 1.0:
+    grid = np.arange(t_start, t_end + t_step / 2, t_step)  # t_start, t_start + t_step, ..., t_end
+    if t_start < 1.0:  # finer below 1 K
         low_range = np.arange(t_start, 1.0, max(0.01, t_step / 100))
-        high_range = np.arange(1.0 + t_step, t_end + t_step, t_step)
-        return np.unique(np.concatenate([low_range, high_range]))
-    return np.arange(t_start, t_end + t_step, t_step)
+        return np.unique(np.concatenate([low_range, grid[grid >= 1.0]]))
+    return grid
 
 
 def compute_rates(
@@ -338,6 +346,7 @@ def compute_rates(
     direct: str = "gaussian",
     b_field_mt: float = 0.0,
     spectrum=None,
+    processes: Sequence[str] | None = None,
 ) -> tuple[np.ndarray, dict, dict]:
     """Transition rates of a coupling file at each temperature.
 
@@ -349,9 +358,14 @@ def compute_rates(
     (i, i) and degenerate partners, are left out there. ``direct`` picks the
     one-phonon rate (TransitionRate.DIRECT_MODELS); "debye" needs the ``spectrum`` the
     couplings were computed on. ``b_field_mt`` is an axial magnetic field (mT): it splits +1 and -1,
-    which gives the +1 <-> -1 direct rate (C_+- with "debye") and moves every gap. Returns the temperatures with a result, the total rates
-    per process and the directional rates.
+    which gives the +1 <-> -1 direct rate (C_+- with "debye") and moves every gap. The directional rates (which
+    T1 is solved from) sum ``processes`` (default: all of ALL_PROCESSES); the total rates keep every process.
+    Returns the temperatures with a result, the total rates per process and the directional rates.
     """
+    processes = tuple(ALL_PROCESSES if processes is None else processes)
+    unknown = [p for p in processes if p not in ALL_PROCESSES]
+    if unknown:
+        raise ValueError(f"unknown process(es) {unknown}: choose from {ALL_PROCESSES}")
     two_ph_p = Path(two_phonon_file) if two_phonon_file else None
     calculator = TransitionRate(str(coupling_path), two_phonon_data_file=two_ph_p)
     calculator.b_field_mt = b_field_mt
@@ -384,7 +398,9 @@ def compute_rates(
         if two_phonon:
             calculator.compute_two_phonon_rates(T, lines)
         total_rates = calculator.get_total_rates()
-        dir_rates = calculator.get_directional_rates()
+        dir_rates = {
+            d: sum(calculator.transition_rate[p].get(d, 0.0) for p in processes) for d in calculator.directions
+        }
         if total_rates and dir_rates:
             for k, val in dir_rates.items():
                 directional_results[k].append(val)
@@ -441,6 +457,9 @@ def run_full_pipeline(
     offdiag_from_diagonal: bool = False,
     sigma: float = DEFAULT_SIGMA_MEV,
     b_field_mt: float = 0.0,
+    direct: str = "gaussian",
+    nogap: bool = False,
+    processes: Sequence[str] | None = None,
 ) -> dict[str, Any]:
     """
     Executes the entire end-to-end pipeline:
@@ -449,6 +468,10 @@ def run_full_pipeline(
       3. Compute 1-phonon, Raman and two-phonon transition rates vs temperature
       4. Compute population relaxation dynamics and T_1 times, once per
          initial state in ``init_state`` (one state or several; default all)
+    ``direct`` is the one-phonon model (TransitionRate.DIRECT_MODELS; "debye" fits the phonon spectrum's
+    acoustic modes), ``nogap`` leaves the zero-gap pairs (PhononSpectrum.deg_groups) out of the two-phonon
+    lines, and ``processes`` are the rate processes T1 is solved from (default all). The `spinlabs run`
+    defaults are the paper's production settings (PRODUCTION_*).
       5. Save all results bunched together in a dedicated unique run folder
       6. (Optional) Generate and save publication-ready figures
     Keyword-only wrapper: see :func:`_execute_pipeline` for the pipeline body.
@@ -487,6 +510,9 @@ def run_full_pipeline(
             offdiag_from_diagonal=offdiag_from_diagonal,
             sigma=sigma,
             b_field_mt=b_field_mt,
+            direct=direct,
+            nogap=nogap,
+            processes=processes,
         )
     finally:
         if owns_db_logging:
@@ -522,6 +548,9 @@ def _execute_pipeline(
     offdiag_from_diagonal: bool = False,
     sigma: float = DEFAULT_SIGMA_MEV,
     b_field_mt: float = 0.0,
+    direct: str = "gaussian",
+    nogap: bool = False,
+    processes: Sequence[str] | None = None,
 ) -> dict[str, Any]:
     """Pipeline body of :func:`run_full_pipeline` (DB logging already owned)."""
 
@@ -569,6 +598,9 @@ def _execute_pipeline(
     _zfs_paths: list[Path] = []
     if coupling_file is not None:
         coupling_data = SpinPhononCouplingData.load(coupling_file)
+        if phonon_file is not None:  # the spectrum of the couplings, for the Debye fit and the zero-gap pairs
+            ph_path = Path(phonon_file)
+            spectrum = parse_phonon_data(ph_path)
         defect = coupling_data.defect or defect or "defect"
         cell_size = coupling_data.cell_size or cell_size or 0
         calc_method = coupling_data.calc_method or calc_method
@@ -735,7 +767,17 @@ def _execute_pipeline(
 
     # ── 6. Transition Rates Calculation ──────────────────────────────────────
     temps = temperature_grid(t_start, t_end, t_step, temperatures)
-    section(LOGGER, f"Transition rates: {name}, {len(temps)} temperatures, sigma {sigma:g} meV")
+    processes = tuple(ALL_PROCESSES if processes is None else processes)
+    section(
+        LOGGER,
+        f"Transition rates: {name}, {len(temps)} temperatures, sigma {sigma:g} meV, direct {direct}, "
+        f"{'zero-gap pairs left out' if nogap else 'all pairs'}, T1 from {' + '.join(processes)}",
+    )
+    if (direct == "debye" or nogap) and spectrum is None:
+        raise ValueError(
+            "direct='debye' and nogap need the phonon spectrum of the couplings: give a phonon file (-ph), "
+            "or use direct='gaussian' without nogap"
+        )
     started = time.perf_counter()
     valid_temps_arr, rate_results, directional_results = compute_rates(
         coupling_path,
@@ -743,7 +785,11 @@ def _execute_pipeline(
         sigma=sigma,
         two_phonon_file=two_phonon_file,
         has_second_order=coupling_data is not None and coupling_data.has_second_order,
+        degenerate_groups=(spectrum.deg_groups or []) if nogap else None,
+        direct=direct,
         b_field_mt=b_field_mt,
+        spectrum=spectrum,
+        processes=processes,
     )
     spin = float(coupling_data.spin) if coupling_data is not None and coupling_data.spin is not None else 1.0
     if spin != 1.0:
@@ -844,6 +890,9 @@ def _execute_pipeline(
         "init_state": init_states,
         "sigma_mev": sigma,
         "b_field_mt": b_field_mt,
+        "direct": direct,
+        "nogap": nogap,
+        "processes": list(processes),
         # Second-order entries departing from the first-order expectation (run folders, 1-based).
         "inconsistent_second_order": {
             "excluded": bool(inconsistent_pairs) and exclude_inconsistent_pairs,

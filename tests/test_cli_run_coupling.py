@@ -93,13 +93,13 @@ def test_sigma_scan_reports_t1_per_sigma_and_saves_only_the_plot(tmp_path, capsy
     before = _files(tmp_path)
     plot = tmp_path / "scan.png"
 
-    cli.main(["run", "sigma-scan", "--raw-zfs-file", str(raw_file), "--sigma", "7.5", "1",
+    cli.main(["run", "sigma-scan", "--raw-zfs-file", str(raw_file), "--sigma", "3.5", "1",
               "--temperature", "300", "--init-state", "0", "--plot", str(plot)])
 
     out = capsys.readouterr().out
-    assert "== Transition rates and T1, sigma 1 meV (1/2) ==" in out and "sigma 7.5 meV (2/2)" in out
+    assert "== Transition rates and T1, sigma 1 meV (1/2) ==" in out and "sigma 3.5 meV (2/2)" in out
     assert "ms_0 @300K" in out and "max/min" in out
-    rows = [line.split() for line in out.splitlines() if line.strip().startswith(("1 ", "7.5*"))]
+    rows = [line.split() for line in out.splitlines() if line.strip().startswith(("1 ", "3.5*"))]
     assert len(rows) == 2 and all(0 < float(r[1]) < np.inf for r in rows)
     assert _files(tmp_path) == sorted(before + [plot])
     assert registry.ensure_db().execute("SELECT COUNT(*) FROM runs").fetchone() == (0,)
@@ -115,19 +115,19 @@ def test_sigma_scan_plots_t1_against_temperature_per_sigma(tmp_path, capsys, mon
     figures = []
     monkeypatch.setattr(plt, "close", figures.append)  # keep the figure to inspect it
     plot = tmp_path / "t1_vs_t.png"
-    cli.main(["run", "sigma-scan", "--raw-zfs-file", str(raw_file), "--sigma", "7.5", "1", "0.5",
+    cli.main(["run", "sigma-scan", "--raw-zfs-file", str(raw_file), "--sigma", "3.5", "1", "0.5",
               "--temperature", "300", "--init-state", "0", "--plot-temperature", str(plot),
               "--t-range", "50", "300", "50"])
 
     out = capsys.readouterr().out
     assert plot.is_file() and f"saved figure: {plot}" in out
-    rows = [line.split() for line in out.splitlines() if line.strip().startswith(("0.5 ", "1 ", "7.5*"))]
+    rows = [line.split() for line in out.splitlines() if line.strip().startswith(("0.5 ", "1 ", "3.5*"))]
     assert len(rows) == 3 and all(len(r) == 2 for r in rows)  # the grid adds no columns to the table
     panel = figures[-1].axes[0]
     assert len(panel.lines) == 3  # one line per sigma
     assert list(panel.lines[0].get_xdata()) == [50, 100, 150, 200, 250, 300]
     bar = figures[-1].axes[-1]
-    assert [t.get_text() for t in bar.get_yticklabels()] == ["0.5", "1", "7.5 (default)"]
+    assert [t.get_text() for t in bar.get_yticklabels()] == ["0.5", "1", "3.5 (default)"]
     with pytest.raises(SystemExit, match="--t-range"):
         scan._run_sigma_scan(cli.build_parser().parse_args(
             ["run", "sigma-scan", "--raw-zfs-file", str(raw_file), "--plot-temperature", str(plot),
@@ -141,7 +141,7 @@ def test_sigma_scan_temperature_plot_stays_on_the_t_range(tmp_path, capsys, monk
     raw_file = _inputs(tmp_path, spin_flip=True)
     figures = []
     monkeypatch.setattr(plt, "close", figures.append)
-    cli.main(["run", "sigma-scan", "--raw-zfs-file", str(raw_file), "--sigma", "7.5", "--temperature", "400",
+    cli.main(["run", "sigma-scan", "--raw-zfs-file", str(raw_file), "--sigma", "3.5", "--temperature", "400",
               "--init-state", "0", "--plot-temperature", str(tmp_path / "t.png"), "--t-range", "50", "300", "50", "-q"])
 
     assert "ms_0 @400K" in capsys.readouterr().out
