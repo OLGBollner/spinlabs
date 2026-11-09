@@ -32,7 +32,15 @@ from spinlabs.plotter import (
     plot_t1,
     plot_transition_rates_stacked,
 )
-from spinlabs.relaxation_dynamics import INIT_POPULATIONS, INIT_STATES, RelaxationDynamics, t1_file_name
+from spinlabs.relaxation_dynamics import (
+    INIT_STATES,
+    RelaxationDynamics,
+    init_populations,
+    init_states as spin_init_states,
+    rates_file_spin,
+    t1_file_name,
+)
+from spinlabs.spin import transition_classes
 from spinlabs.transition_rate import TransitionRate
 from spinlabs.zfs_manager import ZFSManager
 
@@ -366,8 +374,10 @@ def compute_rates(
         lines = calculator.get_line_spectral_density(sigma, degenerate_groups=degenerate_groups)
     omega_zfs = calculator.data["zfs"] / CONSTANTS["meV2J"]
 
-    rate_results = {k: {"0_1": [], "1_-1": []} for k in ("first_order", "second_order", "two_phonon")}
-    directional_results = {k: [] for k in ("0_to_1", "0_to_-1", "1_to_0", "-1_to_0", "1_to_-1", "-1_to_1")}
+    # Total rates per transition class (S = 1: "0_1", "1_-1"), directional rates per "m_to_m'" key of the spin
+    classes = list(transition_classes(calculator.spin))
+    rate_results = {k: {c: [] for c in classes} for k in ("first_order", "second_order", "two_phonon")}
+    directional_results = {k: [] for k in calculator.directions}
     valid_temps = []
     for T in temps:
         calculator.compute_transition_rates(T, omega, J_0_pm, J_p_m, J_0_0, omega_zfs)
@@ -379,15 +389,22 @@ def compute_rates(
             for k, val in dir_rates.items():
                 directional_results[k].append(val)
             for ord_k in rate_results:
-                for trans_k in ("0_1", "1_-1"):
+                for trans_k in classes:
                     rate_results[ord_k][trans_k].append(total_rates[ord_k][trans_k])
             valid_temps.append(float(T))
     return np.asarray(valid_temps, dtype=float), rate_results, directional_results
 
 
 def solve_t1(directional_rates_path: str | Path, init_state: str) -> tuple[np.ndarray, np.ndarray]:
-    """ODE-fit and eigenvalue T1 (s) at each temperature of a directional-rates file."""
-    dynamics = RelaxationDynamics(init_state=INIT_POPULATIONS[init_state], rates_data=str(directional_rates_path))
+    """ODE-fit and eigenvalue T1 (s) at each temperature of a directional-rates file.
+
+    ``init_state`` names a state of the file's spin (relaxation_dynamics.init_populations: ms_0, ms_1, ms_-1 for
+    S = 1; ms_pm1_2, ms_pm3_2 for S = 3/2).
+    """
+    populations = init_populations(rates_file_spin(directional_rates_path))
+    if init_state not in populations:
+        raise ValueError(f"init_state {init_state!r} is not a state of this spin: {', '.join(populations)}")
+    dynamics = RelaxationDynamics(init_state=populations[init_state], rates_data=str(directional_rates_path))
     t1_fit = np.asarray(dynamics.compute_T1_range(), dtype=float)
     t1_eig = np.asarray(
         [dynamics.get_T1_eigenval(temp_index=i)[0] for i in range(len(dynamics.temperatures))], dtype=float
@@ -510,7 +527,8 @@ def _execute_pipeline(
 
     section(LOGGER, "Load input data")
     init_states = list(dict.fromkeys([init_state] if isinstance(init_state, str) else init_state))
-    unknown = [s for s in init_states if s not in INIT_POPULATIONS]
+    # Names are checked against the spin once the couplings are loaded (step 6); here only their form
+    unknown = [s for s in init_states if s not in INIT_STATES and not str(s).startswith("ms_")]
     if unknown or not init_states:
         raise ValueError(f"init_state must be one or more of {', '.join(INIT_STATES)}, got {init_state!r}")
     # ── 1. Resolve order and method ──────────────────────────────────────────
@@ -727,6 +745,16 @@ def _execute_pipeline(
         has_second_order=coupling_data is not None and coupling_data.has_second_order,
         b_field_mt=b_field_mt,
     )
+    spin = float(coupling_data.spin) if coupling_data is not None and coupling_data.spin is not None else 1.0
+    if spin != 1.0:
+        if init_states == list(INIT_STATES):  # the S = 1 default: use this spin's states
+            init_states = list(spin_init_states(spin))
+            LOGGER.info(f"spin S = {spin:g}: initial states {', '.join(init_states)}")
+        unknown = [s for s in init_states if s not in init_populations(spin)]
+        if unknown:
+            raise ValueError(
+                f"init_state {', '.join(unknown)} is not a state of spin {spin:g}: {', '.join(init_populations(spin))}"
+            )
 
     # Save rates
     rates_path = run_dir / "transition_rates.npz"
@@ -736,6 +764,7 @@ def _execute_pipeline(
         cell_size=cell_size,
         calc_method=calc_method,
         pert_scale=raw_data.pert_scale if raw_data else coupling_data.pert_scale,
+        spin=spin,
         temperatures=valid_temps_arr,
         **rate_results,
     )
@@ -747,6 +776,7 @@ def _execute_pipeline(
         cell_size=cell_size,
         calc_method=calc_method,
         pert_scale=raw_data.pert_scale if raw_data else coupling_data.pert_scale,
+        spin=spin,
         temperatures=valid_temps_arr,
         **directional_results,
     )

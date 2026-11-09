@@ -952,6 +952,7 @@ class ZFSManager:
                 V2_p_m=kwargs.get("V2_p_m"),
                 V2_0_pm=kwargs.get("V2_0_pm"),
                 zfs_2nd_derivs=kwargs.get("zfs_2nd_derivs"),
+                spin=self.raw_data.spin if self.raw_data is not None else None,
             )
             out = coupling_obj.save(save_name)
             LOGGER.info(f"saved coupling data: {out}")

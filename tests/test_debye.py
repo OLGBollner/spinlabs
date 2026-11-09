@@ -173,7 +173,8 @@ def test_axial_field_gives_a_c_pm_double_quantum_direct_rate():
     D = calc.data["zfs"] / CONSTANTS["meV2J"]
     z = ZEEMAN_MEV_PER_MT * 100.0
     assert z == pytest.approx(2.0028 * 5.7883818060e-2 * 0.1, rel=1e-8)  # g mu_B B in meV
-    assert calc.level_energies(D) == pytest.approx({1: D + z, 0: 0.0, -1: D - z})
+    # E_m = D (m^2 - 2/3) + g mu_B B m: zero at the zero-field centroid
+    assert calc.level_energies(D) == pytest.approx({1: D / 3 + z, 0: -2 * D / 3, -1: D / 3 - z})
     omega, j0pm, jpm, j00 = calc.get_spectral_density(res=0.05, sigma=3.0)
     calc.compute_transition_rates(T, omega, j0pm, jpm, j00, D)
     first = calc.transition_rate["first_order"]
