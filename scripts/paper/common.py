@@ -14,6 +14,7 @@ import config as C
 
 sys.path.insert(0, str(C.ROOT / "scripts"))  # coupling_manager and the spectral helpers live in scripts/
 from plot_t1_comparison import coupling_manager  # noqa: E402
+from plot_spectral_comparison import computed_pair_mask  # noqa: E402
 
 from spinlabs.constants import CONSTANTS  # noqa: E402
 from spinlabs.models import SpinPhononCouplingData  # noqa: E402
@@ -53,19 +54,16 @@ def mask_to_computed(system, scheme, coupling_npz):
     """Zero the second-order couplings of ``coupling_npz`` outside the computed pairs, in place.
 
     The filter of S3 (plot_spectral_comparison.computed_pair_mask): the computed pair keys, both orders, plus any
-    pair with a nonzero computed coupling (pairs the pipeline adds from symmetry-degenerate partners).
+    pair with a nonzero computed coupling (pairs the pipeline adds from symmetry-degenerate partners), minus the
+    pairs excluded as inconsistent (zero in the computed set, so not filled either).
     """
     computed, _ = manager_for(system, scheme, "computed")
     with tempfile.TemporaryDirectory() as tmp:
         base = str(Path(tmp) / "computed")
         computed.process_both_orders(output_filename=base)
         ref = np.load(f"{base}.npz", allow_pickle=True)
-        n = ref["V2_0_0"].shape[0]
-        mask = np.zeros((n, n), dtype=bool)
-        for i, j in computed.zfs_tensors_2d:
-            mask[int(i), int(j)] = mask[int(j), int(i)] = True
-        for k in ("V2_0_0", "V2_p_m", "V2_0_pm"):
-            mask |= np.asarray(ref[k]) != 0
+        mask = computed_pair_mask(computed, {k: np.asarray(ref[k]) for k in ("V2_0_0", "V2_p_m", "V2_0_pm")})
+        n = mask.shape[0]
     d = dict(np.load(coupling_npz, allow_pickle=True))
     for k in ("V2_0_0", "V2_p_m", "V2_0_pm"):
         d[k] = np.where(mask, d[k], 0.0)

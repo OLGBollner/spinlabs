@@ -65,13 +65,19 @@ def drop_a_x_e(manager):
 
 def computed_pair_mask(manager, couplings):
     """(N, N) bool: the computed (i, j) pairs, both orders, plus any pair with a nonzero computed coupling
-    (pairs the pipeline adds from symmetry-degenerate partners)."""
+    (pairs the pipeline adds from symmetry-degenerate partners), minus the pairs ``manager`` dropped as
+    inconsistent (exclude_inconsistent_pairs): those are zero in the computed couplings, so a fill kept on this
+    mask must not cover them either. ``manager`` must have processed its second order already."""
     n = len(next(iter(couplings.values())))
     mask = np.zeros((n, n), dtype=bool)
     for i, j in manager.zfs_tensors_2d:
         mask[int(i), int(j)] = mask[int(j), int(i)] = True
     for values in couplings.values():
         mask |= values != 0
+    if manager.exclude_inconsistent_pairs:
+        for i, j, *_ in manager.inconsistent_pairs:
+            if all(values[i, j] == 0 for values in couplings.values()):
+                mask[i, j] = mask[j, i] = False
     return mask
 
 
