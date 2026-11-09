@@ -1,6 +1,6 @@
 """S1: |V_UO| against |V_AO| per mode (first order) and per diagonal pair V^(ll) (second order), coloured by IPR.
 
-Rows NV- (512), VV0 (128), ClV+ (576); columns V00, V+-, V0+-. No mode filter (as rho in M3); points with a zero
+Rows NV- (512), VV0 (128), ClV+ (576), V_Si- (128) (m3_rho.SYSTEMS); columns V00, V+-, V0+-. No mode filter (as rho in M3); points with a zero
 coupling in either scheme cannot be drawn on log axes and are counted in the record. Dashed: |V_UO| = |V_AO|;
 solid (colour outside the IPR map): |V_UO| = rho |V_AO|.
 """
@@ -17,7 +17,7 @@ from spinlabs.parsers import parse_phonon_data
 
 def figure(plt, order, rec):
     cmap = LinearSegmentedColormap.from_list("ipr", plt.get_cmap("Blues")(np.linspace(0.3, 1.0, 256)))
-    fig, axes = plt.subplots(3, 3, figsize=(C.DOUBLE, 6.6))
+    fig, axes = plt.subplots(len(SYSTEMS), 3, figsize=(C.DOUBLE, 2.2 * len(SYSTEMS)))
     fig.subplots_adjust(wspace=0.42, hspace=0.32, right=0.88)
     info = {}
     for row, s in enumerate(SYSTEMS):
@@ -56,7 +56,7 @@ def figure(plt, order, rec):
             C.panel_letter(ax, row * 3 + col, x=-0.02, y=1.01, fontsize=C.FONT - 1)
             if row == 0:
                 ax.set_title(C.CHANNEL_LABELS[ch] if order == 1 else C.CHANNEL_LABELS[ch].replace("V_", "V^{(ll)}_"), pad=10)
-            if row == 2:
+            if row == len(SYSTEMS) - 1:
                 ax.set_xlabel(r"$|V_\mathrm{AO}|$ (MHz)")
             if col == 0:
                 ax.set_ylabel(r"$|V_\mathrm{UO}|$ (MHz)")

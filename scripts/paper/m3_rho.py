@@ -1,9 +1,10 @@
-"""M3: coupling ratio rho = sqrt(sum V_UO^2 / sum V_AO^2) for NV- (512), VV0 (128), ClV+ (576).
+"""M3: coupling ratio rho = sqrt(sum V_UO^2 / sum V_AO^2) for NV- (512), VV0 (128), ClV+ (576), V_Si- (128).
 
 (a) first order, over the modes; (b) second order, over the diagonal pairs V^(ll). Channels V00, V+-, V0+-.
 The weighted SD of the per-mode (per-pair) ratios r = |V_UO| / |V_AO| about rho, weights V_AO^2 (modes with
 V_AO = 0 carry no weight), goes to the numbers file only; it is not drawn. No mode filter: every mode / diagonal pair of the production package.
-Couplings in MHz as they enter the rates (ZFSManager of the production packages).
+Couplings in MHz as they enter the rates (ZFSManager of the production packages): UO includes the spin
+correction, x3/2 for the S = 1 defects and x2/3 for V_Si- (S = 3/2).
 """
 
 import numpy as np
@@ -12,7 +13,7 @@ from matplotlib.ticker import MultipleLocator
 import config as C
 from common import Record, couplings
 
-SYSTEMS = ("NV_512", "DiV_128", "ClV_576")
+SYSTEMS = ("NV_512", "DiV_128", "ClV_576", "V_Si_128")
 KEYS = {1: {"V00": "V_0_0", "Vpm": "V_p_m", "V0pm": "V_0_pm"},
         2: {"V00": "V2_0_0", "Vpm": "V2_p_m", "V0pm": "V2_0_pm"}}
 
@@ -51,7 +52,7 @@ def main():
     plt = C.style()
     rec = Record("M3", "Coupling ratio rho, first and second order", "scripts/paper/m3_rho.py", "main")
     res = compute()
-    fig, axes = plt.subplots(1, 2, figsize=(C.SINGLE, 1.9), sharey=True)
+    fig, axes = plt.subplots(1, 2, figsize=(C.SINGLE, 0.5 + 0.47 * len(SYSTEMS)), sharey=True)
     offsets = {"V00": 0.22, "Vpm": 0.0, "V0pm": -0.22}
     ys = {s: len(SYSTEMS) - 1 - k for k, s in enumerate(SYSTEMS)}
     for k, (ax, order) in enumerate(zip(axes, (1, 2))):
@@ -79,7 +80,8 @@ def main():
         "weighted SD (numbers only, not drawn)": "sqrt(sum w (r - rho)^2 / sum w), r = |V_UO|/|V_AO| per "
                                                   "mode/pair, w = V_AO^2",
         "mode filter": "none",
-        "ClV_576 second order": "diagonal V^(ll) from central differences (f(+Q) + f(-Q) - 2 f(0)) / Q^2",
+        "ClV_576, V_Si_128 second order": "diagonal V^(ll) from central differences (f(+Q) + f(-Q) - 2 f(0)) / Q^2",
+        "UO spin correction": "x3/2 for S = 1 (NV, VV0, ClV), x2/3 for S = 3/2 (V_Si), in the packages",
         "units": "couplings in MHz (rho is dimensionless)",
     }
     rec.data["numbers"] = {f"order {o}": {s: {ch: res[(o, s, ch)] for ch in C.CHANNELS} for s in SYSTEMS}

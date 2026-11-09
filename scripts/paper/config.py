@@ -5,7 +5,7 @@ figures/out/main/ and figures/out/sm/ (PDF + 300 dpi PNG), one JSON record per f
 (settings, numbers, T1 fit fallbacks), from which build_reports.py writes figures/out/manifest.md and
 figures/out/numbers.md. Computed rates are cached in figures/out/cache/ (delete it after a code or data change).
 
-V_Si^- (S = 3/2) is left out of every figure here.
+V_Si^- (S = 3/2) appears in M3, S1 and M5 (m3_rho.py, s1_coupling_scatter.py, m5_vsi_t1.py) and vsi_numbers.py.
 """
 
 from pathlib import Path
@@ -62,7 +62,7 @@ SYSTEMS = {
     "ClV_576": dict(defect="ClV", cell=576, step=0.05, label=r"ClV$^+$ (576)", packages={
         "AO": _pkg("ClV_576", 0.05, "all_bands", "20261103", "central"),
         "UO": _pkg("ClV_576", 0.05, "defect_band_approx", "20261103", "central")}),
-    # S = 3/2 (V2, k site), central differences like ClV_576; only in vsi_numbers.py so far, no figure lists it
+    # S = 3/2 (V2, k site), central differences like ClV_576; M3, S1, M5 and vsi_numbers.py
     "V_Si_128": dict(defect="V_Si", cell=128, step=0.05, label=r"V$_\mathrm{Si}^-$ (128)", packages={
         "AO": _pkg("V_Si_128", 0.05, "all_bands", "20261105", "central"),
         "UO": _pkg("V_Si_128", 0.05, "defect_band_approx", "20261105", "central")}),
@@ -110,6 +110,7 @@ EXPERIMENT_STYLES = {
     ("Toyli_2012", "toyli"): ("#5f3dc4", "v"),
     ("Cambria_2023_NVA", "omega"): ("#2f9e44", "P"),
     ("Cambria_2023_NVB", "omega"): ("#2f9e44", "X"),
+    ("Simin_2017", "V_Si_Rate"): ("#a8201a", "o"),
 }
 EXP_EDGE = "#52514e"
 CHANNEL_MARKERS = {"V00": "o", "Vpm": "s", "V0pm": "^"}
