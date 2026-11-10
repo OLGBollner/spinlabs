@@ -1,8 +1,10 @@
 """M3: coupling ratio rho = sqrt(sum V_UO^2 / sum V_AO^2) for NV- (512), VV0 (128), ClV+ (576), V_Si- (128).
 
-(a) first order, over the modes; (b) second order, over the diagonal pairs V^(ll). Channels V00, V+-, V0+-.
-The weighted SD of the per-mode (per-pair) ratios r = |V_UO| / |V_AO| about rho, weights V_AO^2 (modes with
-V_AO = 0 carry no weight), goes to the numbers file only; it is not drawn. No mode filter: every mode / diagonal pair of the production package.
+(a) first order, over the modes; (b) second order, over every pair (l, l') computed in both AO and UO (each
+unordered pair once; computed couplings, no fill; pairs excluded as inconsistent left out). Only VV0 (128) has
+off-diagonal pairs (|gap| < ~20 meV in both schemes); NV- (512), ClV+ (576) and V_Si- (128) have the diagonal V^(ll)
+only. Channels V00, V+-, V0+-. The weighted SD of the per-mode (per-pair) ratios r = |V_UO| / |V_AO| about rho,
+weights V_AO^2 (modes with V_AO = 0 carry no weight), goes to the numbers file only; it is not drawn. No mode filter.
 Couplings in MHz as they enter the rates (ZFSManager of the production packages): UO includes the spin
 correction, x3/2 for the S = 1 defects and x2/3 for V_Si- (S = 3/2).
 """
@@ -11,17 +13,28 @@ import numpy as np
 from matplotlib.ticker import MultipleLocator
 
 import config as C
-from common import Record, couplings
+from functools import lru_cache
+
+from common import Record, computed_pairs, couplings
 
 SYSTEMS = ("NV_512", "DiV_128", "ClV_576", "V_Si_128")
 KEYS = {1: {"V00": "V_0_0", "Vpm": "V_p_m", "V0pm": "V_0_pm"},
         2: {"V00": "V2_0_0", "Vpm": "V2_p_m", "V0pm": "V2_0_pm"}}
 
 
+@lru_cache(maxsize=None)
+def shared_pairs(system):
+    """(rows, cols), rows <= cols: the second-order pairs computed in both AO and UO, each unordered pair once."""
+    both = computed_pairs(system, "AO") & computed_pairs(system, "UO")
+    return np.nonzero(np.triu(both))
+
+
 def channel_values(system, scheme, order, ch):
-    c = couplings(system, scheme)
-    v = np.asarray(c[KEYS[order][ch]], dtype=float)
-    return np.abs(np.diag(v) if order == 2 else v)
+    """|V| per mode (first order, production couplings) or per shared computed pair (second order, no fill)."""
+    if order == 1:
+        return np.abs(np.asarray(couplings(system, scheme)[KEYS[1][ch]], dtype=float))
+    v = np.asarray(couplings(system, scheme, pairs="computed")[KEYS[2][ch]], dtype=float)
+    return np.abs(v[shared_pairs(system)])
 
 
 def rho_sd(ao, uo):
@@ -65,7 +78,7 @@ def main():
         ax.set_xlabel(r"$\rho$")
         ax.set_xlim(0, 1.1 * max(res[(order, s, ch)]["rho"] for s in SYSTEMS for ch in C.CHANNELS))
         ax.xaxis.set_major_locator(MultipleLocator(0.5 if order == 1 else 1.0))
-        ax.set_title("first order" if order == 1 else r"second order, $V^{(ll)}$", fontsize=C.FONT - 1)
+        ax.set_title("first order" if order == 1 else r"second order, $V^{(ll')}$", fontsize=C.FONT - 1)
         C.panel_letter(ax, k, x=0.0, y=1.02)
         ax.grid(True, axis="x", ls=":", lw=0.5, alpha=0.6)
     axes[0].set_yticks([ys[s] for s in SYSTEMS], [C.SYSTEMS[s]["label"] for s in SYSTEMS])
@@ -76,7 +89,10 @@ def main():
     rec.data["settings"] = {
         "systems": {s: f"{C.SYSTEMS[s]['label']}, step {C.SYSTEMS[s]['step']:g}, AO "
                        f"{C.SYSTEMS[s]['packages']['AO']}, UO {C.SYSTEMS[s]['packages']['UO']}" for s in SYSTEMS},
-        "rho": "sqrt(sum V_UO^2 / sum V_AO^2) over all modes (first order) or all diagonal pairs (second order)",
+        "rho": "sqrt(sum V_UO^2 / sum V_AO^2) over all modes (first order) or, second order, every pair (l, l') "
+               "computed in both AO and UO, each unordered pair once (computed couplings, no fill; inconsistent "
+               "pairs left out)",
+        "second-order pairs used": {s: int(len(shared_pairs(s)[0])) for s in SYSTEMS},
         "weighted SD (numbers only, not drawn)": "sqrt(sum w (r - rho)^2 / sum w), r = |V_UO|/|V_AO| per "
                                                   "mode/pair, w = V_AO^2",
         "mode filter": "none",

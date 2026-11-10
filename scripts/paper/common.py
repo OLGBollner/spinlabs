@@ -72,6 +72,22 @@ def mask_to_computed(system, scheme, coupling_npz):
     return int(np.count_nonzero(np.triu(mask))), n * (n + 1) // 2
 
 
+def computed_pairs(system, scheme):
+    """(N, N) bool of the second-order pairs a package computed (computed_pair_mask: the pair keys, both orders,
+    and pairs with a nonzero computed coupling, minus those excluded as inconsistent). Cached per package."""
+    cache = C.CACHE / f"computed_pairs_{system}_{scheme}_{_key(C.package(system, scheme))}.npz"
+    if not cache.exists():
+        manager, _ = manager_for(system, scheme, "computed")
+        with tempfile.TemporaryDirectory() as tmp:
+            base = str(Path(tmp) / "computed")
+            manager.process_both_orders(output_filename=base)
+            ref = np.load(f"{base}.npz", allow_pickle=True)
+            mask = computed_pair_mask(manager, {k: np.asarray(ref[k]) for k in ("V2_0_0", "V2_p_m", "V2_0_pm")})
+        C.CACHE.mkdir(parents=True, exist_ok=True)
+        np.savez(cache, mask=mask)
+    return np.load(cache)["mask"]
+
+
 def pair_coverage(system, scheme):
     """Which second-order pairs a package computed: complete or not, and if not, the |gap| window."""
     from spinlabs.parsers import parse_phonon_data
