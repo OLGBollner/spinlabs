@@ -587,14 +587,18 @@ class ZFSManager:
             diff_in_plane = d2D_dqidqj[0, 0] - d2D_dqidqj[1, 1]
             off_diag_in_plane = d2D_dqidqj[0, 1]
 
+            # d2D_dqidqj is the full second derivative (the forward first-order derivative carries the
+            # 1/2 D_ii q_i that the subtraction removes), and H2 = 1/2 sum_ij d2D_ij q_i q_j. Every V2 is
+            # therefore the first-order formula times the Taylor 1/2: V_00 / 6, V_0pm / (2 sqrt 2), V_pm 1/4.
+            # sym is the pair product, so A1 x A1 and A2 x A2 (both A1) take the first branch.
             if sym == ["A1"]:
-                V_0_0_2nd[i, j] = np.abs(d2D_dqidqj[2, 2] - 0.5 * trace_in_plane) / 3.0
+                V_0_0_2nd[i, j] = np.abs(d2D_dqidqj[2, 2] - 0.5 * trace_in_plane) / 6.0
             elif {sym_i, sym_j} == {"Ex"}:
-                V_0_0_2nd[i, j] = np.abs(d2D_dqidqj[2, 2] - 0.5 * trace_in_plane) / 3.0
+                V_0_0_2nd[i, j] = np.abs(d2D_dqidqj[2, 2] - 0.5 * trace_in_plane) / 6.0
                 V_0_pm_2nd[i, j] = np.sqrt(d2D_dqidqj[0, 2] ** 2 + d2D_dqidqj[1, 2] ** 2) / (2.0 * np.sqrt(2))
                 V_p_m_2nd[i, j] = 0.25 * np.sqrt(diff_in_plane**2 + 4.0 * off_diag_in_plane**2)
             elif {sym_i, sym_j} == {"Ey"}:
-                V_0_0_2nd[i, j] = np.abs(d2D_dqidqj[2, 2] - 0.5 * trace_in_plane) / 3.0
+                V_0_0_2nd[i, j] = np.abs(d2D_dqidqj[2, 2] - 0.5 * trace_in_plane) / 6.0
                 V_0_pm_2nd[i, j] = np.sqrt(d2D_dqidqj[0, 2] ** 2 + d2D_dqidqj[1, 2] ** 2) / (2.0 * np.sqrt(2))
                 V_p_m_2nd[i, j] = 0.25 * np.sqrt(diff_in_plane**2 + 4.0 * off_diag_in_plane**2)
             elif {sym_i, sym_j} == {"Ex", "Ey"}:
@@ -745,7 +749,10 @@ class ZFSManager:
 
         Both roots are heuristics: neither follows from symmetry, and pair by pair they scatter by a
         factor of about ten. In NV_64, where every pair is computed, the fill without the A x E pairs
-        gives a T1 2.5-4.4x the all-pairs one (100-500 K, sigma 1-7.5 meV); with them 0.74-1.46x.
+        gives a T1 2.5-4.4x the all-pairs one (100-500 K, sigma 1-7.5 meV); with them 0.74-1.46x. Both
+        figures predate the Taylor 1/2 in the second-order V_00 (2026-11-11), which halves the A x E fill.
+        Since then, kept on the computed pairs (S5 settings: AO, sigma 3.5 meV, 100-500 K), the fill gives
+        1.18-2.08x the computed T1 in NV_64 (0.73-1.34x before) and 1.07-1.46x in DiV_128 (0.64-0.80x).
         Pairs in ``computed`` (run, or derived by symmetry) keep their values.
         """
         n = V_0_0_2nd.shape[0]
