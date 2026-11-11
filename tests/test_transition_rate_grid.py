@@ -73,8 +73,9 @@ def _line_integral(calc, key, gap, temp=T, keep=None):
 def test_pair_weight_matches_exact_matrix_element():
     """|<+1, n_a - 1, n_e + 1| H2 |-1, n_a, n_e>|^2 for H2 = 1/2 sum_ij D_ij q_i q_j, q = b + b^dagger.
 
-    compute_two_phonon_rates gives a pair its weight times 4 pi / hbar (two Raman orderings),
-    so the weight must be half of |M|^2 / (n_a (n_e + 1)).
+    compute_two_phonon_rates gives a pair its weight times 4 pi / hbar. Together with its
+    full ordered-pair sum, this uses 2 pi / hbar times the squared matrix element per ordered
+    absorption/emission process. The weight must therefore be half of |M_ij|^2 / (n_a (n_e + 1)).
     """
     nmax, n_a, n_e = 5, 2, 1
     b = np.diag(np.sqrt(np.arange(1, nmax)), 1)

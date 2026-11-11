@@ -193,14 +193,21 @@ class TransitionRateSpin1:
 
     @staticmethod
     def pair_weights(V2: np.ndarray) -> np.ndarray:
-        """|V2|^2 per mode pair, with the off-diagonal pairs (i != j) doubled.
+        """Half of the squared matrix-element coefficients, as an ordered-pair array.
 
-        V2 carries the 1/2 of the Taylor series, so the Hamiltonian holds a pair i != j
-        twice, V2_ij q_i q_j + V2_ji q_j q_i = 2 V2_ij q_i q_j, and its matrix element is
-        2 V2_ij sqrt(n_i (n_j + 1)), squared 4 |V2_ij|^2 = 2 x these 2 |V2_ij|^2: compute_two_phonon_rates
-        uses 4 pi / hbar, 2 pi / hbar for each of the two Raman orderings. A diagonal
-        pair (i, i) appears once and keeps |V2_ii|^2, the diagonal-only convention of Cambria et al.
+        For the spin-flip channels, V2 includes the Taylor 1/2. For i != j, the two symmetric
+        interaction terms cancel that half, so absorbing i and emitting j has amplitude
+        2 V2_ij sqrt(n_i (n_j + 1)) and squared matrix element 4 |V2_ij|^2 n_i (n_j + 1).
+        Each ordered golden-rule term therefore needs 4 |V2_ij|^2 with 2 pi / hbar.
+
+        compute_two_phonon_rates instead applies 4 pi / hbar to every spectral entry.
+        These weights are consequently half the matrix-element coefficients: 2 |V2_ij|^2
+        off diagonal, and |V2_ii|^2 on the diagonal. The latter gives 2 |V2_ii|^2 after
+        applying 4 pi / hbar, the diagonal-only convention of Cambria et al.
         (PRL 130, 256903, Eq. S12).
+
+        Entry (i, j) denotes absorption in i and emission in j. The mirrored entry (j, i)
+        is the opposite Raman process, not an extra combinatorial copy of (i, j).
         """
         w = np.abs(np.asarray(V2, dtype=float)) ** 2
         if w.ndim != 2:
@@ -234,6 +241,10 @@ class TransitionRateSpin1:
         freqs: np.ndarray, weights: np.ndarray, sigma: float, gap: float, res: float
     ) -> tuple[np.ndarray, np.ndarray]:
         """The 2D spectral function J2(w, w') = sum_ij weights_ij G(w - w_i) G(w' - w_j) on the line w' = w - gap.
+
+        The sum retains every ordered pair (i, j): i is absorbed and j is emitted. A mirrored
+        entry (j, i) is the opposite Raman process rather than a duplicate pair, so there is
+        no triangular restriction or further off-diagonal multiplicity in this sum.
 
         G is a Gaussian of width ``sigma``. On the line each pair's two Gaussians multiply into
         g_{sqrt2 sigma}(w_i - w_j - gap) G_{sigma/sqrt2}(w - (w_i + w_j + gap) / 2) exactly: a constant
@@ -328,14 +339,20 @@ class TransitionRateSpin1:
         return n
 
     def compute_two_phonon_rates(self, T: float, lines: dict) -> None:
-        """Raman rates from the second-order coupling, from get_line_spectral_density's lines.
+        """Raman rates from the ordered-pair spectra returned by get_line_spectral_density.
 
-        Gamma = 4 pi / hbar * integral dw J2(w, w - gap) n(w) (n(w - gap) + 1), absorbing w and
-        emitting w - gap. The 4 pi is 2 pi / hbar times the two Raman orderings, Cambria et al.
-        Eq. 3; with pair_weights a pair i != j gets the 4 |V2_ij|^2 of its matrix element.
+        Gamma = 4 pi / hbar * integral dw J2(w, w - gap) n(w) (n(w - gap) + 1), absorbing w
+        and emitting w - gap. J2 already contains both ordered Raman processes, (i, j) and (j, i).
+
+        The 4 pi / hbar is the normalization paired with pair_weights, not an additional
+        two-pair multiplicity. Off diagonal it gives (4 pi / hbar) * 2 |V2_ij|^2 =
+        (2 pi / hbar) * 4 |V2_ij|^2, the squared matrix element of 2 V2_ij. On the diagonal,
+        (4 pi / hbar) * |V2_ii|^2 = (2 pi / hbar) * 2 |V2_ii|^2, the adopted Cambria
+        diagonal-only convention (PRL 130, 256903, Eq. 3).
+
         Double absorption and double emission (w + w' = |gap|) need two phonons below the
-        splitting (0.01 meV), where only the Gaussian tails of optical modes put weight, so
-        they are left out.
+        splitting (0.01 meV), where only the Gaussian tails of optical modes put weight,
+        so they are left out.
         """
         if self.data is None:
             raise ValueError("Data not loaded. Please call load_data() first.")
