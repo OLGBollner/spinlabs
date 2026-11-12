@@ -342,13 +342,16 @@ class TransitionRateSpin1:
         """Raman rates from the ordered-pair spectra returned by get_line_spectral_density.
 
         Gamma = 4 pi / hbar * integral dw J2(w, w - gap) n(w) (n(w - gap) + 1), absorbing w
-        and emitting w - gap. J2 already contains both ordered Raman processes, (i, j) and (j, i).
+        and emitting w - gap.
 
-        The 4 pi / hbar is the normalization paired with pair_weights, not an additional
-        two-pair multiplicity. Off diagonal it gives (4 pi / hbar) * 2 |V2_ij|^2 =
-        (2 pi / hbar) * 4 |V2_ij|^2, the squared matrix element of 2 V2_ij. On the diagonal,
-        (4 pi / hbar) * |V2_ii|^2 = (2 pi / hbar) * 2 |V2_ii|^2, the adopted Cambria
-        diagonal-only convention (PRL 130, 256903, Eq. 3).
+        The 4 pi / hbar with pair_weights (2 |V2_ij|^2 off the diagonal) is Fermi's golden rule
+        for the amplitude of an off-diagonal pair: H2 holds V2_ij q_i q_j + V2_ji q_j q_i =
+        2 V2_ij q_i q_j, so absorbing i and emitting j has amplitude 2 V2_ij and rate
+        (2 pi / hbar) * |2 V2_ij|^2 = (4 pi / hbar) * 2 |V2_ij|^2. It is not a factor 2 for two
+        Raman orderings: J2 sums ordered pairs, and (i, j) and (j, i), the two processes, are
+        separate entries counted once each. A diagonal pair gets (4 pi / hbar) * |V2_ii|^2 =
+        (2 pi / hbar) * 2 |V2_ii|^2, the diagonal-only convention of Cambria et al.
+        (PRL 130, 256903, Eq. S12); with the zero-gap pairs excluded it does not enter.
 
         Double absorption and double emission (w + w' = |gap|) need two phonons below the
         splitting (0.01 meV), where only the Gaussian tails of optical modes put weight,
