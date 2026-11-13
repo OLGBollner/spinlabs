@@ -8,7 +8,7 @@ One row per defect, in the layout of the NV- figure sq_dq_rates_cambria_measured
 Direction convention, as the NV- figure (Omega = 0 -> +1 there, upward since D > 0): each plotted rate is the
 upward rate (lower to upper level) of the scheme's own ZFS D; gamma connects degenerate levels at zero field, so
 both its directions are the same rate. Rates are directional (direct + two-phonon, C.PROCESSES), drawn from 50 K
-as in the NV- figure. Phonon-limited line: none for VV0 and ClV+; for V_Si- the onset from the Simin et al. (2017)
+as in the NV- figure, V_Si- from 25 K (left of its phonon-limited line). Phonon-limited line: none for VV0 and ClV+; for V_Si- the onset from the Simin et al. (2017)
 fit (phonon_limited.py, as M5): 42.5 K, an upper limit since only A0 <= 0.1 1/s is given.
 Outputs: figures/out/sm/F1_sic_rates.{pdf,png}, figures/out/sm/numbers_sic_rates.md, records/F1.json.
 """
@@ -22,6 +22,7 @@ from phonon_limited import SIMIN, onset, simin_dep
 T = C.TEMPERATURES
 QUOTE = (100.0, 300.0, 500.0)
 T_MIN = 50.0  # K, first temperature drawn (as the NV- figure)
+T_START = {"V_Si_128": 25.0}  # V_Si-: earlier, so its curves start left of the phonon-limited line (42.5 K)
 MHZ_PER_MEV = 241798.9242
 ROWS = ("DiV_128", "ClV_576", "V_Si_128")
 NAMES = {"DiV_128": "VV0 (128)", "ClV_576": "ClV+ (576)", "V_Si_128": "V_Si- (128)"}
@@ -67,16 +68,17 @@ def main():
     for system in ROWS:
         for scheme in C.SCHEMES:
             for name, arr in data[(system, scheme)].items():
-                if not np.all(arr[T >= T_MIN] > 0):
-                    raise SystemExit(f"{system} {scheme} {name}: non-positive rate at T >= {T_MIN:g} K")
+                t0 = T_START.get(system, T_MIN)
+                if not np.all(arr[T >= t0] > 0):
+                    raise SystemExit(f"{system} {scheme} {name}: non-positive rate at T >= {t0:g} K")
     spin_of = {s: conv[(s, "AO")]["spin"] for s in ROWS}
     t_c = onset(simin_dep, SIMIN["A0"])  # V_Si-, upper limit (as M5)
 
     # ------------------------------------------------------------------ figure
     fig, axes = plt.subplots(len(ROWS), 2, figsize=(C.DOUBLE, 2.5 * len(ROWS)), sharex=True, sharey="row")
-    ok = T >= T_MIN
     for row, system in enumerate(ROWS):
         chans = channels(spin_of[system], conv[(system, "AO")]["D_MHz"])
+        ok = T >= T_START.get(system, T_MIN)
         lo = min(data[(system, s)][n][ok].min() for s in C.SCHEMES for n, *_ in chans)
         hi = max(data[(system, s)][n][ok].max() for s in C.SCHEMES for n, *_ in chans)
         for col, (name, title, _, _) in enumerate(chans):
@@ -140,7 +142,7 @@ def main():
     rec.data["settings"] = {
         "systems": {s: {sc: C.SYSTEMS[s]["packages"][sc] for sc in C.SCHEMES} for s in ROWS},
         "sigma_meV": C.SIGMA, "direct": C.DIRECT, "pairs": C.PAIRS, "processes": list(C.PROCESSES),
-        "zero-gap pairs": "excluded by symmetry", "temperatures drawn": f"{T_MIN:g}-{T[-1]:g} K",
+        "zero-gap pairs": "excluded by symmetry", "temperatures drawn": f"{T_MIN:g}-{T[-1]:g} K (V_Si-: {T_START['V_Si_128']:g}-{T[-1]:g} K)",
         "direction convention": "upward rate (lower -> upper level by the scheme's computed D), as the NV- figure; "
                                 "gamma: degenerate levels, both directions equal",
         "conventions": {f"{s} {sc}": v for (s, sc), v in conv.items()},
