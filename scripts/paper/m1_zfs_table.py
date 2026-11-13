@@ -43,7 +43,7 @@ def main():
     # V_Si's superscript letters must mean the same cells as before
     for letter in set(re.findall(r"\^\{\((\w)\)\}", vsi)):
         old_cell = re.search(rf"\({letter}\) cell size (\d+)", old).group(1)
-        new_cell = next((str(c) for c, l in letters.items() if l == letter), None)
+        new_cell = next((str(c) for c, lab in letters.items() if lab == letter), None)
         if old_cell != new_cell:
             raise SystemExit(f"V_Si row uses ({letter}) = cell {old_cell}, the new table has {new_cell}")
 
@@ -58,7 +58,7 @@ def main():
     if show_e:
         head += [r"$E_\text{UO}$", r"$E_\text{AO}$"]
     n = len(head)
-    footnote = "; ".join(f"({l}) cell size {c}" for c, l in letters.items())
+    footnote = "; ".join(f"({lab}) cell size {c}" for c, lab in letters.items())
     lines = [r"\begin{table}[htbp]",
              r"  \caption{Zero-field splitting parameter $D$ of the treated point defects, from all orbitals (AO) and "
              rf"from the unpaired orbitals (UO). The superscripts refer to different defect supercells: {footnote}.}}",

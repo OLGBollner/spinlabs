@@ -120,7 +120,7 @@ def main():
                      f"| {ch['downward key']} | {ch['max |up - down| / up (T >= 50 K)']:.1e} |")
     L += ["", "V_Si- channel names: dm1 = +3/2 <-> +1/2 (equal to -3/2 <-> -1/2), dm2 = +3/2 <-> -1/2 (equal to "
           "-3/2 <-> +1/2). The two V_Si- schemes have opposite signs of D (AO < 0: +-3/2 doublet lower; UO > 0: "
-          "+-1/2 lower), so their upward keys differ.", "", f"## Rates (1/s)", "",
+          "+-1/2 lower), so their upward keys differ.", "", "## Rates (1/s)", "",
           f"| defect | scheme | channel | {hdr} |", "|---|---|---|" + "---|" * len(QUOTE)]
     nums = {}
     for (system, scheme), d in data.items():

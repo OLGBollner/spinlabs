@@ -59,12 +59,12 @@ def s2(plt, data):
                 ax.set_title(C.SYSTEMS[s]["label"], pad=10)
             if row == 1:
                 ax.set_xlabel(r"$\omega$ (meV)")
-            nums[f"{s} {key}"] = {f"integral ratio fill/computed": float(cuts["fill"].sum() / cuts["computed"].sum()),
-                                  f"integral ratio no AxE/computed": float(cuts["no_axe"].sum() / cuts["computed"].sum())}
+            nums[f"{s} {key}"] = {"integral ratio fill/computed": float(cuts["fill"].sum() / cuts["computed"].sum()),
+                                  "integral ratio no AxE/computed": float(cuts["no_axe"].sum() / cuts["computed"].sum())}
     fig.supylabel(r"$J^{(2)}(\omega, \omega)$ (MHz$^2$/meV$^2$)", fontsize=C.FONT, x=0.01)
-    h, l = axes[0, 0].get_legend_handles_labels()
+    h, labels = axes[0, 0].get_legend_handles_labels()
     short = {C.PAIR_LABELS["no_axe"]: r"computed, no $A\times E$"}
-    fig.legend(h, [short.get(x, x) for x in l], loc="upper center", ncol=2, bbox_to_anchor=(0.53, 1.04),
+    fig.legend(h, [short.get(x, x) for x in labels], loc="upper center", ncol=2, bbox_to_anchor=(0.53, 1.04),
                handlelength=2.4, columnspacing=1.0, fontsize=C.FONT - 1.5)
     fig.tight_layout(pad=0.3, w_pad=0.4, h_pad=0.8, rect=(0.02, 0, 1, 0.93))
     rec.data["files"] = C.save(fig, C.SM, "S2_spectral_diagonal_cuts")

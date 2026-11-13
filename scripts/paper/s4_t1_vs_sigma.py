@@ -124,11 +124,11 @@ def figure(plt, scheme):
     axes[0, 0].set_xlim(0, 12.5)
     entries = {}  # every curve once, in CURVES order, from whichever panel has it
     for ax in axes.flat:
-        for h, l in zip(*ax.get_legend_handles_labels()):
-            entries.setdefault(l, h)
+        for h, lab in zip(*ax.get_legend_handles_labels()):
+            entries.setdefault(lab, h)
     labels = [c[2] for c in CURVES.values() if c[2] in entries]
-    h, l = [entries[x] for x in labels], labels
-    fig.legend(h, l, loc="upper center", ncol=5, bbox_to_anchor=(0.5, 1.04), columnspacing=1.0, handlelength=2.6)
+    h = [entries[x] for x in labels]
+    fig.legend(h, labels, loc="upper center", ncol=5, bbox_to_anchor=(0.5, 1.04), columnspacing=1.0, handlelength=2.6)
     fig.tight_layout(rect=(0, 0, 1, 0.97))
     rec.data["files"] = C.save(fig, C.SM, name)
     plt.close(fig)

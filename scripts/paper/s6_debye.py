@@ -75,8 +75,8 @@ def main():
                 ax.set_xlabel(r"$E$ (meV)")
             if col == 0:
                 ax.set_ylabel(ylabel)
-    h, l = axes[0, 0].get_legend_handles_labels()
-    uniq = dict(zip(l, h))
+    h, labels = axes[0, 0].get_legend_handles_labels()
+    uniq = dict(zip(labels, h))
     fig.legend(uniq.values(), uniq.keys(), loc="upper center", ncol=5, bbox_to_anchor=(0.5, 1.05),
                fontsize=C.FONT - 1)
     fig.tight_layout(rect=(0, 0, 1, 0.96), w_pad=0.5)
