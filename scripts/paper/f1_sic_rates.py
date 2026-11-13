@@ -8,8 +8,8 @@ One row per defect, in the layout of the NV- figure sq_dq_rates_cambria_measured
 Direction convention, as the NV- figure (Omega = 0 -> +1 there, upward since D > 0): each plotted rate is the
 upward rate (lower to upper level) of the scheme's own ZFS D; gamma connects degenerate levels at zero field, so
 both its directions are the same rate. Rates are directional (direct + two-phonon, C.PROCESSES), drawn from 50 K
-as in the NV- figure. No phonon-limited line: none for VV0 and ClV+, and the Simin et al. value for V_Si- has not
-been approved (figures/out/main/numbers_phonon_limited.md).
+as in the NV- figure. Phonon-limited line: none for VV0 and ClV+; for V_Si- the onset from the Simin et al. (2017)
+fit (phonon_limited.py, as M5): 42.5 K, an upper limit since only A0 <= 0.1 1/s is given.
 Outputs: figures/out/sm/F1_sic_rates.{pdf,png}, figures/out/sm/numbers_sic_rates.md, records/F1.json.
 """
 
@@ -17,6 +17,7 @@ import numpy as np
 
 import config as C
 from common import Record, directional, rates
+from phonon_limited import SIMIN, onset, simin_dep
 
 T = C.TEMPERATURES
 QUOTE = (100.0, 300.0, 500.0)
@@ -67,6 +68,7 @@ def main():
                 if not np.all(arr[T >= T_MIN] > 0):
                     raise SystemExit(f"{system} {scheme} {name}: non-positive rate at T >= {T_MIN:g} K")
     spin_of = {s: conv[(s, "AO")]["spin"] for s in ROWS}
+    t_c = onset(simin_dep, SIMIN["A0"])  # V_Si-, upper limit (as M5)
 
     # ------------------------------------------------------------------ figure
     fig, axes = plt.subplots(len(ROWS), 2, figsize=(C.DOUBLE, 2.5 * len(ROWS)), sharex=True, sharey="row")
@@ -83,6 +85,8 @@ def main():
             ax.set_xlim(0, 620)
             ax.set_ylim(10 ** np.floor(np.log10(lo)), 10 ** np.ceil(np.log10(hi)))
             ax.set_title(title, pad=3)
+            if system == "V_Si_128":
+                C.phonon_limited_line(ax, t_c, "phonon-limited\n(upper limit)")
             C.panel_letter(ax, 2 * row + col)
             if row == len(ROWS) - 1:
                 ax.set_xlabel("Temperature (K)")
@@ -125,8 +129,8 @@ def main():
     for k, (zero, mx) in zero_check.items():
         L.append(f"| {k} | {'yes' if zero else 'NO'} | {mx:g} |")
     L += ["", "## Phonon-limited line", "",
-          "Not drawn. VV0 and ClV+: none (as requested). V_Si-: the Simin et al. (2017) onset (42.5 K, an upper limit) "
-          "is not marked as approved in figures/out/main/numbers_phonon_limited.md, so it is left out."]
+          "VV0 and ClV+: none. V_Si-: dashed line at the onset from the Simin et al. (2017) fit, "
+          f"{t_c:.1f} K, an upper limit since only A0 <= 0.1 1/s is given (scripts/paper/phonon_limited.py, as M5)."]
     path = C.SM / "numbers_sic_rates.md"
     path.write_text("\n".join(L) + "\n")
     print("written", path)
@@ -139,7 +143,7 @@ def main():
                                 "gamma: degenerate levels, both directions equal",
         "conventions": {f"{s} {sc}": v for (s, sc), v in conv.items()},
         "V_Si- within-doublet zero check": {k: {"exactly zero": z, "max abs": m} for k, (z, m) in zero_check.items()},
-        "phonon-limited line": "none (VV0, ClV+: not requested; V_Si-: Simin value not approved)",
+        "phonon-limited line": f"VV0, ClV+: none; V_Si-: {t_c:.1f} K (Simin et al. 2017 fit, upper limit; phonon_limited.py)",
         "numbers file": "sm/numbers_sic_rates.md",
     }
     rec.data["numbers"] = nums
