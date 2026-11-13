@@ -81,7 +81,7 @@ def main():
         ok = np.isfinite(t1) & (t1 > 0)
         ax.plot(T[ok], t1[ok], color=C.COLORS[scheme], label=f"{scheme}")
     ok = np.isfinite(t1_cam) & (t1_cam > 0)
-    ax.plot(T[ok], t1_cam[ok], color=C.COLORS["cambria"], ls="-.", label="Cambria et al. (ab initio)")
+    ax.plot(T[ok], t1_cam[ok], color=C.COLORS["cambria"], ls="-.", label="Cambria 2023 (ab initio)")
     for source, label, text, x, y in exp:
         color, marker = C.EXPERIMENT_STYLES[(source, label)]
         ax.plot(x, y, ls="none", marker=marker, ms=3.5, mfc=color, mec=C.EXP_EDGE, mew=0.5, label=text, zorder=3)

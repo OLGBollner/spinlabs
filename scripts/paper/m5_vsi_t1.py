@@ -20,7 +20,7 @@ from spinlabs.experimental import read_experimental_csv
 SYSTEM = "V_Si_128"
 STATE = "ms_pm1_2"
 STATE_LABEL = r"$m_s=\pm1/2$"
-EXPERIMENT = (("Simin_2017", "Simin et al. (2017)"),)  # (source, legend text)
+EXPERIMENT = (("Simin_2017", "Simin 2017"),)  # (source, legend text)
 
 
 def experiment():
