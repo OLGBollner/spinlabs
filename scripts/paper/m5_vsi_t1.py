@@ -5,13 +5,15 @@ V2 into it), T1 fitted to the doublet's summed population; the {+-3/2} doublet g
 difference between the two doublets relaxes, the Kramers-partner rates are zero), so it is not drawn.
 
 Experiment, only datasets in experimental_data/V_Si, never interpolated: Simin et al. (2017), 1/T1 (Hz) against
-temperature, drawn as T1 = 1/rate.
+temperature, drawn as T1 = 1/rate. The dashed line marks the onset of the phonon-limited regime from their fit
+(phonon_limited.py): 42.5 K, an upper limit since their temperature-independent term is given only as A0 <= 0.1 1/s.
 """
 
 import numpy as np
 
 import config as C
 from common import Record, at, directional, rates, t1_details
+from phonon_limited import SIMIN, onset, simin_dep
 
 from spinlabs.experimental import read_experimental_csv
 
@@ -56,7 +58,8 @@ def main():
     for source, label, text, x, y in exp:
         color, marker = C.EXPERIMENT_STYLES[(source, label)]
         ax.plot(x, y, ls="none", marker=marker, ms=3.5, mfc=color, mec=C.EXP_EDGE, mew=0.5, label=text, zorder=3)
-    C.phonon_limited_line(ax)
+    t_c = onset(simin_dep, SIMIN["A0"])  # upper limit: Simin et al. give only A0 <= 0.1 1/s
+    C.phonon_limited_line(ax, t_c, "phonon-limited\n(upper limit)")
     ax.set_yscale("log")
     ax.set_xlim(0, 605)
     lo = min(np.nanmin(res[sch][np.isfinite(res[sch]) & (res[sch] > 0)]) for sch in C.SCHEMES)
@@ -91,6 +94,9 @@ def main():
             model = np.exp(np.interp(x, T[ok], np.log(res[sch][ok])))
             nums[f"T1 {sch} / {text} at its points"] = [[float(a), float(m / e)] for a, m, e in zip(x, model, y)]
     rec.data["numbers"] = nums
+    rec.data["settings"]["phonon-limited line"] = (
+        f"{t_c:.1f} K: Simin et al. (2017) Eq. 2 / Table I, the constant A0 below 10% of the fitted 1/T1 "
+        "(criterion of Cambria et al. 2023); an upper limit since only A0 <= 0.1 1/s is given (phonon_limited.py)")
     rec.write()
     for k, v in nums.items():
         if isinstance(v, dict):

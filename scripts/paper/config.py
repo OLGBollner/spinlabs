@@ -28,7 +28,8 @@ NOGAP = True  # two-phonon: zero-gap pairs left out by symmetry ((l, l) and Ex-E
 PAIRS = "sqrt"
 PROCESSES = ("first_order", "two_phonon")  # direct + two-phonon; the first-order Raman term (second_order) is out
 TEMPERATURES = np.arange(0.0, 601.0, 5.0)  # K
-PHONON_LIMITED_K = 125.0  # onset of the phonon-limited regime, dashed line in T1-vs-T figures
+PHONON_LIMITED_K = 125.0  # NV-: onset of the phonon-limited regime (Cambria et al. 2023), dashed line in M2
+# V_Si- (M5) takes its onset from phonon_limited.py (Simin et al. 2017 fit, an upper limit since A0 <= 0.1 1/s)
 FALLBACK_LIMIT_K = 50.0  # eigenvalue-fallback T1 points above this stop a figure before plotting
 QUOTE_T = (100.0, 300.0, 600.0)  # K, T1 values quoted in the text
 QUOTE_T_RATIO = (100.0, 300.0, 500.0)  # K, T1(fill)/T1(computed) quoted
@@ -141,10 +142,10 @@ def panel_letter(ax, k, x=-0.02, y=1.02, **kw):
             fontweight="bold", **kw)
 
 
-def phonon_limited_line(ax):
-    """Dashed line at PHONON_LIMITED_K with a short label to its right."""
-    ax.axvline(PHONON_LIMITED_K, color=COLORS["ref"], ls="--", lw=0.8, zorder=1)
-    ax.text(PHONON_LIMITED_K + 8, 0.97, "phonon-limited", transform=ax.get_xaxis_transform(), ha="left", va="top",
+def phonon_limited_line(ax, temperature=PHONON_LIMITED_K, label="phonon-limited"):
+    """Dashed line at ``temperature`` (default PHONON_LIMITED_K, the NV- value) with a short label to its right."""
+    ax.axvline(temperature, color=COLORS["ref"], ls="--", lw=0.8, zorder=1)
+    ax.text(temperature + 8, 0.97, label, transform=ax.get_xaxis_transform(), ha="left", va="top",
             fontsize=FONT - 2, color=COLORS["ref"])
 
 
