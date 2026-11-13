@@ -1,5 +1,6 @@
 """Shared computations of the paper figures: couplings, rates per process, T1 with fit details, JSON records."""
 
+import functools
 import hashlib
 import json
 import logging
@@ -16,6 +17,7 @@ sys.path.insert(0, str(C.ROOT / "scripts"))  # coupling_manager and the spectral
 from plot_t1_comparison import coupling_manager  # noqa: E402
 from plot_spectral_comparison import computed_pair_mask  # noqa: E402
 
+from spinlabs import registry  # noqa: E402
 from spinlabs.constants import CONSTANTS  # noqa: E402
 from spinlabs.models import SpinPhononCouplingData  # noqa: E402
 from spinlabs.relaxation_dynamics import RelaxationDynamics, init_populations  # noqa: E402
@@ -74,8 +76,8 @@ def mask_to_computed(system, scheme, coupling_npz):
 
 def computed_pairs(system, scheme):
     """(N, N) bool of the second-order pairs a package computed (computed_pair_mask: the pair keys, both orders,
-    and pairs with a nonzero computed coupling, minus those excluded as inconsistent). Cached per package."""
-    cache = C.CACHE / f"computed_pairs_{system}_{scheme}_{_key(C.package(system, scheme))}.npz"
+    and pairs with a nonzero computed coupling, minus those excluded as inconsistent). Cached per package contents."""
+    cache = C.CACHE / f"computed_pairs_{system}_{scheme}_{_key(package_key(system, scheme))}.npz"
     if not cache.exists():
         manager, _ = manager_for(system, scheme, "computed")
         with tempfile.TemporaryDirectory() as tmp:
@@ -118,9 +120,30 @@ def _key(*parts):
     return hashlib.sha1(json.dumps(parts, sort_keys=True, default=str).encode()).hexdigest()[:12]
 
 
+@functools.cache
+def _registry():
+    return registry.ensure_db()
+
+
+def package_key(system, scheme):
+    """Content key of a production package for the caches: its registered sha256 (spinlabs.registry.package_digest).
+
+    A package rewritten after its registration is re-hashed and re-registered, so its caches miss; an unregistered
+    package stops with the register command. Code changes are not tracked: delete figures/out/cache/ after one.
+    """
+    previous = logging.root.manager.disable
+    logging.disable(logging.NOTSET)  # show the re-registration warning through the module-wide disable
+    try:
+        return registry.package_digest(_registry(), C.package(system, scheme))
+    except registry.UnregisteredPackageError as exc:
+        raise SystemExit(str(exc)) from exc
+    finally:
+        logging.disable(previous)
+
+
 def couplings(system, scheme, pairs=C.PAIRS):
     """Coupling arrays in MHz (V_0_0, V_p_m, V_0_pm per mode; V2_* N x N) and the mode energies in meV."""
-    cache = C.CACHE / f"couplings_{system}_{scheme}_{pairs}_{_key(C.package(system, scheme))}.npz"
+    cache = C.CACHE / f"couplings_{system}_{scheme}_{pairs}_{_key(package_key(system, scheme))}.npz"
     if not cache.exists():
         manager, convention = manager_for(system, scheme, pairs)
         with tempfile.TemporaryDirectory() as tmp:
@@ -139,7 +162,7 @@ def couplings(system, scheme, pairs=C.PAIRS):
 def rates(system, scheme, pairs=C.PAIRS, nogap=C.NOGAP, sigma=C.SIGMA, direct=C.DIRECT, temps=C.TEMPERATURES):
     """Directional rates (1/s) per process at ``temps``: {"temperatures", "<process>:<direction>", "debye_C", ...}."""
     pkg = C.package(system, scheme)
-    key = _key(str(pkg), pairs, nogap, sigma, direct, list(map(float, temps)))
+    key = _key(package_key(system, scheme), pairs, nogap, sigma, direct, list(map(float, temps)))
     cache = C.CACHE / f"rates_{system}_{scheme}_{pairs}_{'nogap' if nogap else 'gap'}_s{sigma:g}_{direct}_{key}.npz"
     if cache.exists():
         d = np.load(cache, allow_pickle=True)

@@ -3,7 +3,9 @@
 Run the figure scripts from the repo root, e.g. ``python scripts/paper/m2_nv_t1.py``. Outputs go to
 figures/out/main/ and figures/out/sm/ (PDF + 300 dpi PNG), one JSON record per figure to figures/out/records/
 (settings, numbers, T1 fit fallbacks), from which build_reports.py writes figures/out/manifest.md and
-figures/out/numbers.md. Computed rates are cached in figures/out/cache/ (delete it after a code or data change).
+figures/out/numbers.md. Computed rates are cached in figures/out/cache/, keyed on each package's registered sha256
+(common.package_key): a package rewritten in place is re-hashed through the spinlabs registry and recomputed, an
+unregistered one stops with the register command. Code changes are not tracked: delete the cache after one.
 
 V_Si^- (S = 3/2) appears in M3, S1 and M5 (m3_rho.py, s1_coupling_scatter.py, m5_vsi_t1.py) and vsi_numbers.py.
 """
