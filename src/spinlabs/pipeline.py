@@ -766,6 +766,16 @@ def _execute_pipeline(
         offdiag_filled_a_x_e = manager.n_offdiag_filled_a_x_e
 
     # ── 6. Transition Rates Calculation ──────────────────────────────────────
+    # Initial states against the spin of the couplings, for every spin (S = 1 included), before any rates
+    spin = float(coupling_data.spin) if coupling_data is not None and coupling_data.spin is not None else 1.0
+    if spin != 1.0 and init_states == list(INIT_STATES):  # the S = 1 default: use this spin's states
+        init_states = list(spin_init_states(spin))
+        LOGGER.info(f"spin S = {spin:g}: initial states {', '.join(init_states)}")
+    unknown = [s for s in init_states if s not in init_populations(spin)]
+    if unknown:
+        raise ValueError(
+            f"init_state {', '.join(unknown)} is not a state of spin {spin:g}: {', '.join(init_populations(spin))}"
+        )
     temps = temperature_grid(t_start, t_end, t_step, temperatures)
     processes = tuple(ALL_PROCESSES if processes is None else processes)
     section(
@@ -791,16 +801,6 @@ def _execute_pipeline(
         spectrum=spectrum,
         processes=processes,
     )
-    spin = float(coupling_data.spin) if coupling_data is not None and coupling_data.spin is not None else 1.0
-    if spin != 1.0:
-        if init_states == list(INIT_STATES):  # the S = 1 default: use this spin's states
-            init_states = list(spin_init_states(spin))
-            LOGGER.info(f"spin S = {spin:g}: initial states {', '.join(init_states)}")
-        unknown = [s for s in init_states if s not in init_populations(spin)]
-        if unknown:
-            raise ValueError(
-                f"init_state {', '.join(unknown)} is not a state of spin {spin:g}: {', '.join(init_populations(spin))}"
-            )
 
     # Save rates
     rates_path = run_dir / "transition_rates.npz"

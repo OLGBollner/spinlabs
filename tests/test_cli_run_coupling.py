@@ -167,3 +167,20 @@ def test_sigma_scan_without_spin_flip_coupling_reports_infinite_t1(tmp_path, cap
     out = capsys.readouterr().out
     assert "inf" in out and "warning: no finite T1 to plot" in out
     assert not (tmp_path / "scan.png").exists()
+
+
+def test_run_rejects_init_state_of_another_spin_before_the_rates(tmp_path, monkeypatch):
+    """``--init-state ms_2`` on an S = 1 package fails before any rate is computed or written."""
+    import spinlabs.pipeline as pipeline
+
+    raw_file = _inputs(tmp_path, spin_flip=True)
+    monkeypatch.chdir(tmp_path)
+
+    def no_rates(*args, **kwargs):
+        raise AssertionError("rates computed for an invalid initial state")
+
+    monkeypatch.setattr(pipeline, "compute_rates", no_rates)
+    with pytest.raises(ValueError, match=r"ms_2 is not a state of spin 1: ms_1, ms_0, ms_-1"):
+        cli.main(["run", "--raw-zfs-file", str(raw_file), "--temperatures", "300", "--init-state", "ms_2", "-q"])
+    assert not list(tmp_path.rglob("transition_rates.npz"))
+    assert not list(tmp_path.rglob("directional_rates.npz"))
