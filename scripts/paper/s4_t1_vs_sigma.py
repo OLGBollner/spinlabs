@@ -20,7 +20,7 @@ from pathlib import Path
 import numpy as np
 
 import config as C
-from common import DIRECTIONS, Record, _key, manager_for, mask_to_computed, pair_coverage, t1_details
+from common import DIRECTIONS, Record, _key, manager_for, mask_to_computed, package_key, pair_coverage, t1_details
 
 from spinlabs.constants import CONSTANTS
 from spinlabs.transition_rate import TransitionRate
@@ -44,7 +44,7 @@ DIRECTS = ("debye", "gaussian")
 
 def scan(system, scheme, pairs, nogap):
     """{direct: [directional rates at T per sigma]}"""
-    key = _key(str(C.package(system, scheme)), pairs, nogap, T, SIGMAS, DIRECTS, list(DIRECTIONS), list(C.PROCESSES))
+    key = _key(package_key(system, scheme), pairs, nogap, T, SIGMAS, DIRECTS, list(DIRECTIONS), list(C.PROCESSES))
     cache = C.CACHE / f"s4_{system}_{scheme}_{pairs}_{'nogap' if nogap else 'gap'}_{key}.json"
     if cache.exists():
         return json.loads(cache.read_text())
