@@ -10,7 +10,7 @@ from spinlabs.convergence import SNR_TARGET, TRUNC_TOL, plot_pert_convergence, r
 from spinlabs.convergence_summary import WEAK_FRACTION, plot_convergence_summary
 from spinlabs.plotter import plot_run_coupling, plot_run_rates, plot_t1
 from spinlabs.registry import ensure_db, find_convergence, find_runs, parse_orders
-from spinlabs.relaxation_dynamics import INIT_STATES, find_t1_files, normalize_init_state
+from spinlabs.relaxation_dynamics import find_t1_files, normalize_init_state
 from spinlabs.logging_utils import get_logger, section
 
 LOGGER = get_logger(__name__)
@@ -49,9 +49,9 @@ def build_plot_parser(subparsers: argparse._SubParsersAction) -> None:  # noqa: 
         "--init-state",
         nargs="+",
         type=normalize_init_state,
-        choices=INIT_STATES,
         metavar="STATE",
-        help="Only plot these initial spin state(s): ms_1 ms_0 ms_-1, or 1 0 -1 (default: every state found)",
+        help="Only plot these initial spin state(s): ms_1 ms_0 ms_-1 (or 1 0 -1) for S = 1, ms_pm1_2 ms_pm3_2 "
+        "(or pm1_2 pm3_2) for S = 3/2 (default: every state found)",
     )
     t1.add_argument(
         "--rate", action="store_true", help="Plot the relaxation rate 1/T1 (s^-1) instead of T1 (saved as t1_rate)"

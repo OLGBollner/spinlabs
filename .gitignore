@@ -21,4 +21,6 @@ httk-sym/
 
 # Packaged raw data
 /data/
-figures/
+figures
+experimental_data/
+.claude/

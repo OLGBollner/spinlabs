@@ -32,7 +32,15 @@ from spinlabs.plotter import (
     plot_t1,
     plot_transition_rates_stacked,
 )
-from spinlabs.relaxation_dynamics import INIT_POPULATIONS, INIT_STATES, RelaxationDynamics, t1_file_name
+from spinlabs.relaxation_dynamics import (
+    INIT_STATES,
+    RelaxationDynamics,
+    init_populations,
+    init_states as spin_init_states,
+    rates_file_spin,
+    t1_file_name,
+)
+from spinlabs.spin import transition_classes
 from spinlabs.transition_rate import TransitionRate
 from spinlabs.zfs_manager import ZFSManager
 
@@ -303,20 +311,28 @@ def load_raw_inputs(
     return raw_data, spectrum, ph_path
 
 
-DEFAULT_SIGMA_MEV = 7.5  # Gaussian broadening of the spectral functions (meV)
+DEFAULT_SIGMA_MEV = 3.5  # Gaussian broadening of the spectral functions (meV)
+ALL_PROCESSES = ("first_order", "second_order", "two_phonon")
+# Production settings of the paper figures (scripts/paper/config.py), the defaults of `spinlabs run`:
+# Debye direct rate, zero-gap pairs left out of the two-phonon lines, sqrt(V_ii V_jj) fill of the pairs not
+# run, inconsistent pairs excluded, T1 from the direct and two-phonon rates (no first-order Raman), 0-600 K.
+PRODUCTION_DIRECT = "debye"
+PRODUCTION_PROCESSES = ("first_order", "two_phonon")
+PRODUCTION_T_END, PRODUCTION_T_STEP = 600.0, 5.0
 
 
 def temperature_grid(
     t_start: float = 0.0, t_end: float = 300.0, t_step: float = 10.0, temperatures: Sequence[float] | None = None
 ) -> np.ndarray:
-    """The run's temperature grid in K: ``temperatures`` if given, else t_start..t_end (finer below 1 K)."""
+    """The run's temperature grid in K: ``temperatures`` if given, else t_start..t_end in steps of t_step (finer
+    below 1 K)."""
     if temperatures is not None:
         return np.asarray(temperatures, dtype=float)
-    if t_start < 1.0:
+    grid = np.arange(t_start, t_end + t_step / 2, t_step)  # t_start, t_start + t_step, ..., t_end
+    if t_start < 1.0:  # finer below 1 K
         low_range = np.arange(t_start, 1.0, max(0.01, t_step / 100))
-        high_range = np.arange(1.0 + t_step, t_end + t_step, t_step)
-        return np.unique(np.concatenate([low_range, high_range]))
-    return np.arange(t_start, t_end + t_step, t_step)
+        return np.unique(np.concatenate([low_range, grid[grid >= 1.0]]))
+    return grid
 
 
 def compute_rates(
@@ -326,20 +342,41 @@ def compute_rates(
     sigma: float = DEFAULT_SIGMA_MEV,
     two_phonon_file: str | Path | None = None,
     has_second_order: bool = False,
-    zero_gap_tol: float | None = None,
+    degenerate_groups=None,
+    direct: str = "gaussian",
+    b_field_mt: float = 0.0,
+    spectrum=None,
+    processes: Sequence[str] | None = None,
 ) -> tuple[np.ndarray, dict, dict]:
     """Transition rates of a coupling file at each temperature.
 
     ``sigma`` (meV) broadens each mode in the 1D and 2D spectral functions,
     standing in for the continuous phonon bands of a macroscopic crystal. The
     two-phonon rates integrate the 2D spectral function along each transition's
-    energy-conservation line (TransitionRate.get_line_spectral_density); ``zero_gap_tol``
-    (meV) leaves out the pairs with (near) zero frequency gap there. Returns the
-    temperatures with a result, the total rates per process and the
-    directional rates.
+    energy-conservation line (TransitionRate.get_line_spectral_density); with
+    ``degenerate_groups`` (PhononSpectrum.deg_groups) the pairs at zero frequency gap by symmetry,
+    (i, i) and degenerate partners, are left out there. ``direct`` picks the
+    one-phonon rate (TransitionRate.DIRECT_MODELS); "debye" needs the ``spectrum`` the
+    couplings were computed on. ``b_field_mt`` is an axial magnetic field (mT): it splits +1 and -1,
+    which gives the +1 <-> -1 direct rate (C_+- with "debye") and moves every gap. The directional rates (which
+    T1 is solved from) sum ``processes`` (default: all of ALL_PROCESSES); the total rates keep every process.
+    Returns the temperatures with a result, the total rates per process and the directional rates.
     """
+    processes = tuple(ALL_PROCESSES if processes is None else processes)
+    unknown = [p for p in processes if p not in ALL_PROCESSES]
+    if unknown:
+        raise ValueError(f"unknown process(es) {unknown}: choose from {ALL_PROCESSES}")
     two_ph_p = Path(two_phonon_file) if two_phonon_file else None
     calculator = TransitionRate(str(coupling_path), two_phonon_data_file=two_ph_p)
+    calculator.b_field_mt = b_field_mt
+    if direct == "debye":
+        if spectrum is None:
+            raise ValueError("direct='debye' needs the phonon spectrum of the couplings (spectrum=...)")
+        calculator.set_debye_from_spectrum(spectrum)
+    elif direct in TransitionRate.DIRECT_MODELS:
+        calculator.direct = direct
+    else:
+        raise ValueError(f"direct must be one of {TransitionRate.DIRECT_MODELS}, got {direct!r}")
     two_phonon = two_ph_p is not None or has_second_order
     # For combined 1d+2d runs the coupling file itself carries the second-order
     # coefficients (V2_*); make sure the calculator sees them as the 2-phonon source.
@@ -348,31 +385,42 @@ def compute_rates(
 
     omega, J_0_pm, J_p_m, J_0_0 = calculator.get_spectral_density(res=0.02, sigma=sigma)
     if two_phonon:
-        lines = calculator.get_line_spectral_density(sigma, zero_gap_tol=zero_gap_tol)
+        lines = calculator.get_line_spectral_density(sigma, degenerate_groups=degenerate_groups)
     omega_zfs = calculator.data["zfs"] / CONSTANTS["meV2J"]
 
-    rate_results = {k: {"0_1": [], "1_-1": []} for k in ("first_order", "second_order", "two_phonon")}
-    directional_results = {k: [] for k in ("0_to_1", "0_to_-1", "1_to_0", "-1_to_0", "1_to_-1", "-1_to_1")}
+    # Total rates per transition class (S = 1: "0_1", "1_-1"), directional rates per "m_to_m'" key of the spin
+    classes = list(transition_classes(calculator.spin))
+    rate_results = {k: {c: [] for c in classes} for k in ("first_order", "second_order", "two_phonon")}
+    directional_results = {k: [] for k in calculator.directions}
     valid_temps = []
     for T in temps:
         calculator.compute_transition_rates(T, omega, J_0_pm, J_p_m, J_0_0, omega_zfs)
         if two_phonon:
             calculator.compute_two_phonon_rates(T, lines)
         total_rates = calculator.get_total_rates()
-        dir_rates = calculator.get_directional_rates()
+        dir_rates = {
+            d: sum(calculator.transition_rate[p].get(d, 0.0) for p in processes) for d in calculator.directions
+        }
         if total_rates and dir_rates:
             for k, val in dir_rates.items():
                 directional_results[k].append(val)
             for ord_k in rate_results:
-                for trans_k in ("0_1", "1_-1"):
+                for trans_k in classes:
                     rate_results[ord_k][trans_k].append(total_rates[ord_k][trans_k])
             valid_temps.append(float(T))
     return np.asarray(valid_temps, dtype=float), rate_results, directional_results
 
 
 def solve_t1(directional_rates_path: str | Path, init_state: str) -> tuple[np.ndarray, np.ndarray]:
-    """ODE-fit and eigenvalue T1 (s) at each temperature of a directional-rates file."""
-    dynamics = RelaxationDynamics(init_state=INIT_POPULATIONS[init_state], rates_data=str(directional_rates_path))
+    """ODE-fit and eigenvalue T1 (s) at each temperature of a directional-rates file.
+
+    ``init_state`` names a state of the file's spin (relaxation_dynamics.init_populations: ms_0, ms_1, ms_-1 for
+    S = 1; ms_pm1_2, ms_pm3_2 for S = 3/2).
+    """
+    populations = init_populations(rates_file_spin(directional_rates_path))
+    if init_state not in populations:
+        raise ValueError(f"init_state {init_state!r} is not a state of this spin: {', '.join(populations)}")
+    dynamics = RelaxationDynamics(init_state=populations[init_state], rates_data=str(directional_rates_path))
     t1_fit = np.asarray(dynamics.compute_T1_range(), dtype=float)
     t1_eig = np.asarray(
         [dynamics.get_T1_eigenval(temp_index=i)[0] for i in range(len(dynamics.temperatures))], dtype=float
@@ -408,6 +456,10 @@ def run_full_pipeline(
     degenerate_pairs_from_symmetry: bool = False,
     offdiag_from_diagonal: bool = False,
     sigma: float = DEFAULT_SIGMA_MEV,
+    b_field_mt: float = 0.0,
+    direct: str = "gaussian",
+    nogap: bool = False,
+    processes: Sequence[str] | None = None,
 ) -> dict[str, Any]:
     """
     Executes the entire end-to-end pipeline:
@@ -416,6 +468,10 @@ def run_full_pipeline(
       3. Compute 1-phonon, Raman and two-phonon transition rates vs temperature
       4. Compute population relaxation dynamics and T_1 times, once per
          initial state in ``init_state`` (one state or several; default all)
+    ``direct`` is the one-phonon model (TransitionRate.DIRECT_MODELS; "debye" fits the phonon spectrum's
+    acoustic modes), ``nogap`` leaves the zero-gap pairs (PhononSpectrum.deg_groups) out of the two-phonon
+    lines, and ``processes`` are the rate processes T1 is solved from (default all). The `spinlabs run`
+    defaults are the paper's production settings (PRODUCTION_*).
       5. Save all results bunched together in a dedicated unique run folder
       6. (Optional) Generate and save publication-ready figures
     Keyword-only wrapper: see :func:`_execute_pipeline` for the pipeline body.
@@ -453,6 +509,10 @@ def run_full_pipeline(
             degenerate_pairs_from_symmetry=degenerate_pairs_from_symmetry,
             offdiag_from_diagonal=offdiag_from_diagonal,
             sigma=sigma,
+            b_field_mt=b_field_mt,
+            direct=direct,
+            nogap=nogap,
+            processes=processes,
         )
     finally:
         if owns_db_logging:
@@ -487,12 +547,17 @@ def _execute_pipeline(
     degenerate_pairs_from_symmetry: bool = False,
     offdiag_from_diagonal: bool = False,
     sigma: float = DEFAULT_SIGMA_MEV,
+    b_field_mt: float = 0.0,
+    direct: str = "gaussian",
+    nogap: bool = False,
+    processes: Sequence[str] | None = None,
 ) -> dict[str, Any]:
     """Pipeline body of :func:`run_full_pipeline` (DB logging already owned)."""
 
     section(LOGGER, "Load input data")
     init_states = list(dict.fromkeys([init_state] if isinstance(init_state, str) else init_state))
-    unknown = [s for s in init_states if s not in INIT_POPULATIONS]
+    # Names are checked against the spin once the couplings are loaded (step 6); here only their form
+    unknown = [s for s in init_states if s not in INIT_STATES and not str(s).startswith("ms_")]
     if unknown or not init_states:
         raise ValueError(f"init_state must be one or more of {', '.join(INIT_STATES)}, got {init_state!r}")
     # ── 1. Resolve order and method ──────────────────────────────────────────
@@ -533,6 +598,9 @@ def _execute_pipeline(
     _zfs_paths: list[Path] = []
     if coupling_file is not None:
         coupling_data = SpinPhononCouplingData.load(coupling_file)
+        if phonon_file is not None:  # the spectrum of the couplings, for the Debye fit and the zero-gap pairs
+            ph_path = Path(phonon_file)
+            spectrum = parse_phonon_data(ph_path)
         defect = coupling_data.defect or defect or "defect"
         cell_size = coupling_data.cell_size or cell_size or 0
         calc_method = coupling_data.calc_method or calc_method
@@ -698,8 +766,28 @@ def _execute_pipeline(
         offdiag_filled_a_x_e = manager.n_offdiag_filled_a_x_e
 
     # ── 6. Transition Rates Calculation ──────────────────────────────────────
+    # Initial states against the spin of the couplings, for every spin (S = 1 included), before any rates
+    spin = float(coupling_data.spin) if coupling_data is not None and coupling_data.spin is not None else 1.0
+    if spin != 1.0 and init_states == list(INIT_STATES):  # the S = 1 default: use this spin's states
+        init_states = list(spin_init_states(spin))
+        LOGGER.info(f"spin S = {spin:g}: initial states {', '.join(init_states)}")
+    unknown = [s for s in init_states if s not in init_populations(spin)]
+    if unknown:
+        raise ValueError(
+            f"init_state {', '.join(unknown)} is not a state of spin {spin:g}: {', '.join(init_populations(spin))}"
+        )
     temps = temperature_grid(t_start, t_end, t_step, temperatures)
-    section(LOGGER, f"Transition rates: {name}, {len(temps)} temperatures, sigma {sigma:g} meV")
+    processes = tuple(ALL_PROCESSES if processes is None else processes)
+    section(
+        LOGGER,
+        f"Transition rates: {name}, {len(temps)} temperatures, sigma {sigma:g} meV, direct {direct}, "
+        f"{'zero-gap pairs left out' if nogap else 'all pairs'}, T1 from {' + '.join(processes)}",
+    )
+    if (direct == "debye" or nogap) and spectrum is None:
+        raise ValueError(
+            "direct='debye' and nogap need the phonon spectrum of the couplings: give a phonon file (-ph), "
+            "or use direct='gaussian' without nogap"
+        )
     started = time.perf_counter()
     valid_temps_arr, rate_results, directional_results = compute_rates(
         coupling_path,
@@ -707,6 +795,11 @@ def _execute_pipeline(
         sigma=sigma,
         two_phonon_file=two_phonon_file,
         has_second_order=coupling_data is not None and coupling_data.has_second_order,
+        degenerate_groups=(spectrum.deg_groups or []) if nogap else None,
+        direct=direct,
+        b_field_mt=b_field_mt,
+        spectrum=spectrum,
+        processes=processes,
     )
 
     # Save rates
@@ -717,6 +810,7 @@ def _execute_pipeline(
         cell_size=cell_size,
         calc_method=calc_method,
         pert_scale=raw_data.pert_scale if raw_data else coupling_data.pert_scale,
+        spin=spin,
         temperatures=valid_temps_arr,
         **rate_results,
     )
@@ -728,6 +822,7 @@ def _execute_pipeline(
         cell_size=cell_size,
         calc_method=calc_method,
         pert_scale=raw_data.pert_scale if raw_data else coupling_data.pert_scale,
+        spin=spin,
         temperatures=valid_temps_arr,
         **directional_results,
     )
@@ -753,6 +848,7 @@ def _execute_pipeline(
             calc_method=calc_method,
             order=analyzed,
             init_state=state,
+            spin=spin,
             pert_scale=pert_eff if pert_eff is not None else np.nan,
             sigma_mev=sigma,
             temperatures=valid_temps_arr,
@@ -793,6 +889,10 @@ def _execute_pipeline(
         },
         "init_state": init_states,
         "sigma_mev": sigma,
+        "b_field_mt": b_field_mt,
+        "direct": direct,
+        "nogap": nogap,
+        "processes": list(processes),
         # Second-order entries departing from the first-order expectation (run folders, 1-based).
         "inconsistent_second_order": {
             "excluded": bool(inconsistent_pairs) and exclude_inconsistent_pairs,

@@ -6,11 +6,17 @@ from pathlib import Path
 
 from spinlabs.cli import add_verbosity_args
 from spinlabs.cli.coupling import build_coupling_parser
+from spinlabs.cli.production import (
+    add_coupling_args,
+    add_init_state_arg,
+    add_rate_args,
+    coupling_options,
+    rate_options,
+)
 from spinlabs.cli.sigma_scan import build_sigma_scan_parser
 from spinlabs.models import normalize_calc_method
-from spinlabs.pipeline import DEFAULT_SIGMA_MEV, run_full_pipeline
+from spinlabs.pipeline import DEFAULT_SIGMA_MEV, PRODUCTION_T_END, PRODUCTION_T_STEP, run_full_pipeline
 from spinlabs.registry import ensure_db, parse_orders
-from spinlabs.relaxation_dynamics import INIT_STATES, normalize_init_state
 
 from spinlabs.logging_utils import get_logger, section
 
@@ -70,19 +76,17 @@ def build_run_parser(parser: argparse.ArgumentParser) -> None:
         help="Override supercell size (e.g. 64, 128). With --query, several may be given (e.g. 128 512)",
     )
     opt.add_argument("--t-start", type=float, default=0.0, help="Start temperature in K (default: 0.0)")
-    opt.add_argument("--t-end", type=float, default=300.0, help="End temperature in K (default: 300.0)")
-    opt.add_argument("--t-step", type=float, default=10.0, help="Temperature step in K (default: 10.0)")
+    opt.add_argument(
+        "--t-end", type=float, default=PRODUCTION_T_END, help=f"End temperature in K (default: {PRODUCTION_T_END:g})"
+    )
+    opt.add_argument(
+        "--t-step", type=float, default=PRODUCTION_T_STEP, help=f"Temperature step in K (default: {PRODUCTION_T_STEP:g})"
+    )
     opt.add_argument(
         "--temperatures", type=float, nargs="+", metavar="T", help="Explicit temperature grid in K (overrides --t-*)"
     )
-    opt.add_argument(
-        "--init-state",
-        nargs="+",
-        type=normalize_init_state,
-        choices=INIT_STATES,
-        default=list(INIT_STATES),
-        help="Initial spin state(s) to solve the relaxation dynamics for; all share one run directory "
-        "(default: all of ms_1 ms_0 ms_-1; 1 0 -1 also accepted)",
+    add_init_state_arg(
+        opt, "Initial spin state(s) to solve the relaxation dynamics for; all share one run directory"
     )
     opt.add_argument(
         "-o", "--output-root", default="runs", help="Root folder for output run directories (default: runs)"
@@ -102,27 +106,18 @@ def build_run_parser(parser: argparse.ArgumentParser) -> None:
         f"bands of a macroscopic crystal (default: {DEFAULT_SIGMA_MEV:g}; see run sigma-scan)",
     )
     opt.add_argument(
-        "--exclude-inconsistent-pairs",
-        action="store_true",
-        help="Drop second-order entries whose ZFS change departs from the one expected from the first-order runs "
-        "by a multiple of it (strongly nonlinear modes, or over-displaced or stale runs); by default they are kept "
-        "and listed",
+        "--b-field",
+        type=float,
+        default=0.0,
+        metavar="MT",
+        help="Axial magnetic field along the defect axis in mT (default: 0). It shifts the spin levels by "
+        "g mu_B B m_s, which splits +1 and -1 and opens a +1 <-> -1 direct rate; an estimate only: the "
+        "couplings are the zero-field ones and level mixing (transverse fields, anticrossings) is not included",
     )
-    # the old default; kept so existing commands still parse
-    opt.add_argument("--keep-inconsistent-pairs", action="store_true", help=argparse.SUPPRESS)
-    opt.add_argument(
-        "--degenerate-pairs-from-symmetry",
-        action="store_true",
-        help="Take the second-order coupling of each degenerate Ex-Ey pair from its Ex-Ex derivative (C3v "
-        "symmetry) instead of the computed Ex-Ey entry, so those runs are not needed",
-    )
-    opt.add_argument(
-        "--offdiag-from-diagonal",
-        action="store_true",
-        help="Approximate every second-order pair (i, j), i != j, that was not run from the diagonal couplings: "
-        "sqrt(V_ii V_jj) per coupling type, and sqrt(V00_aa V_ee) for A x E pairs; a heuristic, only for the "
-        "types the pair's symmetry allows (computed pairs keep their values)",
-    )
+    # The coupling and rate defaults (sigma above too) are the production settings of the paper figures
+    # (scripts/paper/config.py); each has a flag to turn it off. The coupling and sigma-scan stages share them.
+    add_rate_args(opt, raman_note="The rates files hold every process either way")
+    add_coupling_args(opt)
     add_verbosity_args(opt)
 
     parser.set_defaults(func=_run)
@@ -217,6 +212,11 @@ def _first(values: list | None):
     return values[0] if values else None
 
 
+def _rate_options(args: argparse.Namespace) -> dict:
+    """Coupling and rate settings of a run (defaults: the paper's production settings)."""
+    return dict(**coupling_options(args), sigma=args.sigma, b_field_mt=args.b_field, **rate_options(args))
+
+
 def _run(args: argparse.Namespace) -> None:
     _validate(argparse.ArgumentParser(prog="spinlabs run"), args)
     if args.query:
@@ -245,10 +245,7 @@ def _run(args: argparse.Namespace) -> None:
         run_name=args.run_name,
         save_plots=args.plot,
         show_plots=False,
-        exclude_inconsistent_pairs=args.exclude_inconsistent_pairs,
-        degenerate_pairs_from_symmetry=args.degenerate_pairs_from_symmetry,
-        offdiag_from_diagonal=args.offdiag_from_diagonal,
-        sigma=args.sigma,
+        **_rate_options(args),
     )
 
 
@@ -349,8 +346,5 @@ def _run_one_query_dataset(
         run_name=run_name,
         save_plots=args.plot,
         show_plots=False,
-        exclude_inconsistent_pairs=args.exclude_inconsistent_pairs,
-        degenerate_pairs_from_symmetry=args.degenerate_pairs_from_symmetry,
-        offdiag_from_diagonal=args.offdiag_from_diagonal,
-        sigma=args.sigma,
+        **_rate_options(args),
     )

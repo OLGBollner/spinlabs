@@ -174,6 +174,21 @@ def plot_transition_rates_stacked(
     process_labels = ["Direct (1-phonon)", "1st-order Raman", "2nd-order Raman"]
 
     transitions = [("0_1", r"$0 \leftrightarrow \pm 1$"), ("1_-1", r"$+1 \leftrightarrow -1$")]
+    spin = float(data["spin"]) if "spin" in data else 1.0
+    if spin != 1.0:  # one panel per transition class of the spin (spinlabs.spin.transition_class)
+        from fractions import Fraction
+
+        from spinlabs.spin import transition_classes
+
+        def _m(text):
+            value = Fraction(text).limit_denominator(2)
+            return ("+" if value > 0 else "") + str(value)
+
+        transitions = [
+            (name, rf"${_m(a)} \leftrightarrow {_m(b)}$ (and time-reversed)")
+            for name in transition_classes(spin)
+            for a, b in [name.split("_")]
+        ]
     figures = []
 
     for trans_key, trans_title in transitions:
@@ -404,8 +419,24 @@ def plot_run_t1(run_dir: Path, out_dir: Path, fmt: str, dpi: int, show: bool):
     plot_t1(t1_files, output_path=out_file, plain_name=True)
 
 
-_CALC_METHOD_LABELS = {"all_bands": "", "defect_band_approx": "decontaminated", "defect_band": "decontaminated"}
-_INIT_STATE_LABELS = {"ms_0": "$m_s=0$", "ms_1": "$m_s=+1$", "ms_-1": "$m_s=-1$"}
+# ZFS schemes: AO all orbitals, UO the unpaired (defect-band) orbitals
+_CALC_METHOD_LABELS = {"all_bands": "AO", "defect_band_approx": "UO", "defect_band": "UO"}
+
+
+def init_state_label(init_state: str) -> str:
+    """Legend text of an initial-state name: ms_0 -> m_s=0, ms_1 -> m_s=+1, ms_pm3_2 -> m_s=+-3/2."""
+    text = str(init_state).strip().removeprefix("ms").lstrip("_")
+    sign = ""
+    if text.startswith("pm"):
+        sign, text = r"\pm ", text[2:]
+    elif text.startswith("+"):
+        sign, text = "+", text[1:]
+    elif text.startswith("-"):
+        sign, text = "-", text[1:]
+    value = text.replace("_", "/")
+    if not sign and value not in ("", "0"):
+        sign = "+"
+    return f"$m_s={sign}{value}$"
 
 
 def _t1_label_parts(
@@ -420,7 +451,7 @@ def _t1_label_parts(
     if method:
         details.append(method)
     if init_state:
-        details.append(_INIT_STATE_LABELS.get(init_state, f"$m_s={init_state.removeprefix('ms_')}$"))
+        details.append(init_state_label(init_state))
     return head, details
 
 
@@ -458,7 +489,6 @@ def plot_t1(
     axis, where Raman processes show up as power laws (T^5, T^7).
     """
     fig, ax = plt.subplots(figsize=(10, 6))
-    colors = plt.cm.tab10.colors
     meta_parts: list[str] = []
     curves: list[tuple[np.ndarray, np.ndarray, str, list[str]]] = []
 
@@ -489,7 +519,8 @@ def plot_t1(
                 t1_fit = np.asarray(data[key], dtype=float)
                 break
 
-        meta_parts.extend(x.replace(" ", "-") for x in (defect, cell_size, calc_method, init_state) if x)
+        scheme = _CALC_METHOD_LABELS.get(calc_method, calc_method)
+        meta_parts.extend(x.replace(" ", "-") for x in (defect, cell_size, scheme, init_state) if x)
         if pert is not None:
             meta_parts.append(f"pert-{pert:g}")
 
@@ -499,7 +530,7 @@ def plot_t1(
         if not np.any(valid):
             continue
         head, details = _t1_label_parts(defect, cell_size, calc_method, init_state, pert)
-        curves.append((temperatures[valid], t1_fit[valid], head or path.stem, details))
+        curves.append((temperatures[valid], t1_fit[valid], head or path.stem, details, init_state))
 
     if not curves:
         LOGGER.warning("no finite T1 values in the given files; nothing plotted")
@@ -508,11 +539,23 @@ def plot_t1(
 
     # Details every curve shares are left out so the labels stay short (state them in the caption).
     shared = [d for d in curves[0][3] if all(d in c[3] for c in curves)] if len(curves) > 1 else []
-    for idx, (temps, t1, head, details) in enumerate(curves):
+    # Colour per run (head and details other than the initial state), line style per initial state. With one
+    # run, or one state per run, the colour follows the curve instead.
+    state_text = {c[4]: init_state_label(c[4]) if c[4] else "" for c in curves}
+    run_keys = [(c[2], tuple(d for d in c[3] if d != state_text[c[4]])) for c in curves]
+    runs = list(dict.fromkeys(run_keys))
+    states = list(dict.fromkeys(c[4] for c in curves))
+    by_run = 1 < len(runs) < len(curves)
+    n_colors = len(runs) if by_run else len(curves)
+    colors = plt.cm.tab10.colors if n_colors <= 10 else plt.cm.tab20.colors
+    linestyles = ["-", "--", ":", "-."]
+    for idx, ((temps, t1, head, details, state), run) in enumerate(zip(curves, run_keys)):
         own = [d for d in details if d not in shared]
         label = f"{head} ({', '.join(own)})" if own else head
         values = 1.0 / t1 if rate else t1
-        ax.plot(temps, values, "-", color=colors[idx % len(colors)], linewidth=2, label=label)
+        color = colors[(runs.index(run) if by_run else idx) % len(colors)]
+        style = linestyles[states.index(state) % len(linestyles)] if by_run else "-"
+        ax.plot(temps, values, linestyle=style, color=color, linewidth=2, label=label)
 
     ax.set_xlabel("Temperature (K)", fontsize=16)
     ax.set_ylabel(r"$1/T_1$ (s$^{-1}$)" if rate else r"$T_1$ (s)", fontsize=16)
@@ -521,7 +564,10 @@ def plot_t1(
         ax.set_xscale("log")
     ax.grid(True, which="major", linestyle=":", alpha=0.6)
     ax.tick_params(axis="both", which="both", direction="in", labelsize=12)
-    ax.legend(loc="best", frameon=True, fontsize=14)
+    if len(curves) > 6:  # a long legend would cover the curves: put it to the right of the axes
+        ax.legend(loc="upper left", bbox_to_anchor=(1.02, 1.0), frameon=True, fontsize=11, borderaxespad=0.0)
+    else:
+        ax.legend(loc="best", frameon=True, fontsize=14)
     fig.tight_layout()
 
     if output_path is not None:

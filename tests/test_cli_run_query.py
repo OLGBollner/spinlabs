@@ -82,6 +82,10 @@ def _query_args(tmp_path, out_root, run_name="spi17"):
         degenerate_pairs_from_symmetry=False,
         offdiag_from_diagonal=False,
         sigma=7.5,
+        b_field=0.0,
+        direct="gaussian",
+        keep_zero_gap_pairs=True,
+        first_order_raman=True,
     )
 
 
@@ -108,8 +112,7 @@ def test_run_query_forwards_temperature_and_init_state(tmp_path):
     info = json.loads((run_dirs[0] / "run_info.json").read_text())
     assert info["init_state"] == ["ms_1"]
     assert info["temperatures"]["min"] == 0.0
-    # pipeline appends a +1 K guard point, so max is t_end + 1
-    assert info["temperatures"]["max"] == pytest.approx(501.0)
+    assert info["temperatures"]["max"] == pytest.approx(500.0)
 
 
 def test_run_query_run_name_per_dataset(tmp_path):
