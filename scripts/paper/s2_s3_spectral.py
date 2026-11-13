@@ -4,7 +4,8 @@ S2: along the diagonal J2(w, w), channels J_0+- and J_+-, 2 x 2 panels, one shar
 S3: the full 2D maps (all pairs computed, geometric-mean fill, fill / computed) for the same systems.
 Sets (plot_spectral_comparison.coupling_sets): all computed pairs; diagonal + sqrt(V_ii V_jj) fill, kept on the
 computed pairs only (like for like); computed without the A x E pairs. Zero-gap pairs ((l, l) and Ex-Ey partners)
-are left out of every set, as in the production rates.
+are left out of every set, as in the production rates. J2 is built from TransitionRate.pair_weights (2 |V2_ij|^2 off
+the diagonal, |V2_ii|^2 on it), the exact spectral weights compute_two_phonon_rates integrates.
 """
 
 import numpy as np
@@ -14,6 +15,7 @@ import config as C
 from common import Record
 
 from plot_spectral_comparison import WITHOUT_A_X_E, coupling_sets  # noqa: E402  (scripts/ on sys.path via common)
+from spinlabs.transition_rate import TransitionRate
 from spinlabs.utils import MathUtils
 
 SYSTEMS = ("NV_64", "DiV_128")
@@ -28,7 +30,7 @@ def maps(system):
     out = {}
     for label, cpl in sets.items():
         for key, _ in CHANNELS:
-            X, Y, J = MathUtils.get_2d_spectral_density(w, cpl[key] ** 2, res, C.SIGMA)
+            X, Y, J = MathUtils.get_2d_spectral_density(w, TransitionRate.pair_weights(cpl[key]), res, C.SIGMA)
             out[(SET_KEYS[label], key)] = J
     omega = X[0] if X.ndim == 2 else X
     return omega, out, res
