@@ -139,12 +139,14 @@ def test_defect_table_appends_t1_per_cell_with_superscripts():
     # 4H-SiC block before diamond; letters in order of first appearance.
     assert tex.index("4H-SiC") < tex.index("Diamond")
     assert (
-        r"NV & --- & 2870~\cite{loubser_electron_1978} & $2950^{(b)}$, $2830^{(c)}$ & $3050^{(b)}$ & $11.7^{(b)}$ & "
-        r"$8.30^{(b)}$, $7.53^{(c)}$ & $11.7^{(b)}$ & --- & $4120^{(b)}$ & --- \\" in tex
+        r"NV & --- & 2870~\cite{loubser_electron_1978} & $2950^{(b)}$, $2830^{(c)}$ & $3050^{(b)}$ & "
+        r"$8.30^{(b)}$, $7.53^{(c)}$ & $11.7^{(b)}$ & $4120^{(b)}$ & --- \\" in tex
     )
     assert r"ClV & kk & --- & $1440^{(a)}$ & --- &" in tex
     assert "(a) cell size 128; (b) cell size 512; (c) cell size 64" in tex
-    assert r"\cmidrule(lr){6-8}" in tex
+    assert r"\cmidrule(lr){6-7} \cmidrule(lr){8-9}" in tex
+    assert r"& Pumped & Other & Pumped & Other \\" in tex
+    assert r"optically pumped initial state ($m_s=0$ for $S=1$)" in tex
     assert r"\begin{table*}" in tex and r"$T_{1,\text{UE}}$" in tex
 
 
@@ -181,7 +183,53 @@ def test_cli_defect_table_reads_t1_from_registry(tmp_path):
 
     cli.main(["table", "defects", "-o", str(out)])
 
-    assert r"NV & --- & 2870~\cite{loubser_electron_1978} & --- & --- & --- & --- & --- & --- & $2000^{(a)}$ & --- \\" in out.read_text()
+    assert r"NV & --- & 2870~\cite{loubser_electron_1978} & --- & --- & --- & --- & $2000^{(a)}$ & --- \\" in out.read_text()
+
+
+def test_cli_defect_table_shows_spin_3_2_t1(tmp_path):
+    conn = registry.ensure_db()
+    _add_run(conn, tmp_path, "p", t1_s=0.04, defect="V_Si", cell=128, init_state="ms_pm1_2")
+    _add_run(conn, tmp_path, "o", t1_s=0.02, defect="V_Si", cell=128, init_state="ms_pm3_2")
+    out = tmp_path / "defects.tex"
+
+    cli.main(["table", "defects", "-o", str(out)])
+
+    assert r"V$_{\mathrm{Si}}$ & k & 35.0~\cite{ivady_identification_2017} & --- & --- & --- & --- & " \
+           r"$40.0^{(a)}$ & $20.0^{(a)}$ \\" in out.read_text()
+
+
+def test_defect_table_shows_spin_3_2_t1_under_pumped_and_other():
+    from spinlabs.tables import T1Row, merge_rows, render_defect_table
+
+    t1_rows = [T1Row("V_Si", 128, "defect_band_approx", None, {"ms_pm1_2": 0.0412, "ms_pm3_2": 0.0205}),
+               T1Row("NV", 512, "defect_band_approx", None, {"ms_0": 0.008297, "ms_1": 0.01172})]
+    tex = render_defect_table(merge_rows([_d("V_Si", "128", "corrected", 3.249)], t1_rows))
+
+    assert (r"V$_{\mathrm{Si}}$ & k & 35.0~\cite{ivady_identification_2017} & $3.25^{(b)}$ & --- & "
+            r"$41.2^{(b)}$ & $20.5^{(b)}$ & --- & --- \\" in tex)
+    assert r"$m_s=\pm 1/2$ for $S=3/2$" in tex and r"$m_s=\pm 3/2$ for $S=3/2$" in tex
+
+
+def test_defect_table_other_shows_both_s1_states_only_when_they_differ():
+    from spinlabs.tables import T1Row, merge_rows, render_defect_table
+
+    t1_rows = [T1Row("NV", 512, "all_bands", None, {"ms_1": 0.01172, "ms_0": 0.008297, "ms_-1": 0.0135}),
+               T1Row("NV", 64, "all_bands", None, {"ms_1": 0.01, "ms_0": 0.007534, "ms_-1": 0.01}),
+               T1Row("DiV", 128, "all_bands", None, {"ms_-1": 0.002})]
+    tex = render_defect_table(merge_rows([], t1_rows))
+
+    assert r"& $8.30^{(b)}$, $7.53^{(c)}$ & $11.7 / 13.5^{(b)}$, $10.0^{(c)}$ \\" in tex
+    assert r"VV & kk & 1305~\cite{falk_polytype_2013} & --- & --- & --- & --- & --- & $2.00^{(a)}$ \\" in tex  # only ms_-1 solved
+
+
+def test_defect_table_warns_for_a_spin_without_a_state_mapping(caplog):
+    from spinlabs.tables import T1Row, merge_rows, render_defect_table
+
+    t1_rows = [T1Row("X", 64, "all_bands", None, {"ms_0": 1.0, "ms_pm1": 2.0, "ms_pm2": 3.0})]
+    tex = render_defect_table(merge_rows([], t1_rows))
+
+    assert r"X & --- & --- & --- & --- & --- & --- & --- & --- \\" in tex
+    assert "no T1 state mapping for spin S = 2.0" in caplog.text
 
 
 def test_t1_rows_read_every_state_file_of_one_run(tmp_path):

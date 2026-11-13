@@ -263,13 +263,26 @@ COLUMN_NAMES = {"corrected": "UE", "contaminated": "AE"}
 
 # What the defect table fills in by hand per defect: the name it shows, the configuration (lattice sites),
 # and the measured D (MHz, as printed) with its BibTeX key. Defects missing here show their own name and ---.
+# "spin" (S) picks the states behind the generic T1 columns (T1_STATE_ROLES); a defect without one gets its
+# spin from the names of its T1 states.
 DEFECT_INFO = {
-    "ClV": {"name": "ClV", "configuration": "kk", "d_experiment": None, "cite": None},
-    "DiV": {"name": "VV", "configuration": "kk", "d_experiment": "1305", "cite": "falk_polytype_2013"},
+    "ClV": {"name": "ClV", "configuration": "kk", "d_experiment": None, "cite": None, "spin": 1.0},
+    "DiV": {"name": "VV", "configuration": "kk", "d_experiment": "1305", "cite": "falk_polytype_2013", "spin": 1.0},
     "V_Si": {"name": "V$_{\\mathrm{Si}}$", "configuration": "k", "d_experiment": "35.0",
-             "cite": "ivady_identification_2017"},
-    "NV": {"name": "NV", "configuration": "---", "d_experiment": "2870", "cite": "loubser_electron_1978"},
+             "cite": "ivady_identification_2017", "spin": 1.5},
+    "NV": {"name": "NV", "configuration": "---", "d_experiment": "2870", "cite": "loubser_electron_1978",
+           "spin": 1.0},
 }
+
+# Spin -> initial states (spinlabs.relaxation_dynamics.init_populations names) behind the defect table's
+# spin-independent T1 columns: "pumped" is the optically pumped state, "other" the state(s) it is compared
+# with. Several "other" states relax alike at zero field (S = 1: ms_1, ms_-1); a cell shows the first and
+# adds the rest only where they differ ("a / b", e.g. under an axial B field). A new spin needs one entry.
+T1_STATE_ROLES: dict[float, dict[str, tuple[str, ...]]] = {
+    1.0: {"pumped": ("ms_0",), "other": ("ms_1", "ms_-1")},
+    1.5: {"pumped": ("ms_pm1_2",), "other": ("ms_pm3_2",)},
+}
+T1_ROLES = ("pumped", "other")
 
 # Values from different sources (OUTCAR vs npz, 1d vs 2d npz) closer than this
 # are the same ground state; anything further apart is reported.
@@ -423,6 +436,27 @@ def _entry(merged: dict, defect: str, cell: str) -> dict:
     })
 
 
+def _state_abs_m(state: str) -> float | None:
+    """|m| of an initial-state name (ms_-1 -> 1, ms_pm3_2 -> 1.5), or None if it is not one."""
+    match = re.fullmatch(r"ms_(?:pm|[+-]?)(\d+)(?:_(\d+))?", state)
+    if not match:
+        return None
+    return int(match.group(1)) / int(match.group(2) or 1)
+
+
+def _spin_tex(spin: float) -> str:
+    return f"{spin:g}" if float(spin).is_integer() else f"{round(2 * spin)}/2"
+
+
+def _t1_spin(defect: str, states: set[str]) -> float | None:
+    """Spin of a defect for the T1 columns: DEFECT_INFO's "spin", else the largest |m| among its T1 states."""
+    spin = DEFECT_INFO.get(defect, {}).get("spin")
+    if spin is not None:
+        return float(spin)
+    sizes = [m for m in map(_state_abs_m, states) if m is not None]
+    return max(sizes) if sizes else None
+
+
 def merge_rows(d_rows: list[dict], t1_rows: list[T1Row] = ()) -> list[dict]:
     """One entry per defect+cell holding D and T1 per column.
 
@@ -495,19 +529,39 @@ def _fmt_sig(value: float, digits: int = SIG_FIGS) -> str:
     return f"{value:#.{digits}g}"
 
 
+def _roles_caption(spins: list[float]) -> str:
+    """Caption sentence naming the states behind "Pumped" and "Other" for each spin in the table."""
+    from spinlabs.plotter import init_state_label
+
+    def states(spin: float, role: str) -> str:
+        names = T1_STATE_ROLES[spin][role]
+        text = init_state_label(names[0])
+        if len(names) > 1:
+            text += ", or " + " / ".join(init_state_label(n) for n in names) + " where they differ,"
+        return text
+
+    per_role = {
+        role: "; ".join(f"{states(spin, role)} for $S={_spin_tex(spin)}$" for spin in spins) for role in T1_ROLES
+    }
+    return (f"Pumped: $T_1$ from the optically pumped initial state ({per_role['pumped']}); "
+            f"Other: from the remaining initial state ({per_role['other']}).")
+
+
 def render_defect_table(
     merged: list[dict],
     temperature: float = 300.0,
     include_t1: bool = True,
     label: str = "tab:zfs_d",
 ) -> str:
-    """LaTeX table of D (MHz) and, optionally, T1 (ms) per initial state.
+    """LaTeX table of D (MHz) and, optionally, T1 (ms) from the pumped and the other initial state.
 
     One row per defect; the values of the different supercells
     are comma-separated with a superscript letter per cell, explained in the
     caption. Rows are grouped under base-crystal headers (4H-SiC, Diamond); the
     configuration and the measured D with its citation come from DEFECT_INFO.
-    The methods are named UE (defect_band_approx) and AE (all_bands).
+    The methods are named UE (defect_band_approx) and AE (all_bands). The T1
+    columns are spin-independent: :data:`T1_STATE_ROLES` names each spin's
+    pumped and other states, and the caption spells them out.
     Requires ``booktabs`` and ``siunitx``.
     """
     letters = assign_letters(merged)
@@ -522,11 +576,41 @@ def render_defect_table(
             parts.append(f"${number}" + (rf"^{{({letter})}}" if letter else "") + "$")
         return ", ".join(parts) or "---"
 
+    def joined_t1(cells: list[dict], column: str, states: tuple[str, ...]) -> str:
+        """T1 (ms) of the first of ``states`` per cell, plus the others where they differ (shown "a / b")."""
+        parts = []
+        for entry in cells:
+            numbers: list[str] = []
+            for state in states:
+                value = entry["t1"].get((column, state))
+                if value is None or not np.isfinite(value):
+                    continue
+                number = _fmt_sig(value * 1e3).strip("$")
+                if number not in numbers:
+                    numbers.append(number)
+            if numbers:
+                letter = letters.get(entry["cell"], "")
+                parts.append("$" + " / ".join(numbers) + (rf"^{{({letter})}}" if letter else "") + "$")
+        return ", ".join(parts) or "---"
+
     grouped: dict[str, list[dict]] = {}
     for row in merged:
         grouped.setdefault(row["defect"], []).append(row)
 
-    t1_keys = [(c, s) for c in COLUMNS for s in INIT_STATES] if include_t1 else []
+    # Spin of each defect with T1 data; a spin missing from T1_STATE_ROLES shows --- and is reported.
+    spins: dict[str, float | None] = {}
+    if include_t1:
+        for defect, cells in grouped.items():
+            states = {state for e in cells for _, state in e["t1"]}
+            if not states:
+                continue
+            spin = spins[defect] = _t1_spin(defect, states)
+            if spin not in T1_STATE_ROLES:
+                LOGGER.warning(
+                    f"{defect}: no T1 state mapping for spin S = {spin} (T1_STATE_ROLES); its T1 columns show ---"
+                )
+
+    t1_keys = [(c, role) for c in COLUMNS for role in T1_ROLES] if include_t1 else []
     n_cols = 5 + len(t1_keys)
     mhz = r"(\si{\mega\hertz})"
     head = [r"Defect", "Configuration", r"$D_\text{experiment}$"]
@@ -534,9 +618,12 @@ def render_defect_table(
     sub = ["", "", mhz, mhz, mhz]
     rules = ""
     if include_t1:
-        head += [rf"\multicolumn{{3}}{{c}}{{$T_{{1,\text{{{COLUMN_NAMES[c]}}}}}$ (ms)}}" for c in COLUMNS]
-        sub += [_INIT_STATE_HEADERS[s] for _, s in t1_keys]
-        rules = r"    \cmidrule(lr){6-8} \cmidrule(lr){9-11}" + "\n"
+        n_roles = len(T1_ROLES)
+        head += [rf"\multicolumn{{{n_roles}}}{{c}}{{$T_{{1,\text{{{COLUMN_NAMES[c]}}}}}$ (ms)}}" for c in COLUMNS]
+        sub += [role.capitalize() for _, role in t1_keys]
+        rules = "    " + " ".join(
+            rf"\cmidrule(lr){{{6 + i * n_roles}-{5 + (i + 1) * n_roles}}}" for i in range(len(COLUMNS))
+        ) + "\n"
 
     footnote = "; ".join(f"({letter}) cell size {cell}" for cell, letter in letters.items())
     caption = "Zero-field splitting parameter $D$"
@@ -545,6 +632,9 @@ def render_defect_table(
     caption += " of the treated point defects."
     if include_t1:
         caption += f" The presented $T_1$ value is for a system at $T = {temperature:g}$~K."
+        shown = sorted({spin for spin in spins.values() if spin in T1_STATE_ROLES})
+        if shown:
+            caption += " " + _roles_caption(shown)
     if footnote:
         caption += f" The superscripts refer to different defect supercells: {footnote}."
     env = "table*" if include_t1 else "table"  # the T1 columns need the full page width
@@ -573,7 +663,8 @@ def render_defect_table(
             experiment += rf"~\cite{{{info['cite']}}}"
         values = [info.get("name") or tex_defect(defect), info.get("configuration") or "---", experiment]
         values += [joined([(e["d"][c], e["cell"]) for e in cells]) for c in COLUMNS]
-        values += [joined([(e["t1"].get(key), e["cell"]) for e in cells], scale=1e3) for key in t1_keys]
+        roles = T1_STATE_ROLES.get(spins.get(defect), {})
+        values += [joined_t1(cells, column, roles.get(role, ())) for column, role in t1_keys]
         lines.append("    " + " & ".join(values) + r" \\")
 
     lines += [
