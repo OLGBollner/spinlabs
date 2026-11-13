@@ -3,8 +3,12 @@
 sigma broadens every mode in the spectral functions so the supercell's discrete
 modes stand in for the continuous phonon bands of a macroscopic crystal. The
 scan computes the couplings once, then the rates and T1 at each sigma, so the
-dependence on that choice can be seen and justified. Nothing is written to the
-registry or the run folders.
+dependence on that choice can be seen and justified. Everything else is as in
+``spinlabs run``, production defaults included (spinlabs.cli.production): Debye
+direct rate, zero-gap pairs left out of the two-phonon rates, T1 from the direct
+and two-phonon rates (no first-order Raman), inconsistent second-order entries
+excluded and the off-diagonal fill on; at the run's sigma the scan gives the
+run's T1. Nothing is written to the registry or the run folders.
 """
 
 import argparse
@@ -15,8 +19,8 @@ import numpy as np
 
 from spinlabs.cli import add_verbosity_args
 from spinlabs.cli.coupling import add_input_args, load_manager
+from spinlabs.cli.production import add_init_state_arg, add_rate_args, rate_options, resolve_init_states
 from spinlabs.logging_utils import get_logger, section
-from spinlabs.relaxation_dynamics import INIT_STATES, normalize_init_state
 
 LOGGER = get_logger(__name__)
 
@@ -43,14 +47,7 @@ def build_sigma_scan_parser(parser: argparse.ArgumentParser) -> None:
         metavar="K",
         help="Temperatures to report T1 at (default: 300)",
     )
-    opt.add_argument(
-        "--init-state",
-        nargs="+",
-        type=normalize_init_state,
-        choices=INIT_STATES,
-        default=list(INIT_STATES),
-        help="Initial spin state(s) (default: all; 1 0 -1 also accepted)",
-    )
+    add_init_state_arg(opt, "Initial spin state(s)")
     opt.add_argument("--plot", type=Path, metavar="FILE", help="Also save a T1-vs-sigma figure to FILE")
     opt.add_argument(
         "--plot-temperature",
@@ -67,6 +64,7 @@ def build_sigma_scan_parser(parser: argparse.ArgumentParser) -> None:
         help="Temperature grid of the --plot-temperature figure in K (default: "
         f"{' '.join(f'{t:g}' for t in DEFAULT_T_RANGE)})",
     )
+    add_rate_args(opt)
     add_verbosity_args(opt)
     parser.set_defaults(func=_run_sigma_scan)
 
@@ -88,6 +86,13 @@ def _run_sigma_scan(args: argparse.Namespace) -> None:
         grid = np.arange(start, end + step / 2, step)
     all_temps = np.unique(np.concatenate([temps, grid]))
     manager, ph_path, orders = load_manager(args, "spinlabs run sigma-scan")
+    rates = rate_options(args)
+    spectrum = manager.spectrum
+    if (rates["direct"] == "debye" or rates["nogap"]) and spectrum is None:
+        raise SystemExit(
+            "--direct debye and leaving the zero-gap pairs out need the phonon spectrum of the couplings: give a "
+            "phonon file (-ph), or use --direct gaussian --keep-zero-gap-pairs"
+        )
 
     section(LOGGER, f"Spin-phonon coupling: {manager.defect}_{manager.cell_size} {manager.calc_method}")
     with tempfile.TemporaryDirectory() as tmp:
@@ -97,22 +102,35 @@ def _run_sigma_scan(args: argparse.Namespace) -> None:
         else:
             manager.process_first_order_perturbations(output_filename=base)
         coupling = Path(f"{base}.npz")
-        has_second = SpinPhononCouplingData.load(coupling).has_second_order
+        coupling_data = SpinPhononCouplingData.load(coupling)
+        has_second = coupling_data.has_second_order
+        spin = float(coupling_data.spin) if coupling_data.spin is not None else 1.0
+        try:
+            states = resolve_init_states(args.init_state, spin)
+        except ValueError as error:
+            raise SystemExit(f"--init-state: {error}") from None
 
         # t1_all[sigma][state] -> T1 (s) at each of all_temps; t1 = the same at --temperature
         t1_all: dict[float, dict[str, np.ndarray]] = {}
         for n, sigma in enumerate(sigmas, start=1):
             section(LOGGER, f"Transition rates and T1, sigma {sigma:g} meV ({n}/{len(sigmas)})")
-            valid, _, directional = compute_rates(coupling, all_temps, sigma=sigma, has_second_order=has_second)
+            valid, _, directional = compute_rates(
+                coupling,
+                all_temps,
+                sigma=sigma,
+                has_second_order=has_second,
+                degenerate_groups=(spectrum.deg_groups or []) if rates["nogap"] else None,
+                direct=rates["direct"],
+                spectrum=spectrum,
+                processes=rates["processes"],
+            )
             dir_path = Path(tmp) / f"directional_rates_{n}.npz"
-            np.savez(dir_path, temperatures=valid, **directional)
-            t1_all[sigma] = {
-                state: _on_grid(valid, solve_t1(dir_path, state)[0], all_temps) for state in args.init_state
-            }
+            np.savez(dir_path, spin=spin, temperatures=valid, **directional)
+            t1_all[sigma] = {state: _on_grid(valid, solve_t1(dir_path, state)[0], all_temps) for state in states}
     at = [int(np.flatnonzero(np.isclose(all_temps, T))[0]) for T in temps]
     t1 = {sigma: {state: v[at] for state, v in by_state.items()} for sigma, by_state in t1_all.items()}
 
-    print(_table(manager, t1, temps, args.init_state, has_second, DEFAULT_SIGMA_MEV))
+    print(_table(manager, t1, temps, states, has_second, DEFAULT_SIGMA_MEV, rates))
     if getattr(args, "plot_temperature", None):
         if not any(np.any(np.isfinite(v) & (v > 0)) for by_state in t1_all.values() for v in by_state.values()):
             LOGGER.warning(f"no finite T1 to plot; {args.plot_temperature} not written")
@@ -121,14 +139,14 @@ def _run_sigma_scan(args: argparse.Namespace) -> None:
             on_grid = np.isin(np.round(all_temps, 9), np.round(grid, 9))
             t1_grid = {sigma: {state: v[on_grid] for state, v in by_state.items()} for sigma, by_state in t1_all.items()}
             _plot_temperature(
-                manager, t1_grid, all_temps[on_grid], args.init_state, args.plot_temperature, DEFAULT_SIGMA_MEV
+                manager, t1_grid, all_temps[on_grid], states, args.plot_temperature, DEFAULT_SIGMA_MEV
             )
             LOGGER.info(f"saved figure: {args.plot_temperature}")
     if args.plot:
         if not any(np.any(np.isfinite(v) & (v > 0)) for by_state in t1.values() for v in by_state.values()):
             LOGGER.warning(f"no finite T1 to plot; {args.plot} not written")
         else:
-            _plot(manager, t1, temps, args.init_state, args.plot, DEFAULT_SIGMA_MEV)
+            _plot(manager, t1, temps, states, args.plot, DEFAULT_SIGMA_MEV)
             LOGGER.info(f"saved figure: {args.plot}")
 
 
@@ -152,15 +170,18 @@ def _label(manager) -> str:
     return f"{manager.defect}_{manager.cell_size}  {manager.calc_method}  pert {manager.pert_scale:g}{weighting}"
 
 
-def _table(manager, t1, temps, states, has_second, default_sigma) -> str:
-    """T1 (ms) per sigma, state and temperature, plus the spread over the scan."""
+def _table(manager, t1, temps, states, has_second, default_sigma, rates) -> str:
+    """T1 (ms) per sigma, state and temperature, plus the spread over the scan; ``rates`` is rate_options()."""
     cols = [(state, T) for T in temps for state in states]
     head = f"{'sigma (meV)':>12s} " + " ".join(f"{state + f' @{T:g}K':>14s}" for state, T in cols)
     lines = [
         _label(manager),
         f"  second order: {'yes' if has_second else 'no (one-phonon processes only)'}; "
         f"inconsistent second-order entries "
-        f"{'excluded' if manager.exclude_inconsistent_pairs else 'kept'}: {len(manager.inconsistent_pairs)}",
+        f"{'excluded' if manager.exclude_inconsistent_pairs else 'kept'}: {len(manager.inconsistent_pairs)}; "
+        f"off-diagonal fill {'on' if manager.offdiag_from_diagonal else 'off'}",
+        f"  direct rate {rates['direct']}, zero-gap pairs {'left out' if rates['nogap'] else 'kept'}, "
+        f"T1 from {' + '.join(rates['processes'])}",
         "  T1 in ms:",
         head,
     ]

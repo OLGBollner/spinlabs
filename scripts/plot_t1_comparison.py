@@ -13,7 +13,8 @@ rates: the diagonal (i, i) and the partners of symmetry-degenerate E doublets (t
 groups), whose ~1/sigma contribution a phonon continuum does not have; accidental near-degeneracies are kept.
 
 DISPLACEMENT (normalized, mass_weighted, unweighted) overrides the package's displacement convention.
-Inconsistent second-order entries are excluded. Without --case, the NV_64 / NV_512 comparison of
+Inconsistent second-order entries are excluded. T1 comes from the direct and two-phonon rates, as in
+`spinlabs run` (--first-order-raman adds the first-order Raman rate). Without --case, the NV_64 / NV_512 comparison of
 2026-10-28 is drawn. The numbers go to <output>.json; --replot redraws from it without recomputing.
 
     python scripts/plot_t1_comparison.py sigma -o figures/sigma_scan/t1_vs_sigma.png
@@ -32,7 +33,14 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
 import numpy as np  # noqa: E402
 
-from spinlabs.pipeline import compute_rates, load_raw_inputs, solve_t1  # noqa: E402
+from spinlabs.pipeline import (  # noqa: E402
+    ALL_PROCESSES,
+    PRODUCTION_DIRECT,
+    PRODUCTION_PROCESSES,
+    compute_rates,
+    load_raw_inputs,
+    solve_t1,
+)
 from spinlabs.zfs_manager import ZFSManager  # noqa: E402
 
 MODES = ("computed", "sqrt", "diagonal", "diagonal-sqrt")
@@ -104,8 +112,13 @@ def coupling_manager(raw_file, mode, displacement=None):
     return manager, f"{raw.defect}_{raw.cell_size} step {raw.pert_scale:g}: {manager.displacement}"
 
 
-def t1_grid(manager, sigmas, temps, nogap=False, direct="gaussian"):
-    """T1 (s) per initial state and the 0<->1 one- and two-phonon rates (1/s), as [sigma][temperature]."""
+def t1_grid(manager, sigmas, temps, nogap=True, direct=PRODUCTION_DIRECT, processes=PRODUCTION_PROCESSES):
+    """T1 (s) per initial state and the 0<->1 one- and two-phonon rates (1/s), as [sigma][temperature].
+
+    The defaults are those of `spinlabs run` (the paper's production settings): zero-gap pairs left out,
+    Debye direct rate, T1 from the direct and two-phonon rates (``processes``; ALL_PROCESSES adds the
+    first-order Raman rate). The 0<->1 rates are the per-process totals either way.
+    """
     t1 = {state: [] for state, _ in STATES}
     rates_0_1 = {"first_order": [], "two_phonon": []}
     with tempfile.TemporaryDirectory() as tmp:
@@ -115,7 +128,7 @@ def t1_grid(manager, sigmas, temps, nogap=False, direct="gaussian"):
             valid, rates, directional = compute_rates(
                 Path(f"{base}.npz"), temps, sigma=sigma, has_second_order=True,
                 degenerate_groups=(manager.spectrum.deg_groups or []) if nogap else None,
-                direct=direct, spectrum=manager.spectrum,
+                direct=direct, spectrum=manager.spectrum, processes=processes,
             )
             if len(valid) != len(temps):
                 raise SystemExit(f"rates missing at some temperatures for sigma {sigma:g}: got {list(valid)}")
@@ -128,18 +141,20 @@ def t1_grid(manager, sigmas, temps, nogap=False, direct="gaussian"):
     return t1, rates_0_1
 
 
-def compute(kind, cases, sigmas, temps, direct="gaussian"):
+def compute(kind, cases, sigmas, temps, direct="gaussian", processes=PRODUCTION_PROCESSES):
     """Run every case; the result dict that plot() draws and the JSON stores.
 
     ``direct`` is the one-phonon model (TransitionRate.DIRECT_MODELS): "gaussian" reads the smeared J at D,
     which grows with sigma as the tails of the optical modes reach down; "debye" is the production model.
+    ``processes`` are the rates T1 is solved from (production: direct + two-phonon, no first-order Raman).
     """
-    result = {"kind": kind, "sigma_mev": sigmas, "temperature_K": temps, "direct": direct, "cases": []}
+    result = {"kind": kind, "sigma_mev": sigmas, "temperature_K": temps, "direct": direct,
+              "processes": list(processes), "cases": []}
     for label, raw_file, mode, displacement in cases:
         pairs, _, case_direct = mode.partition("|")  # "<pairs>|gaussian" overrides the direct model for one case
         nogap = pairs.endswith(NOGAP)
         manager, convention = coupling_manager(raw_file, pairs.removesuffix(NOGAP), displacement)
-        t1, rates_0_1 = t1_grid(manager, sigmas, temps, nogap=nogap, direct=case_direct or direct)
+        t1, rates_0_1 = t1_grid(manager, sigmas, temps, nogap=nogap, direct=case_direct or direct, processes=processes)
         result["cases"].append(
             {
                 "label": label,
@@ -257,6 +272,9 @@ if __name__ == "__main__":
                        help="LABEL FILE MODE [DISPLACEMENT]; repeat per curve (default: the NV_64/NV_512 comparison)")
         p.add_argument("-o", "--output", default=f"t1_vs_{kind}.png", help="Figure path; the numbers go next to it")
         p.add_argument("--replot", action="store_true", help="Redraw from <output>.json without recomputing")
+        p.add_argument("--first-order-raman", action="store_true",
+                       help="Also solve T1 with the first-order Raman rate (as spinlabs run --first-order-raman); "
+                            "by default T1 comes from the direct and two-phonon rates only")
         if kind == "sigma":
             p.add_argument("--sigmas", nargs="+", type=float, default=DEFAULT_SIGMAS, help="Broadenings in meV")
             p.add_argument("--temperature", type=float, default=300.0, help="Temperature in K (default: 300)")
@@ -292,7 +310,8 @@ if __name__ == "__main__":
         # the paper figure uses the production direct rate (Debye), so only the two-phonon rate depends on sigma;
         # its "|gaussian" curve repeats the production method with the smeared-tail direct rate to show why
         direct = "debye" if args.kind == "sigma" and args.by_system else "gaussian"
-        result = compute(args.kind, cases, sigmas, temps, direct=direct)
+        processes = ALL_PROCESSES if args.first_order_raman else PRODUCTION_PROCESSES
+        result = compute(args.kind, cases, sigmas, temps, direct=direct, processes=processes)
         out.parent.mkdir(parents=True, exist_ok=True)
         out.with_suffix(".json").write_text(json.dumps(result, indent=1))
     if args.kind == "sigma" and args.by_system:

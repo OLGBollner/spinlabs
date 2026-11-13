@@ -6,19 +6,17 @@ from pathlib import Path
 
 from spinlabs.cli import add_verbosity_args
 from spinlabs.cli.coupling import build_coupling_parser
+from spinlabs.cli.production import (
+    add_coupling_args,
+    add_init_state_arg,
+    add_rate_args,
+    coupling_options,
+    rate_options,
+)
 from spinlabs.cli.sigma_scan import build_sigma_scan_parser
 from spinlabs.models import normalize_calc_method
-from spinlabs.pipeline import (
-    DEFAULT_SIGMA_MEV,
-    PRODUCTION_DIRECT,
-    PRODUCTION_PROCESSES,
-    PRODUCTION_T_END,
-    PRODUCTION_T_STEP,
-    run_full_pipeline,
-)
-from spinlabs.transition_rate import TransitionRate
+from spinlabs.pipeline import DEFAULT_SIGMA_MEV, PRODUCTION_T_END, PRODUCTION_T_STEP, run_full_pipeline
 from spinlabs.registry import ensure_db, parse_orders
-from spinlabs.relaxation_dynamics import INIT_STATES, normalize_init_state
 
 from spinlabs.logging_utils import get_logger, section
 
@@ -87,14 +85,8 @@ def build_run_parser(parser: argparse.ArgumentParser) -> None:
     opt.add_argument(
         "--temperatures", type=float, nargs="+", metavar="T", help="Explicit temperature grid in K (overrides --t-*)"
     )
-    opt.add_argument(
-        "--init-state",
-        nargs="+",
-        type=normalize_init_state,
-        default=list(INIT_STATES),
-        help="Initial spin state(s) to solve the relaxation dynamics for; all share one run directory "
-        "(default: every state of the spin: ms_1 ms_0 ms_-1 for S = 1, also given as 1 0 -1; ms_pm1_2 ms_pm3_2 "
-        "for S = 3/2)",
+    add_init_state_arg(
+        opt, "Initial spin state(s) to solve the relaxation dynamics for; all share one run directory"
     )
     opt.add_argument(
         "-o", "--output-root", default="runs", help="Root folder for output run directories (default: runs)"
@@ -122,54 +114,10 @@ def build_run_parser(parser: argparse.ArgumentParser) -> None:
         "g mu_B B m_s, which splits +1 and -1 and opens a +1 <-> -1 direct rate; an estimate only: the "
         "couplings are the zero-field ones and level mixing (transverse fields, anticrossings) is not included",
     )
-    # The defaults below (sigma above too) are the production settings of the paper figures
-    # (scripts/paper/config.py); each has a flag to turn it off.
-    opt.add_argument(
-        "--direct",
-        choices=TransitionRate.DIRECT_MODELS,
-        default=PRODUCTION_DIRECT,
-        help="One-phonon (direct) rate: 'debye' J(E) = C E^3 fitted to the supercell's folded acoustic modes, "
-        "'gaussian' the smeared J at the splitting (only Gaussian tails of optical modes), 'none' "
-        f"(default: {PRODUCTION_DIRECT})",
-    )
-    opt.add_argument(
-        "--keep-zero-gap-pairs",
-        action="store_true",
-        help="Keep the mode pairs at zero frequency gap by symmetry ((i, i) and degenerate partners) in the "
-        "two-phonon rates; by default they are left out (their weight ~ 1/sigma has no continuum counterpart)",
-    )
-    opt.add_argument(
-        "--first-order-raman",
-        action="store_true",
-        help="Also solve T1 with the first-order Raman rate (first-order couplings at second order); by default "
-        "T1 comes from the direct and two-phonon rates only. The rates files hold every process either way",
-    )
-    opt.add_argument(
-        "--exclude-inconsistent-pairs",
-        action=argparse.BooleanOptionalAction,
-        default=True,
-        help="Drop second-order entries whose ZFS change departs from the one expected from the first-order runs "
-        "by a multiple of it (strongly nonlinear modes, or over-displaced or stale runs); they are listed either "
-        "way (default: dropped; --no-exclude-inconsistent-pairs keeps them)",
-    )
-    # older spelling of --no-exclude-inconsistent-pairs
-    opt.add_argument(
-        "--keep-inconsistent-pairs", dest="exclude_inconsistent_pairs", action="store_false", help=argparse.SUPPRESS
-    )
-    opt.add_argument(
-        "--degenerate-pairs-from-symmetry",
-        action="store_true",
-        help="Take the second-order coupling of each degenerate Ex-Ey pair from its Ex-Ex derivative (C3v "
-        "symmetry) instead of the computed Ex-Ey entry, so those runs are not needed",
-    )
-    opt.add_argument(
-        "--offdiag-from-diagonal",
-        action=argparse.BooleanOptionalAction,
-        default=True,
-        help="Approximate every second-order pair (i, j), i != j, that was not run from the diagonal couplings: "
-        "sqrt(V_ii V_jj) per coupling type, and sqrt(V00_aa V_ee) for A x E pairs; a heuristic, only for the "
-        "types the pair's symmetry allows (computed pairs keep their values) (default: on)",
-    )
+    # The coupling and rate defaults (sigma above too) are the production settings of the paper figures
+    # (scripts/paper/config.py); each has a flag to turn it off. The coupling and sigma-scan stages share them.
+    add_rate_args(opt, raman_note="The rates files hold every process either way")
+    add_coupling_args(opt)
     add_verbosity_args(opt)
 
     parser.set_defaults(func=_run)
@@ -266,16 +214,7 @@ def _first(values: list | None):
 
 def _rate_options(args: argparse.Namespace) -> dict:
     """Coupling and rate settings of a run (defaults: the paper's production settings)."""
-    return dict(
-        exclude_inconsistent_pairs=args.exclude_inconsistent_pairs,
-        degenerate_pairs_from_symmetry=args.degenerate_pairs_from_symmetry,
-        offdiag_from_diagonal=args.offdiag_from_diagonal,
-        sigma=args.sigma,
-        b_field_mt=args.b_field,
-        direct=args.direct,
-        nogap=not args.keep_zero_gap_pairs,
-        processes=("first_order", "second_order", "two_phonon") if args.first_order_raman else PRODUCTION_PROCESSES,
-    )
+    return dict(**coupling_options(args), sigma=args.sigma, b_field_mt=args.b_field, **rate_options(args))
 
 
 def _run(args: argparse.Namespace) -> None:
