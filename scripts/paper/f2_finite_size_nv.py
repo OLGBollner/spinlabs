@@ -4,7 +4,7 @@ Both cells with the same pair treatment: diagonal + geometric-mean fill, zero-ga
 production treatment, "diagonal-sqrt" in plot_t1_comparison.coupling_manager). For NV- (64) this is the fill-only
 case, not its production all-pairs case. NV- (64) AO with every second-order pair computed (no fill, "computed")
 is added as a thin line, so the fill bias and the cell-size effect can be told apart. (b): T1(64) / T1(512),
-fill only, AO and UO. Experiment of M2 (m2_nv_t1.experiment) as light gray markers, for orientation only.
+fill only, AO and UO, from 100 K. Experiment of M2 (m2_nv_t1.experiment) as light gray markers, for orientation only.
 The two cells also differ in displacement amplitude: NV- (64) 0.1, not mass-weighted; NV- (512) 0.05,
 mass-weighted.
 Outputs: figures/out/sm/F2_finite_size_NV.{pdf,png}, figures/out/sm/numbers_finite_size_nv.md, records/F2.json.
@@ -18,7 +18,8 @@ from m2_nv_t1 import STATE, experiment
 
 T = C.TEMPERATURES
 QUOTE = (100.0, 300.0, 500.0)
-T_MIN = 50.0  # K, first temperature drawn
+T_MIN = 50.0  # K, first temperature drawn in (a)
+T_MIN_RATIO = 100.0  # K, first temperature in (b): below it the ratio of two steep T1 curves runs off the scale
 CASES = [  # (system, scheme, pairs)
     ("NV_512", "AO", "diagonal-sqrt"), ("NV_512", "UO", "diagonal-sqrt"),
     ("NV_64", "AO", "diagonal-sqrt"), ("NV_64", "UO", "diagonal-sqrt"),
@@ -42,6 +43,9 @@ def main():
     prod512 = {s: t1_details(T, directional(rates("NV_512", s)), STATE)[0] for s in C.SCHEMES}
     ok = T >= T_MIN
     same512 = {s: float(np.max(np.abs(prod512[s][ok] / t1[("NV_512", s, "diagonal-sqrt")][ok] - 1))) for s in C.SCHEMES}
+    if max(same512.values()) > 1e-12:
+        raise SystemExit(f"NV_512 production T1 differs from fill only ({same512}): the 512 curves would no longer "
+                         "be the production treatment")
     rec.check_fallbacks()
     exp = experiment()
 
@@ -70,7 +74,8 @@ def main():
     ratio = {}
     for scheme in C.SCHEMES:
         ratio[scheme] = t1[("NV_64", scheme, "diagonal-sqrt")] / t1[("NV_512", scheme, "diagonal-sqrt")]
-        bx.plot(T[ok], ratio[scheme][ok], color=C.COLORS[scheme], label=scheme)
+        okr = T >= T_MIN_RATIO
+        bx.plot(T[okr], ratio[scheme][okr], color=C.COLORS[scheme], label=scheme)
     bx.axhline(1.0, color=C.COLORS["ref"], lw=0.6, ls=":")
     bx.set_xlabel("Temperature (K)")
     bx.set_ylabel(r"$T_1(64)\,/\,T_1(512)$")

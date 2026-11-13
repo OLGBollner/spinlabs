@@ -33,6 +33,8 @@ def channels(spin, d_mev):
         up, down = ("0_to_1", "1_to_0") if d_mev > 0 else ("1_to_0", "0_to_1")
         return [("Omega", r"$\Omega$ ($0\leftrightarrow\pm1$)", up, down),
                 ("gamma", r"$\gamma$ ($+1\leftrightarrow-1$)", "1_to_-1", "-1_to_1")]
+    if spin != 1.5:
+        raise ValueError(f"channels: no panel layout for spin {spin:g} (only S = 1 and S = 3/2)")
     # S = 3/2: E_m = D (m^2 - 5/4), the +-3/2 doublet lower for D < 0
     dm1, dm2 = ("1.5", "0.5"), ("1.5", "-0.5")  # (+3/2 doublet member, +-1/2 doublet member)
     if d_mev > 0:  # +-1/2 lower: upward is from the +-1/2 member
