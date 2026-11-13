@@ -20,7 +20,7 @@ from pathlib import Path
 import numpy as np
 
 import config as C
-from common import DIRECTIONS, Record, manager_for, mask_to_computed, pair_coverage, t1_details
+from common import DIRECTIONS, Record, _key, manager_for, mask_to_computed, pair_coverage, t1_details
 
 from spinlabs.constants import CONSTANTS
 from spinlabs.transition_rate import TransitionRate
@@ -44,7 +44,8 @@ DIRECTS = ("debye", "gaussian")
 
 def scan(system, scheme, pairs, nogap):
     """{direct: [directional rates at T per sigma]}"""
-    cache = C.CACHE / f"s4_{system}_{scheme}_{pairs}_{'nogap' if nogap else 'gap'}.json"
+    key = _key(str(C.package(system, scheme)), pairs, nogap, T, SIGMAS, DIRECTS, list(DIRECTIONS), list(C.PROCESSES))
+    cache = C.CACHE / f"s4_{system}_{scheme}_{pairs}_{'nogap' if nogap else 'gap'}_{key}.json"
     if cache.exists():
         return json.loads(cache.read_text())
     print(f"  sigma scan: {system} {scheme} {pairs} nogap={nogap}")
@@ -85,7 +86,7 @@ def figure(plt, scheme):
             sc = scan(s, scheme, pairs, nogap)
             for d in DIRECTS:
                 t1s, eigs, srcs = [], [], []
-                for sigma, r in zip(SIGMAS, sc[d]):
+                for sigma, r in zip(SIGMAS, sc[d], strict=True):
                     t1, eig, src = t1_details([T], {k: np.array([v]) for k, v in r.items()}, STATE)
                     t1s.append(t1[0]), eigs.append(eig[0]), srcs.append(src[0])
                     if src[0] == "eigenvalue":
