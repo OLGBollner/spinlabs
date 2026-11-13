@@ -109,6 +109,27 @@ def test_spin_three_halves_factors():
     assert transition_class(0.0, -1.0) == "0_1" and transition_class(-1.0, 1.0) == "1_-1"
 
 
+def test_get_V2ph_is_an_amplitude():
+    """_get_V2ph: F_z V_00 on the diagonal (not F_z^2), sqrt(spin_factor) times V_0pm / V_+- off it."""
+    v0pm, vpm, v00 = np.array([2.0, -3.0]), np.array([5.0, 7.0]), np.array([0.5, -1.5])
+
+    def amp(spin, m1, m2):
+        return TransitionRate(spin=spin)._get_V2ph(m1, m2, v0pm, vpm, v00)
+
+    # S = 1: F_z = 1, -2, 1 and every spin factor is 1
+    np.testing.assert_allclose(amp(1.0, 1.0, 1.0), v00)
+    np.testing.assert_allclose(amp(1.0, 0.0, 0.0), -2.0 * v00)
+    np.testing.assert_allclose(amp(1.0, 0.0, -1.0), v0pm)
+    np.testing.assert_allclose(amp(1.0, 1.0, -1.0), vpm)
+    # S = 3/2: F_z = 3, -3; spin factors 6 (dm = 1 between the doublets) and 3 (dm = 2); Kramers and dm = 3 zero
+    np.testing.assert_allclose(amp(1.5, 1.5, 1.5), 3.0 * v00)
+    np.testing.assert_allclose(amp(1.5, -0.5, -0.5), -3.0 * v00)
+    np.testing.assert_allclose(amp(1.5, 0.5, 1.5), np.sqrt(6.0) * v0pm)
+    np.testing.assert_allclose(amp(1.5, -0.5, 1.5), np.sqrt(3.0) * vpm)
+    np.testing.assert_array_equal(amp(1.5, 0.5, -0.5), 0.0)
+    np.testing.assert_array_equal(amp(1.5, 1.5, -1.5), 0.0)
+
+
 # ------------------------------------------------------------------ selection rules
 
 

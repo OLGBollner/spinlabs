@@ -338,9 +338,15 @@ class TransitionRate:
         return omega_x, omega_y, J_0_pm, J_p_m, J_0_0_base
 
     def _get_V2ph(self, m1, m2, V_0_pm_2ph, V_p_m_2ph, V_0_0_2ph):
-        """Second-order coupling of m1 -> m2 as an amplitude: the channel's V2 times sqrt(spin factor)."""
+        """Second-order coupling of m1 -> m2 as an amplitude (not squared).
+
+        m1 == m2: F_z(m1) V_00 (F_z = 3 m^2 - S(S+1), signed). Its square F_z^2 |V_00|^2 is the weight the rates use
+        (get_J_path's F_z^2 J_00, J already squared). |dm| = 1, 2: sqrt(spin_factor(S, m1, m2)) times V_0pm or V_+-,
+        the magnitude of the S.d.S element in units of the channel amplitude (the sign of that element is dropped;
+        sqrt(spin_factor) = 1 for S = 1). |dm| > 2 and Kramers partners: zero.
+        """
         if m1 == m2:
-            return (self.Fz_elements[m1] ** 2) * V_0_0_2ph
+            return self.Fz_elements[m1] * V_0_0_2ph
         diff = abs(m1 - m2)
         if diff in (1, 2):
             return np.sqrt(spin_factor(self.spin, m1, m2)) * (V_0_pm_2ph if diff == 1 else V_p_m_2ph)
