@@ -82,7 +82,7 @@ def package(system: str, scheme: str) -> Path:
 # ------------------------------------------------------------------ names
 STATE_LABELS = {"ms_0": r"$m_s=0$", "ms_1": r"$m_s=\pm1$"}  # +1 and -1 relax alike at zero field
 CHANNELS = ("V00", "Vpm", "V0pm")
-CHANNEL_LABELS = {"V00": r"$V_{00}$", "Vpm": r"$V_{+-}$", "V0pm": r"$V_{0\pm}$"}
+CHANNEL_LABELS = {"V00": r"$V_{\Delta 0}$", "Vpm": r"$V_{\Delta 2}$", "V0pm": r"$V_{\Delta 1}$"}
 PAIR_LABELS = {  # second-order pair treatments of S2, S4, S5
     "computed": "computed pairs",
     "fill-computed": "fill on computed pairs",

@@ -137,9 +137,9 @@ def draw(plt, d_sign):
             ha="center", va="center", fontsize=C.FONT - 2.5, style="italic", color=C.COLORS["ref"])
     # legend
     from matplotlib.lines import Line2D
-    handles = [Line2D([], [], color=COL["dm1"], lw=1.4, label=r"$\Delta m_s=\pm1$: $F_{x'},F_{y'}$, tilting $E$"),
-               Line2D([], [], color=COL["dm2"], lw=1.4, label=r"$\Delta m_s=\pm2$: $F_x,F_y$, in-plane $E$"),
-               Line2D([], [], color=COL["A1"], lw=1.4, label=r"$F_z$, $A_1$ modes"),
+    handles = [Line2D([], [], color=COL["dm1"], lw=1.4, label=r"$V_{\Delta 1}$ ($\Delta m_s=\pm1$): $F_{x'},F_{y'}$, tilting $E$"),
+               Line2D([], [], color=COL["dm2"], lw=1.4, label=r"$V_{\Delta 2}$ ($\Delta m_s=\pm2$): $F_x,F_y$, in-plane $E$"),
+               Line2D([], [], color=COL["A1"], lw=1.4, label=r"$V_{\Delta 0}$: $F_z$, $A_1$ modes"),
                Line2D([], [], color=COL["forbidden"], lw=0.9, ls=(0, (3, 2)), label="forbidden")]
     ax.text(0.5, 0.035, r"$n\times$: $|\langle m'|F|m\rangle|^2$ relative to the spin-1 transition",
             ha="center", va="center", fontsize=C.FONT - 2.5)

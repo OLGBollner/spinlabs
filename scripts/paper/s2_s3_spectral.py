@@ -19,7 +19,7 @@ from spinlabs.transition_rate import TransitionRate
 from spinlabs.utils import MathUtils
 
 SYSTEMS = ("NV_64", "DiV_128")
-CHANNELS = (("V2_0_pm", r"J^{(2)}_{0\pm}"), ("V2_p_m", r"J^{(2)}_{+-}"))
+CHANNELS = (("V2_0_pm", r"J^{(2)}_{\Delta 1}"), ("V2_p_m", r"J^{(2)}_{\Delta 2}"))
 SET_KEYS = {"computed": "computed", "geometric mean": "fill", WITHOUT_A_X_E: "no_axe"}
 DYNAMIC_RANGE = 1e-6
 

@@ -15,7 +15,7 @@ from spinlabs.debye import debye_coefficient
 from spinlabs.parsers import parse_phonon_data
 
 SYSTEMS = ("NV_64", "NV_512", "DiV_128", "ClV_576")
-CHANNELS = (("V_0_pm", r"$|V_{0\pm}|^2$ (MHz$^2$)", "C_0pm"), ("V_p_m", r"$|V_{+-}|^2$ (MHz$^2$)", "C_pm"))
+CHANNELS = (("V_0_pm", r"$|V_{\Delta 1}|^2$ (MHz$^2$)", "C_0pm"), ("V_p_m", r"$|V_{\Delta 2}|^2$ (MHz$^2$)", "C_pm"))
 MHZ_PER_MEV = Cn.e * 1e-3 / Cn.h / 1e6
 
 

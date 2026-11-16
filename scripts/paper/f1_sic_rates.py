@@ -40,8 +40,8 @@ def channels(spin, d_mev):
     dm1, dm2 = ("1.5", "0.5"), ("1.5", "-0.5")  # (+3/2 doublet member, +-1/2 doublet member)
     if d_mev > 0:  # +-1/2 lower: upward is from the +-1/2 member
         dm1, dm2 = dm1[::-1], dm2[::-1]
-    return [("dm1", r"$\Delta m_s=1$ ($\pm\frac{3}{2}\leftrightarrow\pm\frac{1}{2}$)", "_to_".join(dm1), "_to_".join(dm1[::-1])),
-            ("dm2", r"$\Delta m_s=2$ ($\pm\frac{3}{2}\leftrightarrow\mp\frac{1}{2}$)", "_to_".join(dm2), "_to_".join(dm2[::-1]))]
+    return [("dm1", r"$\Gamma_{\Delta 1}$ ($\pm\frac{3}{2}\leftrightarrow\pm\frac{1}{2}$)", "_to_".join(dm1), "_to_".join(dm1[::-1])),
+            ("dm2", r"$\Gamma_{\Delta 2}$ ($\pm\frac{3}{2}\leftrightarrow\mp\frac{1}{2}$)", "_to_".join(dm2), "_to_".join(dm2[::-1]))]
 
 
 def main():
