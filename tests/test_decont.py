@@ -123,6 +123,8 @@ def test_full_decont_tree_has_the_scf_input_and_one_incar_per_sublevel(tmp_path)
     for tree in (defect / "first_order" / "pert_0.025" / "full_decont", defect / "convergence_test_decont"):
         inp = tree / "input"
         assert _tag((inp / "INCAR").read_text(), "LWAVE") == ".TRUE."
+        assert _tag((inp / "INCAR").read_text(), "ISYM") == "0"
+        assert _tag((inp / "sublevels" / "ms_1" / "INCAR").read_text(), "ISYM") == "0"
         assert sorted(p.name for p in (inp / "sublevels").iterdir()) == ["ms_0_127", "ms_0_128", "ms_1"]
         assert _tag((inp / "sublevels" / "ms_0_128" / "INCAR").read_text(), "ALGO") == "None"
 

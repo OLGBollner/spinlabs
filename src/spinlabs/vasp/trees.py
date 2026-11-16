@@ -137,26 +137,22 @@ def forbid_algo_none(incar: str) -> tuple[str, str | None]:
     return out, warning
 
 
-def forbid_sym_ldmatrix(incar: str) -> tuple[str, str | None]:
-    """Guard against ISYM=1/2 combined with LDMATRIX.
+def symmetry_off(incar: str) -> tuple[str, str | None]:
+    """Set ISYM = 0 in a perturbation INCAR (appended when missing).
 
-    VASP's LDMATRIX is not supported with symmetry handling ISYM=1 or 2:
-    the density symmetrization conflicts with the D-matrix evaluation.
-    If such a combination is found, correct ISYM to 3 (symmetry applied
-    to the detected structure only) and return a warning message.
+    A perturbed structure has lower symmetry than the ground state, and with ISYM = 3 VASP
+    regularly stopped on perturbed runs because it could not find an inverse rotation
+    (INVGRP); those runs had to be redone with ISYM = 0. Returns a note when ISYM changed.
     """
-    if not re.search(r"^\s*LDMATRIX\s*=\s*\.TRUE\.", incar, re.M | re.I):
+    isym = re.search(r"^\s*ISYM\s*=\s*(-?\d+)", incar, re.M | re.I)
+    if isym is not None and isym.group(1) == "0":
         return incar, None
-    isym = re.search(r"^\s*ISYM\s*=\s*([12])\b", incar, re.M | re.I)
     if isym is None:
-        return incar, None
-    out = replace_tag(incar, "ISYM", "3")
-    warning = (
-        f"INCAR had ISYM={isym.group(1)} together with LDMATRIX; "
-        "corrected to ISYM=3 (ISYM=1/2 is not supported with "
-        "LDMATRIX)"
+        return incar.rstrip("\n") + "\nISYM = 0\n", "INCAR had no ISYM; set ISYM=0 (symmetry off for perturbed structures)"
+    return replace_tag(incar, "ISYM", "0"), (
+        f"INCAR had ISYM={isym.group(1)}; set to ISYM=0 (symmetry off: perturbed structures made VASP "
+        "fail to find inverse rotations)"
     )
-    return out, warning
 
 
 def forbid_relaxation(incar: str) -> tuple[str, str | None]:
@@ -424,16 +420,19 @@ def prepare_basis(
         return failures
 
     # the perturbation INCAR is the ZFS run's INCAR, verbatim apart from
-    # the restart flags: same setup, only the structure differs, and the
-    # CHGCAR lets a failed run pick up where it left off
+    # the restart flags and ISYM = 0 (symmetry off): same setup, only the
+    # structure differs, and the CHGCAR lets a failed run pick up where it left off
     incar_path = inp / "INCAR"
     if incar_path.is_file():
         incar = incar_path.read_text()
         warnings = []
-        for guard in (forbid_algo_none, forbid_sym_ldmatrix, forbid_relaxation):
+        for guard in (forbid_algo_none, forbid_relaxation):
             incar, warning = guard(incar)
             if warning:
                 warnings.append(warning)
+        incar, note = symmetry_off(incar)
+        if note:
+            LOGGER.info(f"{dst}: {note}")
         for warning in warnings:
             LOGGER.warning(f"{dst}: {warning}")
         if decont:

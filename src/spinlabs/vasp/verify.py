@@ -87,8 +87,8 @@ def _check_decont_incars(folder: Path) -> list[str]:
             if (_tag_value(text, tag) or "").lower() != want:
                 problems.append(f"FAIL: {name}: {tag} is {_tag_value(text, tag)}, should be {want}")
         isym = _tag_value(text, "ISYM")
-        if isym is not None and isym in ("1", "2"):
-            problems.append(f"FAIL: {name}: ISYM=1/2 together with LDMATRIX -- use ISYM=3")
+        if isym != "0":
+            problems.append(f"WARNING: {name}: ISYM={isym if isym is not None else 'unset'}, trees are built with ISYM=0")
         for tag in ("NUPDOWN", "DOCCUP", "DOCCDO"):
             if _tag_value(text, tag) is None:
                 problems.append(f"FAIL: {name}: {tag} not set")
@@ -153,6 +153,11 @@ def verify_setup(folder: Path, script_name: str) -> list[str]:
         isym = _tag_value(itext, "ISYM")
         if isym is not None and int(isym) in (1, 2) and (_tag_value(itext, "LDMATRIX") or "").lower() == ".true.":
             problems.append("FAIL: INCAR ISYM=1/2 together with LDMATRIX -- use ISYM=3")
+        elif isym != "0":
+            problems.append(
+                f"WARNING: INCAR ISYM={isym if isym is not None else 'unset'} -- perturbed structures can make VASP "
+                "fail to find inverse rotations; trees are built with ISYM=0"
+            )
         gam = "gam" in (_tag_value(_read(script), "BINARY") or "").lower()
         if gam:
             problems.append(
