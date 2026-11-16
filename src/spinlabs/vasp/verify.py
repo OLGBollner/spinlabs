@@ -21,7 +21,7 @@ from pathlib import Path
 
 from spinlabs.vasp.modes import mode_numbers, pair_numbers
 from spinlabs.vasp.slurm_logs import summarize, unfinished_reasons
-from spinlabs.vasp.trees import read_outcar_time, sbatch_time, step_sizes
+from spinlabs.vasp.trees import DECONT_REFERENCE_RUN, SUBLEVELS_DIR, read_outcar_time, sbatch_time, step_sizes
 
 PLACEHOLDER = re.compile(r"<[^<>\s]+>")
 RUNNER = "scripts/cluster/perturbation_runner.sh"  # the loop the run scripts start
@@ -58,6 +58,41 @@ def script_config(text: str) -> dict[str, str]:
         default = re.fullmatch(r"\$\{\w+:?-(.*)\}", val)
         config.setdefault(m.group(1).upper(), (default.group(1) if default else val).strip("'\""))
     return config
+
+
+def is_decont_tree(folder: Path) -> bool:
+    """Whether a tree runs the full spin decontamination (its input/ has the sublevels/ folder)."""
+    return (Path(folder) / "input" / SUBLEVELS_DIR).is_dir()
+
+
+def _check_decont_incars(folder: Path) -> list[str]:
+    """A decontamination tree's INCARs: input/INCAR the SCF that writes the WAVECAR, each
+    input/sublevels/<name>/INCAR an ALGO=None ZFS run reading it."""
+    problems: list[str] = []
+    scf = _read(folder / "input" / "INCAR")
+    if (_tag_value(scf, "LWAVE") or "").lower() != ".true.":
+        problems.append("FAIL: INCAR (the SCF) has no LWAVE = .TRUE. -- the sublevels need its WAVECAR")
+    if (_tag_value(scf, "ALGO") or "").lower() == "none":
+        problems.append("FAIL: INCAR (the SCF) has ALGO=None -- the WAVECAR would not be the perturbed state's")
+    levels = sorted(p for p in (folder / "input" / SUBLEVELS_DIR).iterdir() if p.is_dir())
+    if not levels:
+        problems.append(f"FAIL: input/{SUBLEVELS_DIR} has no spin sublevel folders")
+    for level in levels:
+        name = f"{SUBLEVELS_DIR}/{level.name}/INCAR"
+        text = _read(level / "INCAR")
+        if not text:
+            problems.append(f"FAIL: missing input/{name}")
+            continue
+        for tag, want in (("ALGO", "none"), ("ISTART", "1"), ("LDMATRIX", ".true."), ("LWAVE", ".false.")):
+            if (_tag_value(text, tag) or "").lower() != want:
+                problems.append(f"FAIL: {name}: {tag} is {_tag_value(text, tag)}, should be {want}")
+        isym = _tag_value(text, "ISYM")
+        if isym is not None and isym in ("1", "2"):
+            problems.append(f"FAIL: {name}: ISYM=1/2 together with LDMATRIX -- use ISYM=3")
+        for tag in ("NUPDOWN", "DOCCUP", "DOCCDO"):
+            if _tag_value(text, tag) is None:
+                problems.append(f"FAIL: {name}: {tag} not set")
+    return problems
 
 
 def verify_setup(folder: Path, script_name: str) -> list[str]:
@@ -103,6 +138,8 @@ def verify_setup(folder: Path, script_name: str) -> list[str]:
     incar = folder / "input" / "INCAR"
     if not incar.is_file():
         problems.append(f"FAIL: missing {incar}")
+    elif is_decont_tree(folder):
+        problems.extend(_check_decont_incars(folder))
     else:
         itext = _read(incar)
         if (_tag_value(itext, "LDMATRIX") or "").lower() != ".true.":
@@ -135,13 +172,16 @@ _ARRAY = re.compile(r"^(#SBATCH\s+(?:-a\s+|--array[= ]))(\S+)", re.M)
 _TIME = re.compile(r"^(#SBATCH\s+(?:-t\s+|--time[= ]))(\S+)", re.M)
 
 
-def expected_runs(config: dict[str, str], order: str) -> list[str]:
+def expected_runs(config: dict[str, str], order: str, decont: bool = False) -> list[str]:
     """Run folder names (below runs/) the job script's runner works through, in its order.
 
     Mirrors the walk in scripts/cluster/perturbation_runner.sh: first order ``<i>``, second
     order ``<i>_<j>`` (PAIR_MODE diag, or all, i <= j nearest in frequency first: modes.pair_numbers), convergence ``<i>_pert_<step>`` for each
-    of MODES at -p and +p for every step size p in PERTS.
+    of MODES at -p and +p for every step size p in PERTS. A full-decontamination tree (``decont``)
+    runs ``ref``, the unperturbed structure, first.
     """
+    if decont:
+        return [DECONT_REFERENCE_RUN, *expected_runs(config, order)]
     if order == "convergence":
         modes = config["MODES"].split()
         steps = [f"{s:g}" for p in step_sizes([float(x) for x in config["PERTS"].split()]) for s in (-p, p)]
@@ -184,8 +224,15 @@ def median_run_seconds(folder: Path, done: list[str], sample: int = TIMING_SAMPL
     if not done:
         return None
     step = max(1, len(done) // sample)
-    times = [t for r in done[::step][:sample] if (t := read_outcar_time(Path(folder) / "runs" / r)) is not None]
+    times = [t for r in done[::step][:sample] if (t := run_seconds(Path(folder) / "runs" / r)) is not None]
     return statistics.median(times) if times else None
+
+
+def run_seconds(run: Path) -> float | None:
+    """VASP wall time (s) of one run: its OUTCAR plus, in a decontamination run, its sublevels' OUTCARs."""
+    times = [read_outcar_time(run)] + [read_outcar_time(d) for d in sorted(run.iterdir()) if d.is_dir()]
+    times = [t for t in times if t is not None]
+    return sum(times) if times else None
 
 
 def array_tasks(spec: str) -> tuple[int, int]:
@@ -244,7 +291,7 @@ def unfinished_runs(folder: Path) -> dict[str, str] | None:
         return None
     config = script_config(_read(scripts[0]))
     try:
-        expected = expected_runs(config, _script_order(scripts[0].name, config))
+        expected = expected_runs(config, _script_order(scripts[0].name, config), is_decont_tree(folder))
     except (KeyError, ValueError, OSError):
         return None
     finished = set(run_progress(folder, expected).done)
@@ -262,7 +309,7 @@ def offer_rescale(folder: Path, script_name: str, ask=None) -> None:
     text = _read(script)
     config = script_config(text)
     try:
-        expected = expected_runs(config, _script_order(script_name, config))
+        expected = expected_runs(config, _script_order(script_name, config), is_decont_tree(folder))
     except (KeyError, ValueError, OSError) as error:
         print(f"Cannot count the runs: {error}")
         return

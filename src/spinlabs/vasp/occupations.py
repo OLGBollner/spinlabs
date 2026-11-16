@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 import shutil
+from dataclasses import dataclass
 from pathlib import Path
 
 from spinlabs.logging_utils import get_logger, section
@@ -211,3 +212,101 @@ def prepare_relax_to_zfs(relax: Path, zfs: Path) -> list[str]:
     else:
         LOGGER.info("all checks passed; ready to launch")
     return failures
+
+
+# --------------------------------------------------------------------------- #
+# spin sublevels for the full (Biktagirov) spin decontamination
+# --------------------------------------------------------------------------- #
+def expand_occupations(value: str) -> list[float]:
+    """Expand a DOCCUP/DOCCDO value such as ``125*1.0 1*0.0 128*0.0`` into one entry per band."""
+    occ: list[float] = []
+    for item in value.split():
+        count, star, occupation = item.partition("*")
+        if star:
+            occ.extend([float(occupation)] * int(count))
+        else:
+            occ.append(float(item))
+    return occ
+
+
+def parse_occupations(incar: str) -> tuple[list[float], list[float]]:
+    """The (up, down) band occupations of an INCAR's DOCCUP and DOCCDO (the last of each wins)."""
+    up, dn = parse_tag(incar, "DOCCUP"), parse_tag(incar, "DOCCDO")
+    if up is None or dn is None:
+        raise ValueError("INCAR has no DOCCUP/DOCCDO occupations")
+    up_occ, dn_occ = expand_occupations(up), expand_occupations(dn)
+    if len(up_occ) != len(dn_occ):
+        raise ValueError(f"DOCCUP has {len(up_occ)} bands, DOCCDO {len(dn_occ)}")
+    return up_occ, dn_occ
+
+
+def _runs(occ: list[float]) -> list[str]:
+    out: list[str] = []
+    i = 0
+    while i < len(occ):
+        j = i
+        while j < len(occ) and occ[j] == occ[i]:
+            j += 1
+        out.append(f"{j - i}*{occ[i]:.1f}")
+        i = j
+    return out
+
+
+def format_occupations(occ: list[float], window: tuple[int, int] | None = None) -> str:
+    """A DOCCUP/DOCCDO value: run-length ``n*x`` entries; the bands of ``window``
+    (1-based, inclusive) are written one by one (``1*1.0 1*0.0``) so the defect levels stand out."""
+    if window is None:
+        return " ".join(_runs(occ))
+    lo, hi = max(window[0], 1), min(window[1], len(occ))
+    parts = _runs(occ[: lo - 1]) + [f"1*{x:.1f}" for x in occ[lo - 1 : hi]] + _runs(occ[hi:])
+    return " ".join(parts)
+
+
+@dataclass(frozen=True)
+class SpinSublevel:
+    """One determinant of the decontamination: its run folder name, occupations and NUPDOWN."""
+
+    name: str
+    up: tuple[float, ...]
+    dn: tuple[float, ...]
+    nupdown: int
+    window: tuple[int, int]
+
+    def doccup(self) -> str:
+        return format_occupations(list(self.up), self.window)
+
+    def doccdo(self) -> str:
+        return format_occupations(list(self.dn), self.window)
+
+
+def spin_sublevels(up: list[float], dn: list[float]) -> list[SpinSublevel]:
+    """The ms = S determinant and the 2S spin-flip ms = S-1 determinants of a high-spin state.
+
+    The 2S unpaired bands are the ones occupied in the up channel and empty in the down
+    channel; S = (number of unpaired bands)/2. ``ms_<S>`` keeps the occupations; for each
+    unpaired band k, ``ms_<S-1>_<k>`` moves k's electron to the down channel at the same band
+    index (up loses k, down gains k), NUPDOWN = 2S - 2. For the NV centre (S = 1, unpaired 127
+    and 128) that is ms_1, ms_0_127 and ms_0_128.
+    """
+    if len(up) != len(dn):
+        raise ValueError(f"up has {len(up)} bands, down {len(dn)}")
+    unpaired = [i + 1 for i, (u, d) in enumerate(zip(up, dn)) if u > 0.5 and d < 0.5]
+    minority = [i + 1 for i, (u, d) in enumerate(zip(up, dn)) if d > 0.5 and u < 0.5]
+    if minority:
+        raise ValueError(f"bands {minority} are occupied in the down channel only; the majority spin must be up")
+    if not unpaired:
+        raise ValueError("no unpaired band (occupied up, empty down): not a high-spin state")
+    two_s = len(unpaired)
+    window = (unpaired[0] - 1, unpaired[-1])
+
+    def label(two_ms: int) -> str:
+        return f"ms_{two_ms / 2:g}"
+
+    levels = [SpinSublevel(label(two_s), tuple(up), tuple(dn), two_s, window)]
+    for k in unpaired:
+        flipped_up, flipped_dn = list(up), list(dn)
+        flipped_up[k - 1], flipped_dn[k - 1] = 0.0, 1.0
+        levels.append(
+            SpinSublevel(f"{label(two_s - 2)}_{k}", tuple(flipped_up), tuple(flipped_dn), two_s - 2, window)
+        )
+    return levels

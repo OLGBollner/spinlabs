@@ -33,7 +33,10 @@ _VASP_EXIT = re.compile(r"VASP exited with (\d+)")
 
 
 def run_label(run: str) -> str:
-    """The runner's label for a run folder name: 4 -> mode 4, 4_7 -> pair 4, 7, 13_pert_-0.05 -> mode 13 step -0.05."""
+    """The runner's label for a run folder name: 4 -> mode 4, 4_7 -> pair 4, 7, 13_pert_-0.05 -> mode 13 step -0.05,
+    ref -> unperturbed reference (a full-decontamination tree)."""
+    if run == "ref":
+        return "unperturbed reference"
     if "_pert_" in run:
         mode, step = run.split("_pert_", 1)
         return f"mode {mode} step {step}"
@@ -81,11 +84,15 @@ def _attempt_reason(attempt: _Attempt, run_dir: Path) -> str:
         return "creating the perturbed structure failed"
     if "not the intended displacement" in text:
         return "perturbed POSCAR failed the displacement check"
+    if "no sublevel runs" in text:
+        return "the SCF before the spin sublevels failed its check"
     if m := _VASP_EXIT.search(text):
         return f"VASP exited with {m.group(1)}"
     if "did not finish" in text:
         scf = scf_problem(scf_status(run_dir)) if run_dir.is_dir() else None
         return scf.split(":")[0] if scf else "VASP ended without a ZFS block"
+    if "without a ZFS block" in text:
+        return "spin sublevel(s) ended without a ZFS block"
     if "Done!" in text:
         return "VASP finished but the run has no .done"
     if _OOM.search(text):

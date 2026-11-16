@@ -36,6 +36,13 @@ CONVERGENCE_FOLDER = {
     "all_bands": "convergence_test_all",
     "defect_band_approx": "convergence_test_occup",
 }
+# full spin decontamination (Biktagirov): one tree basis, from the all-electron ZFS_hyp run
+DECONT_BASIS = "full_decont"
+DECONT_SOURCE = {DECONT_BASIS: "ZFS_hyp"}
+DECONT_CONVERGENCE_FOLDER = {DECONT_BASIS: "convergence_test_decont"}
+SUBLEVELS_DIR = "sublevels"  # input/sublevels/<name>/INCAR: the ALGO=None ZFS run of each spin sublevel
+DECONT_REFERENCE_RUN = "ref"  # runs/ref: the unperturbed structure through the same steps
+SUBLEVEL_TIME_FRACTION = 0.1  # time of one ALGO=None sublevel run, as a fraction of the reference ZFS run
 
 _DISPLACEMENT_LINE = re.compile(r"^\s*DISPLACEMENT\s*=\s*(\S+)", re.M)
 _MASS_WEIGHTED_LINE = re.compile(r"^\s*MASS_WEIGHTED\s*=\s*(\S+)", re.M)
@@ -179,6 +186,65 @@ def forbid_relaxation(incar: str) -> tuple[str, str | None]:
         "LDMATRIX; corrected to IBRION=-1 (static run) so the "
         "ZFS is evaluated on the exact perturbed geometry"
     )
+
+
+def _set_tags(incar: str, values: dict[str, str]) -> str:
+    """Set each tag to its value, appending tags the INCAR does not have."""
+    out = incar
+    for tag, value in values.items():
+        out = replace_tag(out, tag, value)
+        if not re.search(rf"^\s*{tag}\s*=", out, re.M | re.I):
+            out = out.rstrip("\n") + f"\n{tag} = {value}\n"
+    return out
+
+
+def decont_scf_incar(incar: str) -> str:
+    """Step 2 of a full-decontamination run: the SCF of the ms = S state that writes the WAVECAR.
+
+    The ZFS run's INCAR (its ms = S occupations) with LDMATRIX off (the sublevel runs evaluate
+    it) and LWAVE on, restart-ready from the CHGCAR like every perturbation INCAR.
+    """
+    return patch_restart_incar(_set_tags(incar, {"LDMATRIX": ".FALSE."}))
+
+
+def decont_sublevel_incar(incar: str, level) -> str:
+    """Step 4: the ZFS of one spin sublevel (an occupations.SpinSublevel) from the step-2 WAVECAR.
+
+    ALGO = None keeps the WAVECAR's orbitals; only the occupations (and NUPDOWN) differ between
+    the sublevels. Nothing is written back (LWAVE/LCHARG off), so the WAVECAR can be a symlink.
+    """
+    return _set_tags(
+        incar,
+        {
+            "ALGO": "None",
+            "ISTART": "1",
+            "ICHARG": "0",
+            "LDMATRIX": ".TRUE.",
+            "NUPDOWN": str(level.nupdown),
+            "DOCCUP": level.doccup(),
+            "DOCCDO": level.doccdo(),
+            "LWAVE": ".FALSE.",
+            "LCHARG": ".FALSE.",
+            "NSW": "0",
+            "IBRION": "-1",
+        },
+    )
+
+
+def write_decont_inputs(inp: Path, incar: str) -> list[str]:
+    """Write inp/INCAR (step 2) and inp/sublevels/<name>/INCAR (step 4) from a guarded ZFS INCAR.
+
+    Returns the sublevel names.
+    """
+    from spinlabs.vasp.occupations import parse_occupations, spin_sublevels
+
+    levels = spin_sublevels(*parse_occupations(incar))
+    (inp / "INCAR").write_text(decont_scf_incar(incar))
+    for level in levels:
+        d = inp / SUBLEVELS_DIR / level.name
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "INCAR").write_text(decont_sublevel_incar(incar, level))
+    return [level.name for level in levels]
 
 
 # job-script templates copied into every tree (package data, next to this module)
@@ -328,12 +394,16 @@ def prepare_basis(
     displacement: str = "normalized",
     conv_modes: list[int] | None = None,
     conv_perts: list[float] | None = None,
+    decont: bool = False,
 ) -> list[str]:
     """Fill dst/input/ and write the prefilled SLURM script.
 
     The script comes from the package's templates/ folder.  ``order`` is first_order,
     second_order (one step, ``pert``) or convergence (``conv_modes`` at -p and +p for each
-    step size p in ``conv_perts``).  Returns the list of failure messages.
+    step size p in ``conv_perts``).  With ``decont`` the tree runs the full spin decontamination:
+    input/INCAR is the SCF that writes the WAVECAR, input/sublevels/<name>/INCAR the ALGO=None
+    ZFS run of each spin sublevel, and the runner adds runs/ref (see scripts/cluster/README.md).
+    Returns the list of failure messages.
     """
     failures: list[str] = []
 
@@ -364,11 +434,20 @@ def prepare_basis(
             incar, warning = guard(incar)
             if warning:
                 warnings.append(warning)
-        incar_path.write_text(patch_restart_incar(incar))
         for warning in warnings:
             LOGGER.warning(f"{dst}: {warning}")
+        if decont:
+            try:
+                levels = write_decont_inputs(inp, incar)
+                LOGGER.info(f"{dst.name}: spin sublevels {', '.join(levels)}")
+            except ValueError as error:
+                fail(f"cannot set up the spin sublevels: {error}")
+                levels = []
+        else:
+            incar_path.write_text(patch_restart_incar(incar))
     else:
         fail("no INCAR in the ZFS source folder -- cannot make it restart-ready")
+        levels = []
 
     # timing: per-sim wall time from the reference ZFS run's OUTCAR
     per_sim = read_outcar_time(src)
@@ -376,6 +455,10 @@ def prepare_basis(
         n_tasks = len(conv_modes or []) * 2 * len(step_sizes(conv_perts or []))  # -p and +p
     else:
         n_tasks = n_tasks_for(order, pair_mode, n_modes)
+    if decont:
+        n_tasks += 1  # runs/ref
+        if per_sim is not None:
+            per_sim *= 1 + SUBLEVEL_TIME_FRACTION * len(levels)
     if per_sim is None:
         fail(
             f"no Elapsed time found in OUTCARs under {src} -- leaving the template time limit and array size untouched"
@@ -439,6 +522,7 @@ def build_perturbation_tree(
     vasp_binary: Path | None = None,
     force: bool = False,
     central: bool = False,
+    decont: bool = False,
 ) -> list[str]:
     """Build ready-to-go perturbed ZFS run folders under a defect directory.
 
@@ -453,6 +537,8 @@ def build_perturbation_tree(
     `conv_perts` or, by default, convergence_steps(pert).
     With `central`, every step p instead gets first_order/ trees at +p and -p and no second_order/
     tree: the analysis takes central differences from them (``spinlabs package --central``).
+    With `decont` the trees (and convergence folder) run the full spin decontamination instead,
+    one basis ``full_decont`` from ZFS_hyp (see prepare_basis).
     Returns the list of failure messages (empty on success).
     """
     if not pert:
@@ -465,7 +551,7 @@ def build_perturbation_tree(
         jobs = [(order, p) for order in ("first_order", "second_order") for p in pert]
     failures: list[str] = []
     defect = out.name
-    sources = zfs_sources(out)
+    sources = zfs_sources(out, decont=decont)
 
     phonon = resolve_sym_phonon(out, phonon)
     n_modes = n_modes_from_phonon(phonon)
@@ -493,6 +579,7 @@ def build_perturbation_tree(
                     displacement=displacement,
                     pair_mode=pair_mode if order == "second_order" else None,
                     max_hours=max_hours,
+                    decont=decont,
                 )
             )
     if conv_modes:
@@ -507,19 +594,25 @@ def build_perturbation_tree(
                 max_hours=max_hours,
                 vasp_binary=vasp_binary,
                 force=force,
+                decont=decont,
             )
         )
     return failures
 
 
-def zfs_sources(out: Path) -> dict[str, Path]:
-    """basis -> the defect's ground-state ZFS folder (ZFS_hyp, ZFS_occup); both must hold the VASP input."""
+def zfs_sources(out: Path, decont: bool = False) -> dict[str, Path]:
+    """basis -> the defect's ground-state ZFS folder (ZFS_hyp, ZFS_occup); both must hold the VASP input.
+
+    With ``decont`` only ZFS_hyp, the source of the full_decont basis.
+    """
     sources: dict[str, Path] = {}
-    for basis, folder in BASIS_SOURCE.items():
+    for basis, folder in (DECONT_SOURCE if decont else BASIS_SOURCE).items():
         src = out / folder
         if not src.is_dir():
             raise FileNotFoundError(
-                f"missing {src} -- both ZFS_hyp and ZFS_occup must exist before creating perturbation folders"
+                f"missing {src} -- "
+                + ("ZFS_hyp" if decont else "both ZFS_hyp and ZFS_occup")
+                + " must exist before creating perturbation folders"
             )
         for name in REQUIRED_FILES:
             if not (src / name).is_file():
@@ -598,6 +691,7 @@ def build_convergence_tree(
     max_hours: float | None = None,
     vasp_binary: Path | None = None,
     force: bool = False,
+    decont: bool = False,
 ) -> list[str]:
     """Step-size convergence folders of a defect: <out>/convergence_test_<all|occup>/.
 
@@ -606,7 +700,8 @@ def build_convergence_tree(
     ignored) into runs/<mode>_pert_<step>/,
     displaced by `displacement`, through the shared perturbation runner. Works on a new
     defect folder and on one that already has its perturbation trees; existing convergence
-    folders are kept unless `force`. Returns the list of failure messages.
+    folders are kept unless `force`. With `decont`, one folder convergence_test_decont/ that runs
+    the full spin decontamination (see prepare_basis). Returns the list of failure messages.
     """
     steps = step_sizes(steps)
     if not modes or not steps:
@@ -618,8 +713,9 @@ def build_convergence_tree(
     failures: list[str] = []
     n_modes = n_modes_from_phonon(phonon)
     section(LOGGER, f"Convergence folders {out.name}: modes {modes}, steps {steps}, {displacement} displacements")
-    for basis, src in zfs_sources(out).items():
-        dst = out / CONVERGENCE_FOLDER[basis]
+    folders = DECONT_CONVERGENCE_FOLDER if decont else CONVERGENCE_FOLDER
+    for basis, src in zfs_sources(out, decont=decont).items():
+        dst = out / folders[basis]
         if not _make_room(dst, force):
             continue
         failures.extend(
@@ -639,6 +735,7 @@ def build_convergence_tree(
                 max_hours=max_hours,
                 conv_modes=list(modes),
                 conv_perts=list(steps),
+                decont=decont,
             )
         )
     return failures

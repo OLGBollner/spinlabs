@@ -10,6 +10,13 @@
 # 1/0 instead) and SPINLABS_CODE, the snapshot of the spinlabs repo taken when the job was
 # submitted. This file, the structure scripts and the spinlabs package all come from that
 # snapshot, so every task of a submission runs the same code.
+#
+# A tree whose input/ has a sublevels/ folder (create_perturbation_tree.py --full-decont) runs the
+# full spin decontamination in every run directory: 1. perturb the structure, 2. SCF with
+# input/INCAR, which writes the WAVECAR (.scf_done), 3. one subfolder per spin sublevel
+# (input/sublevels/<name>: ms=S and every ms=S-1 spin flip), 4. in each, the ZFS from ../WAVECAR
+# (a symlink) with ALGO=None. The run directory is done once every sublevel has its ZFS block;
+# its WAVECAR is kept. Such a tree also runs runs/ref, the unperturbed structure.
 
 ORDER=${1:-}
 case $ORDER in
@@ -53,6 +60,17 @@ if [ "$ORDER" = "convergence" ]; then
   for s in $SIZES; do STEPS="$STEPS${STEPS:+ }-$s $s"; done
 else
   case ${PERT:-} in ''|*'<pert_scale>'*) fail "PERT unset or still placeholder: '${PERT:-}'" ;; esac
+fi
+# Full spin decontamination: input/sublevels/<name>/INCAR, one per spin sublevel.
+DECONT=0
+SUBLEVELS=""
+if [ -d "$INPUT_DIR/sublevels" ]; then
+  DECONT=1
+  for d in "$INPUT_DIR"/sublevels/*/; do
+    [ -f "${d}INCAR" ] || fail "spin sublevel folder without INCAR: $d"
+    SUBLEVELS="$SUBLEVELS${SUBLEVELS:+ }$(basename "$d")"
+  done
+  [ -n "$SUBLEVELS" ] || fail "$INPUT_DIR/sublevels has no spin sublevel folders"
 fi
 if [ "$ORDER" = "second_order" ]; then
   case ${PAIR_MODE:-} in diag|all) ;; *) fail "PAIR_MODE must be diag or all, got: '${PAIR_MODE:-}'" ;; esac
@@ -104,6 +122,9 @@ case $DISPLACEMENT in
   unweighted) echo "displacements: Q*e (not mass-weighted)" ;;
 esac
 echo "spinlabs code: $(basename "$SPINLABS_CODE") ($SPINLABS_CODE)"
+if [ "$DECONT" = 1 ]; then
+  echo "full spin decontamination: SCF -> WAVECAR, then ALGO=None ZFS of sublevels $SUBLEVELS; plus runs/ref"
+fi
 # ------------------------------------------------------------------------
 
 ID=${SLURM_ARRAY_TASK_ID:-0}
@@ -207,7 +228,79 @@ is_done() {
   return 1
 }
 
+# ---- full spin decontamination (DECONT=1), run from inside the run directory ----
+# The SCF of step 2 can be reused (a restart runs only the sublevels left) once it has .scf_done
+# and its WAVECAR.
+scf_reusable() {
+  [ -f "$1/.scf_done" ] && [ -f "$1/WAVECAR" ]
+}
+
+# decont_scf LABEL: step 2, the SCF that writes the WAVECAR. 0 = .scf_done written.
+decont_scf() {
+  if srun $binary; then
+    echo "$ID: SCF done for $1"
+  else
+    status=$?
+    echo "$ID: VASP exited with $status in the SCF of $1"
+    VASP_FAILED=$((VASP_FAILED + 1))
+    return 1
+  fi
+  if [ ! -f WAVECAR ]; then
+    echo "$ID: $1: the SCF wrote no WAVECAR (LWAVE?) -- no sublevel runs"
+    return 1
+  fi
+  if ! SCF_MSG=$(python -c "import sys; from spinlabs.vasp.settings import scf_problem, scf_status; p = scf_problem(scf_status('.')); print(p or ''); sys.exit(1 if p else 0)"); then
+    echo "$ID: $1: $SCF_MSG -- no sublevel runs"
+    printf 'SCF check failed\n%s\n' "$SCF_MSG" > CHECK
+    return 1
+  fi
+  : > .scf_done
+  return 0
+}
+
+# decont_sublevels LABEL: steps 3 and 4, the ZFS of every spin sublevel without .done from the
+# run directory's WAVECAR; the run directory gets .done once all have their ZFS block.
+decont_sublevels() {
+  left=0
+  for s in $SUBLEVELS; do
+    if [ -f "$s/.done" ]; then
+      echo "$ID: $1: sublevel $s done earlier"
+      continue
+    fi
+    mkdir -p "$s"
+    rm -f "$s/OUTCAR" "$s/OSZICAR" "$s/WAVECAR"
+    cp POSCAR KPOINTS POTCAR "$s"/
+    cp "$HEAD_DIR/$INPUT_DIR/sublevels/$s/INCAR" "$s"/
+    ln -s ../WAVECAR "$s/WAVECAR"
+    cd "$s"
+    echo "$ID: $1: ZFS of sublevel $s (ALGO=None from ../WAVECAR)"
+    if srun $binary; then
+      echo "$ID: $1: sublevel $s finished"
+    else
+      status=$?
+      echo "$ID: VASP exited with $status for $1, sublevel $s"
+      VASP_FAILED=$((VASP_FAILED + 1))
+    fi
+    if [ -f OUTCAR ] && grep -qzP "$ZFS_REGEX_PATTERN" OUTCAR; then
+      : > .done
+    else
+      echo "$ID: $1: sublevel $s has no ZFS block"
+      left=$((left + 1))
+    fi
+    cd "$HEAD_DIR/$TARGET_DIR"
+  done
+  if [ "$left" -eq 0 ]; then
+    : > .done
+    rm -f CHGCAR CHG
+    echo "$ID: Done! $1 (all sublevels: $SUBLEVELS; WAVECAR kept)"
+  else
+    echo "$ID: $1: $left sublevel(s) without a ZFS block -- the next submission reruns them from the WAVECAR"
+  fi
+}
+# ---- end full spin decontamination ----
+
 # run_one LABEL DIR STRUCT_ARGS...: perturb input/POSCAR along the modes and run VASP in DIR.
+# Without STRUCT_ARGS (runs/ref of a decontamination tree) the structure is input/POSCAR as is.
 run_one() {
   label=$1
   TARGET_DIR=$2
@@ -234,30 +327,57 @@ run_one() {
   fi
   printf '%s\n' "$ARRAY_TAG" > "$TARGET_DIR/.attempted"
   rm -f "$TARGET_DIR"/CHECK "$TARGET_DIR"/.done  # from an earlier attempt
-  cp "$INPUT_DIR"/* "$TARGET_DIR"/
-  cd "$TARGET_DIR"
-  echo "$ID: starting job for $label"
-  # In the if-condition a failing script does not trip set -e, so the job still
-  # reports the failure and the script's output before exiting.
-  if MSG=$(python "$create_struct" -o POSCAR POSCAR "$PHONON_PATH" "$@" "$PERT" $DISP_FLAG) \
-    && echo "$MSG" | grep -q "Success"; then
-    echo "Successfully created perturbed structure"
-  else
-    echo "Failed to create structure."
-    echo "Shutting down job $ID"
-    echo "$MSG"
-    exit 1
-  fi
-  # The displacement must be Q along exactly these modes before any VASP time is spent.
-  if ! CHECK_MSG=$(python "$SCRIPTS/check_perturbation.py" POSCAR "$HEAD_DIR/$INPUT_DIR/POSCAR" "$PHONON_PATH" "$@" --pert "$PERT" $DISP_FLAG); then
-    echo "$ID: $CHECK_MSG"
-    echo "$ID: $label: perturbed POSCAR is not the intended displacement -- VASP not started"
-    printf 'perturbation check failed\n%s\n' "$CHECK_MSG" > CHECK
+  if [ "$DECONT" = 1 ] && scf_reusable "$TARGET_DIR"; then
+    cd "$TARGET_DIR"
+    echo "$ID: starting job for $label"
+    echo "$ID: $label: SCF finished earlier -- ZFS of the sublevels left from its WAVECAR"
+    decont_sublevels "$label"
     cd "$HEAD_DIR"
     release_lock
     return 0
   fi
-  echo "$ID: $CHECK_MSG"
+  rm -f "$TARGET_DIR"/.scf_done
+  # Files only: a decontamination tree's input/ also holds the sublevels/ folder.
+  for f in "$INPUT_DIR"/*; do
+    if [ -f "$f" ]; then
+      cp "$f" "$TARGET_DIR"/
+    fi
+  done
+  cd "$TARGET_DIR"
+  echo "$ID: starting job for $label"
+  if [ $# -gt 0 ]; then
+    # In the if-condition a failing script does not trip set -e, so the job still
+    # reports the failure and the script's output before exiting.
+    if MSG=$(python "$create_struct" -o POSCAR POSCAR "$PHONON_PATH" "$@" "$PERT" $DISP_FLAG) \
+      && echo "$MSG" | grep -q "Success"; then
+      echo "Successfully created perturbed structure"
+    else
+      echo "Failed to create structure."
+      echo "Shutting down job $ID"
+      echo "$MSG"
+      exit 1
+    fi
+    # The displacement must be Q along exactly these modes before any VASP time is spent.
+    if ! CHECK_MSG=$(python "$SCRIPTS/check_perturbation.py" POSCAR "$HEAD_DIR/$INPUT_DIR/POSCAR" "$PHONON_PATH" "$@" --pert "$PERT" $DISP_FLAG); then
+      echo "$ID: $CHECK_MSG"
+      echo "$ID: $label: perturbed POSCAR is not the intended displacement -- VASP not started"
+      printf 'perturbation check failed\n%s\n' "$CHECK_MSG" > CHECK
+      cd "$HEAD_DIR"
+      release_lock
+      return 0
+    fi
+    echo "$ID: $CHECK_MSG"
+  else
+    echo "$ID: $label: the unperturbed structure (input/POSCAR)"
+  fi
+  if [ "$DECONT" = 1 ]; then
+    if decont_scf "$label"; then
+      decont_sublevels "$label"
+    fi
+    cd "$HEAD_DIR"
+    release_lock
+    return 0
+  fi
   # A failing VASP run (crash, SCF abort, node error) must not end the task under set -e and
   # leave its other directories unattempted; the task exits nonzero at the end instead.
   if srun $binary; then
@@ -306,6 +426,9 @@ visit() {
 
 walk() {
   ITEM=0
+  if [ "$DECONT" = 1 ]; then
+    visit "unperturbed reference" "runs/ref"
+  fi
   if [ "$ORDER" = "convergence" ]; then
     for p in $STEPS; do
       for i in $MODES; do

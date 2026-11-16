@@ -51,6 +51,20 @@ from that snapshot.
   both signs). The generated script gets
   `#SBATCH -J <defect>_<order>_<basis>` and a time limit / array size from the reference
   OUTCAR's wall time x tasks / `--array-jobs`; `--max-hours` caps the per-job limit.
+- `create_perturbation_tree.py --full-decont`: trees for the full spin decontamination
+  (Biktagirov) instead, one basis `full_decont/` from `ZFS_hyp` (and `convergence_test_decont/`).
+  Its `input/INCAR` is the SCF of the ms=S state with `LWAVE = .TRUE.` and `LDMATRIX = .FALSE.`;
+  `input/sublevels/<name>/INCAR` is one ALGO=None ZFS run per spin sublevel: `ms_<S>` (the
+  ZFS_hyp occupations) and, for each of the 2S unpaired bands k (occupied up, empty down),
+  `ms_<S-1>_<k>`: k's electron moved to the down channel, NUPDOWN = 2S-2 (NV: `ms_1`,
+  `ms_0_127`, `ms_0_128`). The runner sees `input/sublevels/` and does, per run directory:
+  1. perturb the structure, 2. the SCF (`.scf_done` once converged, from the OSZICAR),
+  3. a subfolder per sublevel with its INCAR, the run's POSCAR/KPOINTS/POTCAR and
+  `WAVECAR -> ../WAVECAR`, 4. VASP there (ALGO=None, ISTART=1, LWAVE off); a sublevel gets
+  `.done` with its ZFS block, the run directory once all have it. WAVECAR is kept; CHGCAR/CHG
+  go. A restart reuses a finished SCF and runs only the sublevels left. The trees also run
+  `runs/ref`, the unperturbed structure through the same steps. `spinlabs package` does not read
+  these trees yet (the sublevels are not combined into D).
 - `add_convergence_tree.py`: add the convergence folders to an existing defect folder
   (`--modes`, and `--steps` or `--pert`); the displacement and VASP binary default to the
   ones its trees use.
