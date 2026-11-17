@@ -41,7 +41,9 @@ DECONT_BASIS = "full_decont"
 DECONT_SOURCE = {DECONT_BASIS: "ZFS_hyp"}
 DECONT_CONVERGENCE_FOLDER = {DECONT_BASIS: "convergence_test_decont"}
 SUBLEVELS_DIR = "sublevels"  # input/sublevels/<name>/INCAR: the ALGO=None ZFS run of each spin sublevel
-DECONT_REFERENCE_RUN = "ref"  # runs/ref: the unperturbed structure through the same steps
+# <defect>/ZFS_full: the unperturbed ground state through the same steps, once per defect (run by the
+# first decontamination job that reaches it; spinlabs package reads the ground-state tensors there)
+DECONT_GROUND_STATE = "ZFS_full"
 SUBLEVEL_TIME_FRACTION = 0.1  # time of one ALGO=None sublevel run, as a fraction of the reference ZFS run
 
 _DISPLACEMENT_LINE = re.compile(r"^\s*DISPLACEMENT\s*=\s*(\S+)", re.M)
@@ -227,6 +229,14 @@ def decont_sublevel_incar(incar: str, level) -> str:
     )
 
 
+def decont_ground_state(tree: Path) -> Path | None:
+    """The ground state ZFS_full of the defect a tree belongs to: next to the first parent's ZFS_hyp/."""
+    for parent in Path(tree).resolve().parents:
+        if (parent / "ZFS_hyp").is_dir():
+            return parent / DECONT_GROUND_STATE
+    return None
+
+
 def write_decont_inputs(inp: Path, incar: str) -> list[str]:
     """Write inp/INCAR (step 2) and inp/sublevels/<name>/INCAR (step 4) from a guarded ZFS INCAR.
 
@@ -398,7 +408,8 @@ def prepare_basis(
     second_order (one step, ``pert``) or convergence (``conv_modes`` at -p and +p for each
     step size p in ``conv_perts``).  With ``decont`` the tree runs the full spin decontamination:
     input/INCAR is the SCF that writes the WAVECAR, input/sublevels/<name>/INCAR the ALGO=None
-    ZFS run of each spin sublevel, and the runner adds runs/ref (see scripts/cluster/README.md).
+    ZFS run of each spin sublevel, and the runner also runs the defect's ground state ZFS_full
+    (see scripts/cluster/README.md).
     Returns the list of failure messages.
     """
     failures: list[str] = []
@@ -455,7 +466,7 @@ def prepare_basis(
     else:
         n_tasks = n_tasks_for(order, pair_mode, n_modes)
     if decont:
-        n_tasks += 1  # runs/ref
+        n_tasks += 1  # the ground state ZFS_full, if this tree's job gets to it first
         if per_sim is not None:
             per_sim *= 1 + SUBLEVEL_TIME_FRACTION * len(levels)
     if per_sim is None:
@@ -551,6 +562,8 @@ def build_perturbation_tree(
     failures: list[str] = []
     defect = out.name
     sources = zfs_sources(out, decont=decont)
+    if decont:
+        (out / DECONT_GROUND_STATE).mkdir(exist_ok=True)
 
     phonon = resolve_sym_phonon(out, phonon)
     n_modes = n_modes_from_phonon(phonon)
@@ -713,6 +726,8 @@ def build_convergence_tree(
     n_modes = n_modes_from_phonon(phonon)
     section(LOGGER, f"Convergence folders {out.name}: modes {modes}, steps {steps}, {displacement} displacements")
     folders = DECONT_CONVERGENCE_FOLDER if decont else CONVERGENCE_FOLDER
+    if decont:
+        (out / DECONT_GROUND_STATE).mkdir(exist_ok=True)
     for basis, src in zfs_sources(out, decont=decont).items():
         dst = out / folders[basis]
         if not _make_room(dst, force):

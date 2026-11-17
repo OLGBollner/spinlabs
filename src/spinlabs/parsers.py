@@ -439,25 +439,36 @@ def save_phonon_npz(spectrum: PhononSpectrum, out_path: str | Path) -> str:
 _RUN_FOLDER = {1: re.compile(r"^(\d+)$"), 2: re.compile(r"^(\d+)_(\d+)$")}
 
 
-def _run_outcars(directory: Path, order: int) -> list[Path]:
-    """OUTCARs of the run folders below ``directory``.
+def _run_outcars(directory: Path, order: int, sublevel: str | None = None) -> list[tuple[Path, str]]:
+    """(OUTCAR, run folder name) of the run folders below ``directory``.
 
     Run folders are ``runs/<i>`` (first order) or ``runs/<i>_<j>`` (second order),
     directly under ``runs/`` and named exactly so. Nothing else counts: a copy such as
     ``old_data/85_85/OUTCAR`` or ``runs/85_85_old`` would otherwise get the same mode
     numbers and silently replace the real run (ClV_128's pre-fix pair runs did).
+    With ``sublevel`` (a full-decontamination tree) the OUTCAR is the one of that spin
+    sublevel, ``runs/<run>/<sublevel>/OUTCAR``.
     """
     pattern = _RUN_FOLDER[order]
     runs = directory / "runs"
-    return sorted(p for p in runs.glob("*/OUTCAR") if pattern.match(p.parent.name)) if runs.is_dir() else []
+    if not runs.is_dir():
+        return []
+    sub = f"{sublevel}/" if sublevel else ""
+    found = []
+    for run in sorted(p for p in runs.iterdir() if p.is_dir() and pattern.match(p.name)):
+        outcar = run / f"{sub}OUTCAR"
+        if outcar.is_file():
+            found.append((outcar, run.name))
+    return found
 
 
-def _worker_parse_outcar_1d(outcar_file: Path) -> tuple[int, ZFSTensor, float | None] | None:
+def _worker_parse_outcar_1d(item: tuple[Path, str]) -> tuple[int, ZFSTensor, float | None] | None:
+    outcar_file, run_name = item
     zfs = parse_outcar_zfs(outcar_file)
     if zfs is None:
         return None
     try:
-        match = _RUN_FOLDER[1].match(outcar_file.parent.name)
+        match = _RUN_FOLDER[1].match(run_name)
         if not match:
             return None
         index = int(match.group(1)) - 1
@@ -467,12 +478,13 @@ def _worker_parse_outcar_1d(outcar_file: Path) -> tuple[int, ZFSTensor, float | 
         return None
 
 
-def _worker_parse_outcar_2d(outcar_file: Path) -> tuple[tuple[int, int], ZFSTensor, float | None] | None:
+def _worker_parse_outcar_2d(item: tuple[Path, str]) -> tuple[tuple[int, int], ZFSTensor, float | None] | None:
+    outcar_file, run_name = item
     zfs = parse_outcar_zfs(outcar_file)
     if zfs is None:
         return None
     try:
-        match = _RUN_FOLDER[2].match(outcar_file.parent.name)
+        match = _RUN_FOLDER[2].match(run_name)
         if not match:
             return None
         indices = (int(match.group(1)) - 1, int(match.group(2)) - 1)
@@ -488,15 +500,17 @@ def parse_perturbation_directory(
     amplitude: float | tuple[float, float] = 1.0,
     max_workers: int = 4,
     verbose: bool = False,
+    sublevel: str | None = None,
 ) -> dict[Any, PerturbationEntry]:
     """
     Parses the run folders' OUTCARs under a directory for 1D or 2D displacements in parallel.
 
     Only ``runs/<i>/OUTCAR`` (order 1) or ``runs/<i>_<j>/OUTCAR`` (order 2) are read
-    (see :func:`_run_outcars`); any other OUTCAR below the directory is ignored.
+    (see :func:`_run_outcars`); any other OUTCAR below the directory is ignored. With
+    ``sublevel``, ``runs/<run>/<sublevel>/OUTCAR`` of a full-decontamination tree.
     """
     dir_path = Path(directory)
-    outcar_files = _run_outcars(dir_path, order)
+    outcar_files = _run_outcars(dir_path, order, sublevel)
     if not outcar_files:
         if verbose:
             LOGGER.warning(f"no run OUTCARs found: {dir_path}")
@@ -654,6 +668,83 @@ def parse_zfs_simulation_dataset(
     if normalize_calc_method(data.calc_method) == "defect_band_approx":
         data._apply_spin_correction()
     return data
+
+
+DECONT_BASIS = "full_decont"  # trees.DECONT_BASIS
+DECONT_GROUND_STATE = "ZFS_full"  # trees.DECONT_GROUND_STATE
+
+
+def decont_sublevels(tree: str | Path) -> list[str]:
+    """Spin sublevel names of a full-decontamination tree: its input/sublevels/<name>/ folders."""
+    folder = Path(tree) / "input" / "sublevels"
+    return sorted(p.name for p in folder.iterdir() if p.is_dir()) if folder.is_dir() else []
+
+
+def parse_decont_dataset(
+    sim_folder: str | Path,
+    order: int | None = None,
+    max_workers: int = 4,
+    *,
+    verbose: bool = False,
+) -> dict[str, RawZFSData]:
+    """One RawZFSData per spin sublevel of a full-decontamination tree, ``<sim_folder>/full_decont``.
+
+    ``sim_folder`` is ``<defect>/<order>/pert_<p>``. Each sublevel's tensors come from
+    ``runs/<run>/<sublevel>/OUTCAR`` and its ground state from the defect's
+    ``ZFS_full/<sublevel>/OUTCAR``, shared by every tree of the defect. Only runs with a ZFS
+    tensor in every sublevel are kept, so all sublevels hold the same modes; the others are
+    logged. ``spin`` is S of the high-spin state (NUPDOWN / 2 of the tree's input/INCAR).
+    ValueError when the tree has no sublevels or ZFS_full lacks a sublevel's tensor.
+    """
+    sim_path = Path(sim_folder)
+    tree = sim_path / DECONT_BASIS
+    sublevels = decont_sublevels(tree)
+    if not sublevels:
+        raise ValueError(f"no spin sublevels (input/sublevels/*) in {tree}")
+    defect_folder = sim_path.parent.parent
+    defect, cell_size = split_defect_folder_name(defect_folder.name)
+    pert_scale = float(sim_path.name.split("_")[1])
+    order = order if order is not None else sim_folder_order(sim_path)
+    ground_dir = defect_folder / DECONT_GROUND_STATE
+    ground = {lv: parse_outcar_zfs(ground_dir / lv / "OUTCAR") for lv in sublevels}
+    missing = [lv for lv, zfs in ground.items() if zfs is None]
+    if missing:
+        raise ValueError(f"no ground-state ZFS tensor for sublevel(s) {', '.join(missing)} in {ground_dir}")
+    spin, _ = defect_spin(tree / "input")
+
+    amplitude = pert_scale if order == 1 else (pert_scale, pert_scale)
+    parsed = {
+        lv: parse_perturbation_directory(
+            tree, order=order, amplitude=amplitude, max_workers=max_workers, verbose=False, sublevel=lv
+        )
+        for lv in sublevels
+    }
+    complete = set.intersection(*(set(p) for p in parsed.values()))
+    partial = sorted(set.union(*(set(p) for p in parsed.values())) - complete, key=str)
+    if partial and verbose:
+        LOGGER.warning(
+            f"{tree}: {len(partial)} run(s) without a ZFS tensor in every sublevel, left out: "
+            + ", ".join(str(k) for k in partial[:10]) + (", ..." if len(partial) > 10 else "")
+        )
+    out = {}
+    for lv in sublevels:
+        entries = {k: v for k, v in parsed[lv].items() if k in complete}
+        out[lv] = RawZFSData(
+            defect=defect,
+            cell_size=cell_size,
+            pert_scale=pert_scale,
+            calc_method=DECONT_BASIS,
+            spin=spin,
+            ground_state_zfs=ground[lv],
+            order=order,
+            first_order=entries if order == 1 else {},
+            second_order=entries if order == 2 else {},
+            metadata={"calc_method": DECONT_BASIS, "sim_path": str(sim_path), "ground_state": str(ground_dir / lv)},
+            spin_sublevel=lv,
+        )
+    if verbose:
+        LOGGER.info(f"{tree}: {len(complete)} complete run(s) in sublevels {', '.join(sublevels)}")
+    return out
 
 
 def parse_zfs_dataset_npz(raw_paths: list[str | Path] | tuple[str | Path, ...]) -> RawZFSData:

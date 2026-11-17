@@ -62,9 +62,18 @@ from that snapshot.
   3. a subfolder per sublevel with its INCAR, the run's POSCAR/KPOINTS/POTCAR and
   `WAVECAR -> ../WAVECAR`, 4. VASP there (ALGO=None, ISTART=1, LWAVE off); a sublevel gets
   `.done` with its ZFS block, the run directory once all have it. WAVECAR is kept; CHGCAR/CHG
-  go. A restart reuses a finished SCF and runs only the sublevels left. The trees also run
-  `runs/ref`, the unperturbed structure through the same steps. `spinlabs package` does not read
-  these trees yet (the sublevels are not combined into D).
+  go. A restart reuses a finished SCF and runs only the sublevels left. The unperturbed ground
+  state goes through the same steps once per defect, in `<defect>/ZFS_full/` (next to
+  `ZFS_hyp/`): the first item of every decontamination tree's job, run by whichever job gets there
+  first and skipped by the others once it has `.done`.
+  `spinlabs package` (method `decont`, picked by default when the trees exist) writes one npz
+  per spin sublevel into one folder, `data/<defect>_<cell>/pert_<p>/full_decont/<date>/`, each
+  with a `spin_sublevel` key and its ground state from `ZFS_full/<sublevel>`; only runs with a
+  ZFS tensor in every sublevel go in. `spinlabs package --conv` does the same for
+  `convergence_test_decont/` (`data/<defect>_<cell>/full_decont/<date>/`). They are registered
+  apart from the ordinary packages (`spinlabs.registry.find_sublevel_sets`) and loaded with
+  `spinlabs.decont.load_sublevel_set` / `load_conv_sublevel_set`; combining the sublevels into D
+  is left to the analysis.
 - `add_convergence_tree.py`: add the convergence folders to an existing defect folder
   (`--modes`, and `--steps` or `--pert`); the displacement and VASP binary default to the
   ones its trees use.

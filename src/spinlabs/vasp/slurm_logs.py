@@ -33,10 +33,7 @@ _VASP_EXIT = re.compile(r"VASP exited with (\d+)")
 
 
 def run_label(run: str) -> str:
-    """The runner's label for a run folder name: 4 -> mode 4, 4_7 -> pair 4, 7, 13_pert_-0.05 -> mode 13 step -0.05,
-    ref -> unperturbed reference (a full-decontamination tree)."""
-    if run == "ref":
-        return "unperturbed reference"
+    """The runner's label for a run folder name: 4 -> mode 4, 4_7 -> pair 4, 7, 13_pert_-0.05 -> mode 13 step -0.05."""
     if "_pert_" in run:
         mode, step = run.split("_pert_", 1)
         return f"mode {mode} step {step}"

@@ -16,7 +16,9 @@
 # input/INCAR, which writes the WAVECAR (.scf_done), 3. one subfolder per spin sublevel
 # (input/sublevels/<name>: ms=S and every ms=S-1 spin flip), 4. in each, the ZFS from ../WAVECAR
 # (a symlink) with ALGO=None. The run directory is done once every sublevel has its ZFS block;
-# its WAVECAR is kept. Such a tree also runs runs/ref, the unperturbed structure.
+# its WAVECAR is kept. The unperturbed ground state goes through the same steps once per defect,
+# in <defect>/ZFS_full (next to ZFS_hyp/); whichever decontamination tree's job reaches it first
+# runs it, the others skip it once it has .done.
 
 ORDER=${1:-}
 case $ORDER in
@@ -71,6 +73,20 @@ if [ -d "$INPUT_DIR/sublevels" ]; then
     SUBLEVELS="$SUBLEVELS${SUBLEVELS:+ }$(basename "$d")"
   done
   [ -n "$SUBLEVELS" ] || fail "$INPUT_DIR/sublevels has no spin sublevel folders"
+  # The defect folder is the first one above this tree that holds ZFS_hyp/; GROUND is its
+  # ZFS_full relative to this tree (run_one works with paths relative to it).
+  GROUND=""
+  d=$HEAD_DIR
+  up=""
+  while [ "$d" != "/" ]; do
+    d=$(dirname "$d")
+    up="../$up"
+    if [ -d "$d/ZFS_hyp" ]; then
+      GROUND="${up}ZFS_full"
+      break
+    fi
+  done
+  [ -n "$GROUND" ] || fail "no defect folder (holding ZFS_hyp/) above $HEAD_DIR for the ground state ZFS_full"
 fi
 if [ "$ORDER" = "second_order" ]; then
   case ${PAIR_MODE:-} in diag|all) ;; *) fail "PAIR_MODE must be diag or all, got: '${PAIR_MODE:-}'" ;; esac
@@ -123,7 +139,7 @@ case $DISPLACEMENT in
 esac
 echo "spinlabs code: $(basename "$SPINLABS_CODE") ($SPINLABS_CODE)"
 if [ "$DECONT" = 1 ]; then
-  echo "full spin decontamination: SCF -> WAVECAR, then ALGO=None ZFS of sublevels $SUBLEVELS; plus runs/ref"
+  echo "full spin decontamination: SCF -> WAVECAR, then ALGO=None ZFS of sublevels $SUBLEVELS; ground state in $GROUND"
 fi
 # ------------------------------------------------------------------------
 
@@ -300,7 +316,7 @@ decont_sublevels() {
 # ---- end full spin decontamination ----
 
 # run_one LABEL DIR STRUCT_ARGS...: perturb input/POSCAR along the modes and run VASP in DIR.
-# Without STRUCT_ARGS (runs/ref of a decontamination tree) the structure is input/POSCAR as is.
+# Without STRUCT_ARGS (the ground state ZFS_full of a decontamination tree) the structure is input/POSCAR as is.
 run_one() {
   label=$1
   TARGET_DIR=$2
@@ -427,7 +443,7 @@ visit() {
 walk() {
   ITEM=0
   if [ "$DECONT" = 1 ]; then
-    visit "unperturbed reference" "runs/ref"
+    visit "ground state ZFS_full" "$GROUND"
   fi
   if [ "$ORDER" = "convergence" ]; then
     for p in $STEPS; do

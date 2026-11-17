@@ -1107,6 +1107,8 @@ def normalize_calc_method(m: Optional[str]) -> Optional[str]:
         return "all_bands"
     if m in ("approx", "defect_band_approx"):
         return "defect_band_approx"
+    if m in ("decont", "full_decont"):
+        return "full_decont"
     return str(m)
 
 
@@ -1159,6 +1161,9 @@ class RawZFSData:
     # central differences: first order (D(Q) - D(-Q))/2Q, diagonal second order
     # (D(Q) + D(-Q) - 2 D0)/Q^2, in place of the forward pair runs in second_order.
     first_order_minus: dict[int, Union[PerturbationEntry, dict[str, Any]]] = field(default_factory=dict)
+    # Full spin decontamination (calc_method full_decont): which spin sublevel's determinant these
+    # tensors belong to, e.g. ms_1 or ms_0_127 (spinlabs.decont.sublevel_info). One file per sublevel.
+    spin_sublevel: Optional[str] = None
 
     def __post_init__(self):
         if self.first_order_minus and self.second_order:
@@ -1275,6 +1280,10 @@ class RawZFSData:
         merged_cell = c1 or c2 or 0
         merged_scale = p1 or p2 or 0.0
         merged_method = m1 or m2 or self.calc_method or other.calc_method
+        if self.spin_sublevel != other.spin_sublevel:
+            raise ValueError(
+                f"Cannot combine RawZFSData of different spin sublevels ({self.spin_sublevel} != {other.spin_sublevel})."
+            )
         merged_rotation = self.eigen_rotation if self.eigen_rotation is not None else other.eigen_rotation
         # Never re-scale a merged dataset: if either part already carries the
         # 3/2 correction, mark the combination as corrected (see _apply_spin_correction).
@@ -1328,6 +1337,7 @@ class RawZFSData:
             metadata=merged_metadata,
             vasp_settings=_merge_vasp_settings(self.vasp_settings, other.vasp_settings),
             first_order_minus=merged_minus,
+            spin_sublevel=self.spin_sublevel,
         )
 
     def __add__(self, other: RawZFSData) -> RawZFSData:
@@ -1393,6 +1403,7 @@ class RawZFSData:
             metadata=dict(self.metadata),
             vasp_settings=self.vasp_settings,
             first_order_minus=converted(self.first_order_minus),
+            spin_sublevel=self.spin_sublevel,
         )
 
     def enrich_with_spectrum(self, spectrum: PhononSpectrum) -> None:
@@ -1444,7 +1455,8 @@ class RawZFSData:
                     entry["ipr"] = (ipr_i, ipr_j)
 
     def _default_name(self):
-        return f"{self.defect}_{self.cell_size}_raw_zfs_data_{self.calc_method}_{self.order_suffix}.npz"
+        sublevel = f"_{self.spin_sublevel}" if self.spin_sublevel else ""
+        return f"{self.defect}_{self.cell_size}_raw_zfs_data_{self.calc_method}{sublevel}_{self.order_suffix}.npz"
 
     SCHEMA = [
         FieldSpec("defect", "str"),
@@ -1475,6 +1487,7 @@ class RawZFSData:
             decode=_decode_order_dict,
         ),
         FieldSpec("first_order_minus", "dict", optional=True, encode=_encode_first_order, decode=_decode_order_dict),
+        FieldSpec("spin_sublevel", "str", optional=True),
         FieldSpec(
             "vasp_settings",
             "str",
@@ -1576,6 +1589,9 @@ class RawZFSData:
         if len(conventions) > 1:
             raise ValueError(f"Cannot load perturbation files with different displacements together: {conventions}")
         convention = conventions.pop()
+        sublevels = {f.get("spin_sublevel") for f in scaled_fields}
+        if len(sublevels) > 1:
+            raise ValueError(f"Cannot load files of different spin sublevels together: {sorted(map(str, sublevels))}")
 
         order = base.get("order")
         if second_order or first_order_minus:
@@ -1600,6 +1616,7 @@ class RawZFSData:
             first_order=first_order,
             second_order=second_order,
             first_order_minus=first_order_minus,
+            spin_sublevel=base.get("spin_sublevel"),
         )
         for fields in scaled_fields:
             obj.vasp_settings = _merge_vasp_settings(obj.vasp_settings, fields.get("vasp_settings"))

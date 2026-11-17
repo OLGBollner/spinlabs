@@ -21,7 +21,7 @@ from pathlib import Path
 
 from spinlabs.vasp.modes import mode_numbers, pair_numbers
 from spinlabs.vasp.slurm_logs import summarize, unfinished_reasons
-from spinlabs.vasp.trees import DECONT_REFERENCE_RUN, SUBLEVELS_DIR, read_outcar_time, sbatch_time, step_sizes
+from spinlabs.vasp.trees import SUBLEVELS_DIR, decont_ground_state, read_outcar_time, sbatch_time, step_sizes
 
 PLACEHOLDER = re.compile(r"<[^<>\s]+>")
 RUNNER = "scripts/cluster/perturbation_runner.sh"  # the loop the run scripts start
@@ -177,16 +177,13 @@ _ARRAY = re.compile(r"^(#SBATCH\s+(?:-a\s+|--array[= ]))(\S+)", re.M)
 _TIME = re.compile(r"^(#SBATCH\s+(?:-t\s+|--time[= ]))(\S+)", re.M)
 
 
-def expected_runs(config: dict[str, str], order: str, decont: bool = False) -> list[str]:
+def expected_runs(config: dict[str, str], order: str) -> list[str]:
     """Run folder names (below runs/) the job script's runner works through, in its order.
 
     Mirrors the walk in scripts/cluster/perturbation_runner.sh: first order ``<i>``, second
     order ``<i>_<j>`` (PAIR_MODE diag, or all, i <= j nearest in frequency first: modes.pair_numbers), convergence ``<i>_pert_<step>`` for each
-    of MODES at -p and +p for every step size p in PERTS. A full-decontamination tree (``decont``)
-    runs ``ref``, the unperturbed structure, first.
+    of MODES at -p and +p for every step size p in PERTS.
     """
-    if decont:
-        return [DECONT_REFERENCE_RUN, *expected_runs(config, order)]
     if order == "convergence":
         modes = config["MODES"].split()
         steps = [f"{s:g}" for p in step_sizes([float(x) for x in config["PERTS"].split()]) for s in (-p, p)]
@@ -296,7 +293,7 @@ def unfinished_runs(folder: Path) -> dict[str, str] | None:
         return None
     config = script_config(_read(scripts[0]))
     try:
-        expected = expected_runs(config, _script_order(scripts[0].name, config), is_decont_tree(folder))
+        expected = expected_runs(config, _script_order(scripts[0].name, config))
     except (KeyError, ValueError, OSError):
         return None
     finished = set(run_progress(folder, expected).done)
@@ -314,13 +311,17 @@ def offer_rescale(folder: Path, script_name: str, ask=None) -> None:
     text = _read(script)
     config = script_config(text)
     try:
-        expected = expected_runs(config, _script_order(script_name, config), is_decont_tree(folder))
+        expected = expected_runs(config, _script_order(script_name, config))
     except (KeyError, ValueError, OSError) as error:
         print(f"Cannot count the runs: {error}")
         return
     progress = run_progress(folder, expected)
     failed = f"; {len(progress.failed)} attempted but failed" if progress.failed else ""
     print(f"{len(progress.done)}/{len(expected)} runs done ({progress.left} left{failed}).")
+    if is_decont_tree(folder):
+        ground = decont_ground_state(folder)
+        state = "not found" if ground is None else "done" if (ground / ".done").is_file() else "not done yet"
+        print(f"Ground state {ground or 'ZFS_full'}: {state}")
     if progress.left == 0:
         print("All runs are done; nothing to update.")
         return

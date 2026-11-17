@@ -128,13 +128,12 @@ def test_full_decont_tree_has_the_scf_input_and_one_incar_per_sublevel(tmp_path)
         assert sorted(p.name for p in (inp / "sublevels").iterdir()) == ["ms_0_127", "ms_0_128", "ms_1"]
         assert _tag((inp / "sublevels" / "ms_0_128" / "INCAR").read_text(), "ALGO") == "None"
 
-    from spinlabs.vasp.verify import expected_runs, is_decont_tree, verify_setup
+    from spinlabs.vasp.verify import is_decont_tree, verify_setup
 
     tree = defect / "first_order" / "pert_0.025" / "full_decont"
     assert is_decont_tree(tree)
     assert [p for p in verify_setup(tree, "run_perturbation_first_order.sh") if "INCAR" in p] == []
-    phonon = next((defect / "data").glob("phonon_data_sym*.npz"))
-    assert expected_runs({"PHONON_PATH": str(phonon)}, "first_order", decont=True)[0] == "ref"
+    assert (defect / "ZFS_full").is_dir()  # the ground state, at the defect level
 
 
 def test_verify_flags_a_sublevel_incar_without_algo_none(tmp_path):

@@ -22,7 +22,7 @@ from spinlabs.zfs_response import response_point_group, verify_zfs_response
 
 # Run folders sit at <defect>/<order>/pert_<x>/<basis>/runs/<modes>; the basis's
 # ground-state ZFS run is <defect>/<source>/ (as trees.BASIS_SOURCE).
-BASIS_SOURCE = {"all_bands": "ZFS_hyp", "defect_band_approx": "ZFS_occup"}
+BASIS_SOURCE = {"all_bands": "ZFS_hyp", "defect_band_approx": "ZFS_occup", "full_decont": "ZFS_full"}
 PERTURBATION_TOL = 0.01  # |scale - 1| and residual allowed for a correct displacement
 
 # Expected symmetry operations VASP may find (upper bounds), C3v parent:

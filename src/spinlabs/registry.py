@@ -88,13 +88,15 @@ CREATE TABLE IF NOT EXISTS files (
     id INTEGER PRIMARY KEY,
     path TEXT UNIQUE NOT NULL,
     kind TEXT NOT NULL,              -- raw_zfs | packaged_zfs | phonon | coupling | two_phonon | convergence
+                                     -- | packaged_zfs_sublevel | convergence_sublevel
     defect TEXT,
     cell_size INTEGER,
     calc_method TEXT,
     pert_order TEXT,                 -- JSON list of orders, e.g. '[1, 2]' for combined data
     pert_scale REAL,
     sha256 TEXT,
-    registered_at TEXT NOT NULL
+    registered_at TEXT NOT NULL,
+    spin_sublevel TEXT               -- full_decont files: the spin sublevel, e.g. ms_0_127
 );
 CREATE TABLE IF NOT EXISTS runs (
     id INTEGER PRIMARY KEY,
@@ -147,6 +149,9 @@ def ensure_db() -> sqlite3.Connection:
             "UPDATE files SET pert_order = '[1, 2]' WHERE kind = 'packaged_zfs' AND (pert_order IS NULL OR pert_order = '12')",
         )
         conn.commit()
+    # Migration: files from before the full spin decontamination have no spin_sublevel column.
+    if "spin_sublevel" not in {row[1] for row in conn.execute("PRAGMA table_info(files)")}:
+        conn.execute("ALTER TABLE files ADD COLUMN spin_sublevel TEXT")
     # Migration: registrys created before the runs table grew the analysis-
     # index columns (replacing runs_index.csv) need the columns added.
     existing = {row[1] for row in conn.execute("PRAGMA table_info(runs)")}
@@ -216,22 +221,25 @@ def register_file(
     calc_method: str | None = None,
     pert_order: list[int] | int | None = None,
     pert_scale: float | None = None,
+    spin_sublevel: str | None = None,
 ) -> int:
     """Insert or update a file row (re-registering overwrites metadata and hash).
 
     ``pert_order`` is normalized to a JSON list (e.g. ``[1, 2]`` for combined data).
+    ``spin_sublevel`` names the spin sublevel of a full-decontamination file (SUBLEVEL_KINDS).
     """
     path = str(Path(path).resolve())
     digest = sha256_of(path) if Path(path).exists() else None
     orders = _normalize_orders(pert_order)
     conn.execute(
-        """INSERT INTO files (path, kind, defect, cell_size, calc_method, pert_order, pert_scale, sha256, registered_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """INSERT INTO files (path, kind, defect, cell_size, calc_method, pert_order, pert_scale, sha256,
+                              registered_at, spin_sublevel)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
            ON CONFLICT(path) DO UPDATE SET
              kind=excluded.kind, defect=excluded.defect, cell_size=excluded.cell_size,
              calc_method=excluded.calc_method, pert_order=excluded.pert_order,
              pert_scale=excluded.pert_scale, sha256=excluded.sha256,
-             registered_at=excluded.registered_at""",
+             registered_at=excluded.registered_at, spin_sublevel=excluded.spin_sublevel""",
         (
             path,
             kind,
@@ -242,6 +250,7 @@ def register_file(
             pert_scale,
             digest,
             _now(),
+            spin_sublevel,
         ),
     )
     conn.commit()
@@ -408,7 +417,7 @@ def unregistered_packages(conn: sqlite3.Connection, data_roots: Iterable[str | P
     """
     known = set()
     roots = {Path(r).resolve() for r in data_roots if Path(r).is_dir()}
-    for (path,) in conn.execute("SELECT path FROM files WHERE kind = 'packaged_zfs'"):
+    for (path,) in conn.execute("SELECT path FROM files WHERE kind IN ('packaged_zfs', 'packaged_zfs_sublevel')"):
         p = Path(path)
         known.add(str(p.resolve()) if p.exists() else str(p))
         if len(p.parents) > 4 and p.parents[4].is_dir():
@@ -432,6 +441,48 @@ def unregistered_warning(paths: list[Path]) -> str | None:
         f"{len(paths)} packaged file(s) on disk are not in the registry, so --query and --latest "
         f"ignore them: {shown}. Register them with: {commands}"
     )
+
+
+# Full spin decontamination: one file per spin sublevel, in one folder per set. Kept apart from
+# packaged_zfs / convergence so nothing that expects a whole dataset picks up a single sublevel.
+SUBLEVEL_KINDS = {"packaged_zfs": "packaged_zfs_sublevel", "convergence": "convergence_sublevel"}
+
+
+def find_sublevel_sets(
+    conn: sqlite3.Connection,
+    *,
+    kind: str = "packaged_zfs_sublevel",
+    defect: str | None = None,
+    cell_size: int | str | None = None,
+    pert_scale: float | None = None,
+    latest: bool = False,
+) -> list[dict[str, Path]]:
+    """Registered full-decontamination sets: {sublevel: file} per folder, oldest first.
+
+    ``kind`` is packaged_zfs_sublevel (perturbation trees) or convergence_sublevel. With
+    ``latest`` one set per (defect, cell, pert scale) is kept, the newest by its folder's
+    registration (highest id).
+    """
+    sql = "SELECT id, path, defect, cell_size, pert_scale, spin_sublevel FROM files WHERE kind = ?"
+    params: list[object] = [kind]
+    for column, value in (("defect", defect), ("cell_size", None if cell_size is None else int(cell_size)),
+                          ("pert_scale", pert_scale)):
+        if value is not None:
+            sql += f" AND {column} = ?"
+            params.append(value)
+    sets: dict[Path, dict] = {}
+    for row_id, path, d, c, p, sublevel in conn.execute(sql + " ORDER BY id", params):
+        path = Path(path)
+        if not path.exists():
+            continue
+        entry = sets.setdefault(path.parent, {"id": row_id, "config": (d, c, p), "files": {}})
+        entry["id"] = max(entry["id"], row_id)
+        entry["files"][sublevel or path.stem] = path
+    ordered = sorted(sets.values(), key=lambda e: e["id"])
+    if latest:
+        newest = {e["config"]: e for e in ordered}
+        ordered = sorted(newest.values(), key=lambda e: e["id"])
+    return [dict(sorted(e["files"].items())) for e in ordered]
 
 
 def find_packaged(
