@@ -72,8 +72,7 @@ def test_each_run_does_the_scf_then_every_sublevel_from_its_wavecar(tmp_path):
     assert r.returncode == 0, r.stdout + r.stderr
     assert "full spin decontamination" in r.stdout
     assert sorted(p.name for p in (folder / "runs").iterdir() if (p / ".done").is_file()) == RUNS
-    ground = folder.parent / "ZFS_full"  # the defect's ground state, next to ZFS_hyp/
-    for d in [ground] + [folder / "runs" / run for run in RUNS]:
+    for d in [folder / "runs" / run for run in RUNS]:
         assert (d / "WAVECAR").is_file() and not (d / "WAVECAR").is_symlink()  # kept
         assert not (d / "CHGCAR").exists()
         for level in SUBLEVELS:
@@ -81,52 +80,69 @@ def test_each_run_does_the_scf_then_every_sublevel_from_its_wavecar(tmp_path):
             assert os.readlink(d / level / "WAVECAR") == "../WAVECAR"
             assert "ALGO = None" in (d / level / "INCAR").read_text()
             assert (d / level / "POSCAR").read_text() == (d / "POSCAR").read_text()
-    # the ground state keeps the unperturbed structure, the runs are displaced
-    assert (ground / "POSCAR").read_text() == (folder / "input" / "POSCAR").read_text()
     assert (folder / "runs" / "2_pert_0.025" / "POSCAR").read_text() != (folder / "input" / "POSCAR").read_text()
-    assert not (folder / "runs" / "ref").exists()
+    # the ground state is its own job: the tree's job leaves ZFS_full as it was made
+    ground = folder.parent / "ZFS_full"
+    assert not (ground / ".attempted").exists() and not (ground / "OUTCAR").exists()
     log = (tmp_path / "srun.log").read_text().split("\n")
-    assert log[0] == "scf ZFS_full"  # first, before the runs
-    assert sum(line.startswith("scf") for line in log) == len(RUNS) + 1
-    assert sum(line.startswith("zfs") for line in log) == (len(RUNS) + 1) * len(SUBLEVELS)
+    assert sum(line.startswith("scf") for line in log) == len(RUNS)
+    assert sum(line.startswith("zfs") for line in log) == len(RUNS) * len(SUBLEVELS)
 
 
-def test_the_ground_state_runs_once_per_defect(tmp_path):
-    """A second decontamination tree of the same defect skips the finished ZFS_full."""
-    from spinlabs.vasp.trees import build_perturbation_tree
+def _run_ground_state(tmp_path: Path, defect: Path, job: str = "300", bin_dir: Path | None = None, **extra_env):
+    env = {**ENV, "PATH": f"{bin_dir or _fake_slurm(tmp_path)}:{ENV['PATH']}", "SPINLABS_CODE": str(REPO),
+           "DEFECT": defect.name, "binary": "/bin/true", "SLURM_JOB_ID": job, "SRUN_LOG": str(tmp_path / "srun.log"),
+           **extra_env}
+    return subprocess.run(["sh", str(SCRIPTS / "perturbation_runner.sh"), "ground_state"], cwd=defect / "ZFS_full",
+                          env=env, capture_output=True, text=True)
 
+
+def test_the_ground_state_folder_is_ready_to_submit_on_its_own(tmp_path):
     folder = _tree(tmp_path)
-    assert _run(tmp_path, folder).returncode == 0
-    defect = folder.parent
-    assert build_perturbation_tree(defect, [STEP], defect / "data" / "phonon_data.npz", displacement="normalized",
-                                   conv_modes=None, array_jobs=1, vasp_binary=Path("/bin/true"), decont=True) == []
-    tree = defect / "first_order" / f"pert_{STEP}" / "full_decont"
-    (tmp_path / "srun.log").unlink()
-    env = {**ENV, "PATH": f"{_fake_slurm(tmp_path)}:{ENV['PATH']}", "SPINLABS_CODE": str(REPO), "DEFECT": "SiV_3",
-           "binary": "/bin/true", "PHONON_PATH": str(next((defect / "data").glob("phonon_data_sym*.npz"))),
-           "PERT": str(STEP), "DISPLACEMENT": "normalized", "SLURM_ARRAY_TASK_ID": "0", "SLURM_ARRAY_TASK_COUNT": "1",
-           "SLURM_ARRAY_JOB_ID": "200", "SRUN_LOG": str(tmp_path / "srun.log")}
-    r = subprocess.run(["sh", str(SCRIPTS / "perturbation_runner.sh"), "first_order"], cwd=tree, env=env,
-                       capture_output=True, text=True)
+    ground = folder.parent / "ZFS_full"
+    assert sorted(p.name for p in ground.iterdir()) == sorted(
+        ["INCAR", "POSCAR", "KPOINTS", "POTCAR", "run_ground_state.sh", *SUBLEVELS])
+    script = (ground / "run_ground_state.sh").read_text()
+    assert "ORDER=ground_state" in script and "#SBATCH -J SiV_3_ground_state" in script
+    assert "#SBATCH -a" not in script
+
+    r = _run_ground_state(tmp_path, folder.parent)
     assert r.returncode == 0, r.stdout + r.stderr
-    assert "ground state in ../../../ZFS_full" in r.stdout
-    assert "skipping ground state ZFS_full" in r.stdout
-    assert "ZFS_full" not in (tmp_path / "srun.log").read_text()
+    assert (ground / ".done").is_file() and (ground / "WAVECAR").is_file()
+    for level in SUBLEVELS:
+        assert (ground / level / ".done").is_file()
+        assert os.readlink(ground / level / "WAVECAR") == "../WAVECAR"
+        assert (ground / level / "POSCAR").read_text() == (folder / "input" / "POSCAR").read_text()
+    assert sorted((tmp_path / "srun.log").read_text().split("\n")[:-1]) == sorted(
+        ["scf ZFS_full"] + [f"zfs {lv}" for lv in SUBLEVELS])
+
+    # a resubmission of a finished ground state does nothing
+    (tmp_path / "srun.log").unlink()
+    r = _run_ground_state(tmp_path, folder.parent, job="301")
+    assert r.returncode == 0 and "already done" in r.stdout
+    assert not (tmp_path / "srun.log").exists()
 
 
 def test_a_restart_reruns_only_the_sublevels_left(tmp_path):
     folder = _tree(tmp_path)
+    ground = folder.parent / "ZFS_full"
+    r = _run_ground_state(tmp_path, folder.parent, FAIL_IN="ms_0_4")
+    assert r.returncode == 1  # a sublevel without its ZFS block fails the job
+    assert not (ground / ".done").exists() and (ground / ".scf_done").is_file()
+    assert (ground / "ms_1" / ".done").is_file() and not (ground / "ms_0_4" / ".done").exists()
+
+    (tmp_path / "srun.log").unlink()
     r = _run(tmp_path, folder, FAIL_IN="ms_0_4")
     assert r.returncode == 0, r.stdout + r.stderr
-    run = folder.parent / "ZFS_full"
+    run = folder / "runs" / RUNS[0]
     assert not (run / ".done").exists() and (run / ".scf_done").is_file()
-    assert (run / "ms_1" / ".done").is_file() and not (run / "ms_0_4" / ".done").exists()
     assert (run / "CHGCAR").is_file()  # removed only once the run is done
 
     (tmp_path / "srun.log").unlink()
+    assert _run_ground_state(tmp_path, folder.parent, job="302").returncode == 0
     r = _run(tmp_path, folder, job="100")
     assert r.returncode == 0, r.stdout + r.stderr
-    assert (run / ".done").is_file()
+    assert (ground / ".done").is_file() and (run / ".done").is_file()
     log = sorted((tmp_path / "srun.log").read_text().split())
     assert log == sorted(["zfs", "ms_0_4"] * (len(RUNS) + 1))  # no SCF, only the failed sublevel
 
@@ -138,6 +154,10 @@ def test_an_unconverged_scf_runs_no_sublevel(tmp_path):
     srun.write_text(srun.read_text().replace("DAV:   1    -0.1E+02   -0.1E-05", "DAV:  60    -0.1E+02   -0.1E+01"))
     r = _run(tmp_path, folder, bin_dir=bin_dir)
     assert r.returncode == 0, r.stdout + r.stderr
-    run = folder.parent / "ZFS_full"
+    run = folder / "runs" / RUNS[0]
     assert not (run / ".scf_done").exists() and not (run / "ms_1").exists()
     assert "SCF did not converge" in (run / "CHECK").read_text()
+    r = _run_ground_state(tmp_path, folder.parent, bin_dir=bin_dir)
+    assert r.returncode == 1
+    ground = folder.parent / "ZFS_full"
+    assert not (ground / ".scf_done").exists() and not (ground / "ms_1" / "OUTCAR").exists()

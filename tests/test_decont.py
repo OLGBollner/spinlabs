@@ -133,7 +133,13 @@ def test_full_decont_tree_has_the_scf_input_and_one_incar_per_sublevel(tmp_path)
     tree = defect / "first_order" / "pert_0.025" / "full_decont"
     assert is_decont_tree(tree)
     assert [p for p in verify_setup(tree, "run_perturbation_first_order.sh") if "INCAR" in p] == []
-    assert (defect / "ZFS_full").is_dir()  # the ground state, at the defect level
+    ground = defect / "ZFS_full"  # the ground state, at the defect level, its own job
+    assert _tag((ground / "INCAR").read_text(), "LWAVE") == ".TRUE."
+    assert _tag((ground / "INCAR").read_text(), "ISYM") == "0"
+    assert (ground / "POSCAR").read_text() == "POSCAR\n" and (ground / "run_ground_state.sh").is_file()
+    assert sorted(p.name for p in ground.iterdir() if p.is_dir()) == ["ms_0_127", "ms_0_128", "ms_1"]
+    assert _tag((ground / "ms_0_128" / "INCAR").read_text(), "DOCCUP") == "125*1.0 1*1.0 1*1.0 1*0.0 128*0.0"
+    assert "#SBATCH -J NV_64_ground_state" in (ground / "run_ground_state.sh").read_text()
 
 
 def test_verify_flags_a_sublevel_incar_without_algo_none(tmp_path):

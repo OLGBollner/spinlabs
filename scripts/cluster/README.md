@@ -63,9 +63,11 @@ from that snapshot.
   `WAVECAR -> ../WAVECAR`, 4. VASP there (ALGO=None, ISTART=1, LWAVE off); a sublevel gets
   `.done` with its ZFS block, the run directory once all have it. WAVECAR is kept; CHGCAR/CHG
   go. A restart reuses a finished SCF and runs only the sublevels left. The unperturbed ground
-  state goes through the same steps once per defect, in `<defect>/ZFS_full/` (next to
-  `ZFS_hyp/`): the first item of every decontamination tree's job, run by whichever job gets there
-  first and skipped by the others once it has `.done`.
+  state goes through the same steps once per defect in `<defect>/ZFS_full/` (next to `ZFS_hyp/`),
+  filled at creation: the SCF input (INCAR, POSCAR, KPOINTS, POTCAR, CHGCAR from ZFS_hyp), one
+  `ms_*/INCAR` per sublevel and `run_ground_state.sh`. Submit it on its own from there with
+  `sh run_ground_state.sh` (one job, the runner's `ground_state` mode); the trees' jobs do not
+  run it. A rerun skips a finished SCF and sublevels.
   `spinlabs package` (method `decont`, picked by default when the trees exist) writes one npz
   per spin sublevel into one folder, `data/<defect>_<cell>/pert_<p>/full_decont/<date>/`, each
   with a `spin_sublevel` key and its ground state from `ZFS_full/<sublevel>`; only runs with a

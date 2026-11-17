@@ -61,7 +61,6 @@ def _defect(tmp_path: Path) -> tuple[Path, list[int]]:
                                    conv_modes=[1], conv_perts=[STEP], array_jobs=1, vasp_binary=Path("/bin/true"),
                                    decont=True) == []
     modes = mode_numbers(next((defect / "data").glob("phonon_data_sym*.npz")))
-    (defect / "ZFS_full" / "INCAR").write_text(INCAR)
     for lv in SUBLEVELS:
         _outcar(defect / "ZFS_full" / lv / "OUTCAR", 2000.0 + OFFSET[lv])
         for m in modes:

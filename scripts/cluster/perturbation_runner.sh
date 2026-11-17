@@ -16,14 +16,17 @@
 # input/INCAR, which writes the WAVECAR (.scf_done), 3. one subfolder per spin sublevel
 # (input/sublevels/<name>: ms=S and every ms=S-1 spin flip), 4. in each, the ZFS from ../WAVECAR
 # (a symlink) with ALGO=None. The run directory is done once every sublevel has its ZFS block;
-# its WAVECAR is kept. The unperturbed ground state goes through the same steps once per defect,
-# in <defect>/ZFS_full (next to ZFS_hyp/); whichever decontamination tree's job reaches it first
-# runs it, the others skip it once it has .done.
+# its WAVECAR is kept.
+#
+# ground_state: the unperturbed ground state of such a defect, <defect>/ZFS_full (next to ZFS_hyp/),
+# submitted on its own with ZFS_full/run_ground_state.sh. It runs in that folder as made by
+# create_perturbation_tree.py: the SCF from its INCAR/POSCAR/CHGCAR, then the ALGO=None ZFS in every
+# ms_*/ subfolder (its INCAR already there) from ../WAVECAR.
 
 ORDER=${1:-}
 case $ORDER in
-  first_order|second_order|convergence) ;;
-  *) echo "usage: $0 first_order|second_order|convergence" >&2; exit 2 ;;
+  first_order|second_order|convergence|ground_state) ;;
+  *) echo "usage: $0 first_order|second_order|convergence|ground_state" >&2; exit 2 ;;
 esac
 
 INPUT_DIR="input"
@@ -39,77 +42,78 @@ get_n_modes="$SCRIPTS/get_n_modes.py"
 # ---- preflight: verify every dependency BEFORE burning core hours ----
 fail() { echo "FATAL (task ${SLURM_ARRAY_TASK_ID:-?}): $*" >&2; exit 1; }
 [ -n "${SPINLABS_CODE:-}" ] || fail "SPINLABS_CODE not set -- submit with: sh run_perturbation_${ORDER}.sh"
-[ -d "$INPUT_DIR" ] || fail "input dir '$INPUT_DIR' missing (run this from the all_bands folder)"
-case ${DEFECT:-} in ''|*'<defect>'*) fail "DEFECT unset or still placeholder: '${DEFECT:-}'" ;; esac
 case ${binary:-} in ''|*'<'*|*'/path/to/'*) fail "BINARY unset or still placeholder: '${binary:-}'" ;; esac
-case ${PHONON_PATH:-} in ''|*'<path_to_phonon_data.npz>'*) fail "PHONON_PATH unset or still placeholder: '${PHONON_PATH:-}'" ;; esac
-if [ "$ORDER" = "convergence" ]; then
-  case ${MODES:-} in ''|*'<'*) fail "MODES unset or still placeholder: '${MODES:-}'" ;; esac
-  case ${PERTS:-} in ''|*'<'*) fail "PERTS unset or still placeholder: '${PERTS:-}'" ;; esac
-  for m in $MODES; do
-    case $m in *[!0-9]*) fail "MODES must be 1-based mode numbers, got: '$m'" ;; esac
-  done
-  # Each step size p runs at -p and +p. A sign in PERTS is dropped (older scripts list signed
-  # steps), and so are repeated sizes and zero, which is the unperturbed reference ZFS_hyp/ZFS_occup.
-  bad=$(echo "$PERTS" | tr ' ' '\n' | awk 'NF && $1 !~ /^[-+]?([0-9]+\.?[0-9]*|\.[0-9]+)([eE][-+]?[0-9]+)?$/ { print $1; exit }')
-  [ -z "$bad" ] || fail "PERTS must be numbers, got: '$bad'"
-  # LC_ALL=C: in a comma-decimal locale (sv_SE on Dardel) sort -g reads 0.05 as 0, and -u then
-  # keeps only the first size.
-  SIZES=$(echo "$PERTS" | tr ' ' '\n' \
-    | LC_ALL=C awk 'NF { v = $1 + 0; if (v < 0) v = -v; if (v > 0) printf "%g\n", v }' | LC_ALL=C sort -g -u)
-  [ -n "$SIZES" ] || fail "PERTS has no nonzero step size: '$PERTS'"
-  STEPS=""
-  for s in $SIZES; do STEPS="$STEPS${STEPS:+ }-$s $s"; done
-else
-  case ${PERT:-} in ''|*'<pert_scale>'*) fail "PERT unset or still placeholder: '${PERT:-}'" ;; esac
-fi
-# Full spin decontamination: input/sublevels/<name>/INCAR, one per spin sublevel.
-DECONT=0
-SUBLEVELS=""
-if [ -d "$INPUT_DIR/sublevels" ]; then
-  DECONT=1
-  for d in "$INPUT_DIR"/sublevels/*/; do
-    [ -f "${d}INCAR" ] || fail "spin sublevel folder without INCAR: $d"
-    SUBLEVELS="$SUBLEVELS${SUBLEVELS:+ }$(basename "$d")"
-  done
-  [ -n "$SUBLEVELS" ] || fail "$INPUT_DIR/sublevels has no spin sublevel folders"
-  # The defect folder is the first one above this tree that holds ZFS_hyp/; GROUND is its
-  # ZFS_full relative to this tree (run_one works with paths relative to it).
-  GROUND=""
-  d=$HEAD_DIR
-  up=""
-  while [ "$d" != "/" ]; do
-    d=$(dirname "$d")
-    up="../$up"
-    if [ -d "$d/ZFS_hyp" ]; then
-      GROUND="${up}ZFS_full"
-      break
-    fi
-  done
-  [ -n "$GROUND" ] || fail "no defect folder (holding ZFS_hyp/) above $HEAD_DIR for the ground state ZFS_full"
-fi
-if [ "$ORDER" = "second_order" ]; then
-  case ${PAIR_MODE:-} in diag|all) ;; *) fail "PAIR_MODE must be diag or all, got: '${PAIR_MODE:-}'" ;; esac
-fi
-# The displacement convention; job scripts from before DISPLACEMENT give MASS_WEIGHTED (1 or unset:
-# mass_weighted, 0: unweighted) and must keep displacing as their runs so far did.
-if [ -z "${DISPLACEMENT+set}" ]; then
-  MASS_WEIGHTED=${MASS_WEIGHTED-1}  # unset: 1; set but empty (a broken config line) fails below
-  case $MASS_WEIGHTED in
-    1) DISPLACEMENT=mass_weighted ;;
-    0) DISPLACEMENT=unweighted ;;
-    '') fail "MASS_WEIGHTED is empty -- check the job script's config line (\${MASS_WEIGHTED:-0} needs the '-', or write MASS_WEIGHTED=0)" ;;
-    *) fail "MASS_WEIGHTED must be 1 (Q*e/sqrt(m)) or 0 (Q*e), got: '$MASS_WEIGHTED'" ;;
-  esac
-fi
-case $DISPLACEMENT in
-  normalized|mass_weighted|unweighted) DISP_FLAG="--displacement $DISPLACEMENT" ;;
-  *) fail "DISPLACEMENT must be normalized, mass_weighted or unweighted, got: '$DISPLACEMENT'" ;;
-esac
 [ -x "$binary" ] || fail "VASP binary not found/executable: $binary"
-[ -f "$create_struct" ] || fail "create_struct script missing from the code snapshot: $create_struct"
-[ -f "$get_n_modes" ] || fail "get_n_modes script missing from the code snapshot: $get_n_modes"
-[ -f "$PHONON_PATH" ] || fail "phonon data file missing: $PHONON_PATH"
+SUBLEVELS=""
+if [ "$ORDER" = "ground_state" ]; then
+  # This folder holds the SCF input and one ms_*/INCAR per spin sublevel.
+  for name in INCAR POSCAR KPOINTS POTCAR; do
+    [ -f "$name" ] || fail "$name missing in $HEAD_DIR (run this from <defect>/ZFS_full)"
+  done
+  for d in ms_*/; do
+    [ -f "${d}INCAR" ] || continue
+    SUBLEVELS="$SUBLEVELS${SUBLEVELS:+ }${d%/}"
+  done
+  [ -n "$SUBLEVELS" ] || fail "no spin sublevel folders (ms_*/INCAR) in $HEAD_DIR"
+  DECONT=1
+  SUBLEVEL_INCARS=""  # each ms_*/INCAR is already in place
+else
+  [ -d "$INPUT_DIR" ] || fail "input dir '$INPUT_DIR' missing (run this from the all_bands folder)"
+  case ${DEFECT:-} in ''|*'<defect>'*) fail "DEFECT unset or still placeholder: '${DEFECT:-}'" ;; esac
+  case ${PHONON_PATH:-} in ''|*'<path_to_phonon_data.npz>'*) fail "PHONON_PATH unset or still placeholder: '${PHONON_PATH:-}'" ;; esac
+  if [ "$ORDER" = "convergence" ]; then
+    case ${MODES:-} in ''|*'<'*) fail "MODES unset or still placeholder: '${MODES:-}'" ;; esac
+    case ${PERTS:-} in ''|*'<'*) fail "PERTS unset or still placeholder: '${PERTS:-}'" ;; esac
+    for m in $MODES; do
+      case $m in *[!0-9]*) fail "MODES must be 1-based mode numbers, got: '$m'" ;; esac
+    done
+    # Each step size p runs at -p and +p. A sign in PERTS is dropped (older scripts list signed
+    # steps), and so are repeated sizes and zero, which is the unperturbed reference ZFS_hyp/ZFS_occup.
+    bad=$(echo "$PERTS" | tr ' ' '\n' | awk 'NF && $1 !~ /^[-+]?([0-9]+\.?[0-9]*|\.[0-9]+)([eE][-+]?[0-9]+)?$/ { print $1; exit }')
+    [ -z "$bad" ] || fail "PERTS must be numbers, got: '$bad'"
+    # LC_ALL=C: in a comma-decimal locale (sv_SE on Dardel) sort -g reads 0.05 as 0, and -u then
+    # keeps only the first size.
+    SIZES=$(echo "$PERTS" | tr ' ' '\n' \
+      | LC_ALL=C awk 'NF { v = $1 + 0; if (v < 0) v = -v; if (v > 0) printf "%g\n", v }' | LC_ALL=C sort -g -u)
+    [ -n "$SIZES" ] || fail "PERTS has no nonzero step size: '$PERTS'"
+    STEPS=""
+    for s in $SIZES; do STEPS="$STEPS${STEPS:+ }-$s $s"; done
+  else
+    case ${PERT:-} in ''|*'<pert_scale>'*) fail "PERT unset or still placeholder: '${PERT:-}'" ;; esac
+  fi
+  # Full spin decontamination: input/sublevels/<name>/INCAR, one per spin sublevel.
+  DECONT=0
+  SUBLEVEL_INCARS="$HEAD_DIR/$INPUT_DIR/sublevels"
+  if [ -d "$INPUT_DIR/sublevels" ]; then
+    DECONT=1
+    for d in "$INPUT_DIR"/sublevels/*/; do
+      [ -f "${d}INCAR" ] || fail "spin sublevel folder without INCAR: $d"
+      SUBLEVELS="$SUBLEVELS${SUBLEVELS:+ }$(basename "$d")"
+    done
+    [ -n "$SUBLEVELS" ] || fail "$INPUT_DIR/sublevels has no spin sublevel folders"
+  fi
+  if [ "$ORDER" = "second_order" ]; then
+    case ${PAIR_MODE:-} in diag|all) ;; *) fail "PAIR_MODE must be diag or all, got: '${PAIR_MODE:-}'" ;; esac
+  fi
+  # The displacement convention; job scripts from before DISPLACEMENT give MASS_WEIGHTED (1 or unset:
+  # mass_weighted, 0: unweighted) and must keep displacing as their runs so far did.
+  if [ -z "${DISPLACEMENT+set}" ]; then
+    MASS_WEIGHTED=${MASS_WEIGHTED-1}  # unset: 1; set but empty (a broken config line) fails below
+    case $MASS_WEIGHTED in
+      1) DISPLACEMENT=mass_weighted ;;
+      0) DISPLACEMENT=unweighted ;;
+      '') fail "MASS_WEIGHTED is empty -- check the job script's config line (\${MASS_WEIGHTED:-0} needs the '-', or write MASS_WEIGHTED=0)" ;;
+      *) fail "MASS_WEIGHTED must be 1 (Q*e/sqrt(m)) or 0 (Q*e), got: '$MASS_WEIGHTED'" ;;
+    esac
+  fi
+  case $DISPLACEMENT in
+    normalized|mass_weighted|unweighted) DISP_FLAG="--displacement $DISPLACEMENT" ;;
+    *) fail "DISPLACEMENT must be normalized, mass_weighted or unweighted, got: '$DISPLACEMENT'" ;;
+  esac
+  [ -f "$create_struct" ] || fail "create_struct script missing from the code snapshot: $create_struct"
+  [ -f "$get_n_modes" ] || fail "get_n_modes script missing from the code snapshot: $get_n_modes"
+  [ -f "$PHONON_PATH" ] || fail "phonon data file missing: $PHONON_PATH"
+fi
 python -c "import numpy, pymatgen.core" >/dev/null 2>&1 \
   || fail "python env broken (numpy/pymatgen import failed) -- conda env did not activate?"
 # spinlabs is a namespace package (no __file__): check a module the structure scripts use.
@@ -119,7 +123,7 @@ case $spinlabs_dir in
   "$SPINLABS_CODE"/src/*) ;;
   *) fail "spinlabs is imported from $spinlabs_dir, not from the code snapshot $SPINLABS_CODE/src" ;;
 esac
-if [ "$ORDER" != "convergence" ]; then  # convergence runs only the modes its config names
+if [ "$ORDER" != "convergence" ] && [ "$ORDER" != "ground_state" ]; then  # convergence runs only the modes its config names
   MODES=$(python "$get_n_modes" "$PHONON_PATH") || fail "get_n_modes exited nonzero on $PHONON_PATH"
   [ -n "$MODES" ] || fail "get_n_modes returned no modes for $PHONON_PATH"
 fi
@@ -131,15 +135,19 @@ if [ "$ORDER" = "second_order" ] && [ "$PAIR_MODE" = "all" ]; then
   PAIRS=$(python "$get_n_modes" --pairs "$PHONON_PATH") || fail "get_n_modes --pairs exited nonzero on $PHONON_PATH"
   [ -n "$PAIRS" ] || fail "get_n_modes --pairs returned no pairs for $PHONON_PATH"
 fi
+if [ "$ORDER" = "ground_state" ]; then
+  echo "Preflight OK: ground state in $HEAD_DIR, sublevels $SUBLEVELS, binary=$binary"
+else
 echo "Preflight OK: $ORDER, $(echo $MODES | wc -w) modes${PAIR_MODE:+, pair_mode=$PAIR_MODE}${PAIRS:+, $(echo "$PAIRS" | wc -l) pairs by frequency gap}${STEPS:+, steps $STEPS}, binary=$binary"
 case $DISPLACEMENT in
   normalized) echo "displacements: step * u/|u|, u = e/sqrt(m) (normalized: the same Cartesian step for every mode)" ;;
   mass_weighted) echo "displacements: Q*e/sqrt(m) (mass-weighted)" ;;
   unweighted) echo "displacements: Q*e (not mass-weighted)" ;;
 esac
+fi
 echo "spinlabs code: $(basename "$SPINLABS_CODE") ($SPINLABS_CODE)"
-if [ "$DECONT" = 1 ]; then
-  echo "full spin decontamination: SCF -> WAVECAR, then ALGO=None ZFS of sublevels $SUBLEVELS; ground state in $GROUND"
+if [ "$DECONT" = 1 ] && [ "$ORDER" != "ground_state" ]; then
+  echo "full spin decontamination: SCF -> WAVECAR, then ALGO=None ZFS of sublevels $SUBLEVELS (ground state: <defect>/ZFS_full, its own job)"
 fi
 # ------------------------------------------------------------------------
 
@@ -286,7 +294,9 @@ decont_sublevels() {
     mkdir -p "$s"
     rm -f "$s/OUTCAR" "$s/OSZICAR" "$s/WAVECAR"
     cp POSCAR KPOINTS POTCAR "$s"/
-    cp "$HEAD_DIR/$INPUT_DIR/sublevels/$s/INCAR" "$s"/
+    if [ -n "$SUBLEVEL_INCARS" ]; then
+      cp "$SUBLEVEL_INCARS/$s/INCAR" "$s"/
+    fi
     ln -s ../WAVECAR "$s/WAVECAR"
     cd "$s"
     echo "$ID: $1: ZFS of sublevel $s (ALGO=None from ../WAVECAR)"
@@ -316,7 +326,7 @@ decont_sublevels() {
 # ---- end full spin decontamination ----
 
 # run_one LABEL DIR STRUCT_ARGS...: perturb input/POSCAR along the modes and run VASP in DIR.
-# Without STRUCT_ARGS (the ground state ZFS_full of a decontamination tree) the structure is input/POSCAR as is.
+# Without STRUCT_ARGS the structure is input/POSCAR as is.
 run_one() {
   label=$1
   TARGET_DIR=$2
@@ -421,6 +431,28 @@ run_one() {
   release_lock
 }
 
+# ---- ground state (ORDER=ground_state): this folder is the run directory ----
+if [ "$ORDER" = "ground_state" ]; then
+  VASP_FAILED=0
+  TARGET_DIR=.
+  acquire_lock . || exit 0  # another job runs it
+  if [ -f .done ]; then
+    echo "$ID: ground state already done (every sublevel has its ZFS block)"
+    exit 0
+  fi
+  rm -f CHECK
+  echo "$ID: starting job for ground state"
+  if scf_reusable .; then
+    echo "$ID: ground state: SCF finished earlier -- ZFS of the sublevels left from its WAVECAR"
+  else
+    rm -f .scf_done
+    decont_scf "ground state" || exit 1
+  fi
+  decont_sublevels "ground state"
+  [ -f .done ] && [ "$VASP_FAILED" -eq 0 ] || exit 1
+  exit 0
+fi
+
 mkdir -p runs
 
 VASP_FAILED=0
@@ -442,9 +474,6 @@ visit() {
 
 walk() {
   ITEM=0
-  if [ "$DECONT" = 1 ]; then
-    visit "ground state ZFS_full" "$GROUND"
-  fi
   if [ "$ORDER" = "convergence" ]; then
     for p in $STEPS; do
       for i in $MODES; do

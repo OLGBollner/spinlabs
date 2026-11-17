@@ -41,8 +41,8 @@ DECONT_BASIS = "full_decont"
 DECONT_SOURCE = {DECONT_BASIS: "ZFS_hyp"}
 DECONT_CONVERGENCE_FOLDER = {DECONT_BASIS: "convergence_test_decont"}
 SUBLEVELS_DIR = "sublevels"  # input/sublevels/<name>/INCAR: the ALGO=None ZFS run of each spin sublevel
-# <defect>/ZFS_full: the unperturbed ground state through the same steps, once per defect (run by the
-# first decontamination job that reaches it; spinlabs package reads the ground-state tensors there)
+# <defect>/ZFS_full: the unperturbed ground state through the same steps, once per defect, submitted
+# on its own (build_decont_ground_state); spinlabs package reads the ground-state tensors there
 DECONT_GROUND_STATE = "ZFS_full"
 SUBLEVEL_TIME_FRACTION = 0.1  # time of one ALGO=None sublevel run, as a fraction of the reference ZFS run
 
@@ -237,20 +237,84 @@ def decont_ground_state(tree: Path) -> Path | None:
     return None
 
 
-def write_decont_inputs(inp: Path, incar: str) -> list[str]:
-    """Write inp/INCAR (step 2) and inp/sublevels/<name>/INCAR (step 4) from a guarded ZFS INCAR.
+def guarded_incar(incar: str, where: Path) -> str:
+    """A ZFS INCAR made fit for the perturbation runs: no ALGO=None, no relaxation, ISYM=0 (logged)."""
+    warnings = []
+    for guard in (forbid_algo_none, forbid_relaxation):
+        incar, warning = guard(incar)
+        if warning:
+            warnings.append(warning)
+    incar, note = symmetry_off(incar)
+    if note:
+        LOGGER.info(f"{where}: {note}")
+    for warning in warnings:
+        LOGGER.warning(f"{where}: {warning}")
+    return incar
 
-    Returns the sublevel names.
+
+def write_decont_inputs(inp: Path, incar: str, levels_dir: Path | None = None) -> list[str]:
+    """Write inp/INCAR (step 2) and <levels_dir>/<name>/INCAR (step 4) from a guarded ZFS INCAR.
+
+    ``levels_dir`` defaults to inp/sublevels (a tree's input); the ground state ZFS_full puts the
+    sublevel folders next to its SCF instead. Returns the sublevel names.
     """
     from spinlabs.vasp.occupations import parse_occupations, spin_sublevels
 
     levels = spin_sublevels(*parse_occupations(incar))
     (inp / "INCAR").write_text(decont_scf_incar(incar))
     for level in levels:
-        d = inp / SUBLEVELS_DIR / level.name
+        d = (levels_dir if levels_dir is not None else inp / SUBLEVELS_DIR) / level.name
         d.mkdir(parents=True, exist_ok=True)
         (d / "INCAR").write_text(decont_sublevel_incar(incar, level))
     return [level.name for level in levels]
+
+
+GROUND_STATE_SCRIPT = "run_ground_state.sh"
+
+
+def build_decont_ground_state(
+    out: Path, *, vasp_binary: Path | None = None, max_hours: float | None = None, force: bool = False
+) -> list[str]:
+    """Fill <out>/ZFS_full, the ground state of the full spin decontamination, ready to submit on its own.
+
+    From ZFS_hyp: INCAR (the SCF, guarded like the trees' input and restart-ready), POSCAR, KPOINTS,
+    POTCAR, CHGCAR; one ms_*/INCAR per spin sublevel (ALGO=None from ../WAVECAR); and
+    run_ground_state.sh (one job: the runner's ground_state mode). Its time limit is the reference
+    ZFS run's wall time with the sublevels' share (SUBLEVEL_TIME_FRACTION), capped at ``max_hours``.
+    A ZFS_full that already holds an INCAR is kept unless ``force``. Returns the failure messages.
+    """
+    src = zfs_sources(out, decont=True)[DECONT_BASIS]
+    dst = out / DECONT_GROUND_STATE
+    if (dst / "INCAR").is_file() and not force:
+        LOGGER.info(f"exists, kept (--force rebuilds it): {dst}")
+        return []
+    if dst.exists() and force:
+        LOGGER.info(f"rebuilding: {dst}")
+        shutil.rmtree(dst)
+    dst.mkdir(parents=True, exist_ok=True)
+    for name in COPIED_FILES:
+        if (src / name).is_file():
+            shutil.copy2(src / name, dst / name)
+    try:
+        levels = write_decont_inputs(dst, guarded_incar((src / "INCAR").read_text(), dst), levels_dir=dst)
+    except ValueError as error:
+        LOGGER.error(f"{dst}: cannot set up the spin sublevels: {error}")
+        return [f"{dst}: cannot set up the spin sublevels: {error}"]
+    text = (TEMPLATES / GROUND_STATE_SCRIPT).read_text()
+    text = replace_tag(text, "DEFECT", out.name)
+    if vasp_binary:
+        text = replace_tag(text, "BINARY", str(vasp_binary))
+    text = replace_tag(text, "SPINLABS_REPO", str(repo_root()))
+    text = replace_sbatch(text, "-J", f"{out.name}_ground_state")
+    per_sim = read_outcar_time(src)
+    if per_sim is not None:
+        seconds = per_sim * (1 + SUBLEVEL_TIME_FRACTION * len(levels)) * 1.5  # one job: margin for a slow node
+        if max_hours is not None:
+            seconds = min(seconds, max_hours * 3600)
+        text = replace_sbatch(text, "-t", sbatch_time(seconds))
+    (dst / GROUND_STATE_SCRIPT).write_text(text)
+    LOGGER.info(f"ground state {dst}: SCF + sublevels {', '.join(levels)}; submit with: sh {GROUND_STATE_SCRIPT}")
+    return []
 
 
 # job-script templates copied into every tree (package data, next to this module)
@@ -408,8 +472,8 @@ def prepare_basis(
     second_order (one step, ``pert``) or convergence (``conv_modes`` at -p and +p for each
     step size p in ``conv_perts``).  With ``decont`` the tree runs the full spin decontamination:
     input/INCAR is the SCF that writes the WAVECAR, input/sublevels/<name>/INCAR the ALGO=None
-    ZFS run of each spin sublevel, and the runner also runs the defect's ground state ZFS_full
-    (see scripts/cluster/README.md).
+    ZFS run of each spin sublevel; the defect's ground state ZFS_full is its own job
+    (build_decont_ground_state, see scripts/cluster/README.md).
     Returns the list of failure messages.
     """
     failures: list[str] = []
@@ -435,17 +499,7 @@ def prepare_basis(
     # structure differs, and the CHGCAR lets a failed run pick up where it left off
     incar_path = inp / "INCAR"
     if incar_path.is_file():
-        incar = incar_path.read_text()
-        warnings = []
-        for guard in (forbid_algo_none, forbid_relaxation):
-            incar, warning = guard(incar)
-            if warning:
-                warnings.append(warning)
-        incar, note = symmetry_off(incar)
-        if note:
-            LOGGER.info(f"{dst}: {note}")
-        for warning in warnings:
-            LOGGER.warning(f"{dst}: {warning}")
+        incar = guarded_incar(incar_path.read_text(), dst)
         if decont:
             try:
                 levels = write_decont_inputs(inp, incar)
@@ -466,7 +520,6 @@ def prepare_basis(
     else:
         n_tasks = n_tasks_for(order, pair_mode, n_modes)
     if decont:
-        n_tasks += 1  # the ground state ZFS_full, if this tree's job gets to it first
         if per_sim is not None:
             per_sim *= 1 + SUBLEVEL_TIME_FRACTION * len(levels)
     if per_sim is None:
@@ -563,7 +616,7 @@ def build_perturbation_tree(
     defect = out.name
     sources = zfs_sources(out, decont=decont)
     if decont:
-        (out / DECONT_GROUND_STATE).mkdir(exist_ok=True)
+        failures.extend(build_decont_ground_state(out, vasp_binary=vasp_binary, max_hours=max_hours, force=force))
 
     phonon = resolve_sym_phonon(out, phonon)
     n_modes = n_modes_from_phonon(phonon)
@@ -607,6 +660,7 @@ def build_perturbation_tree(
                 vasp_binary=vasp_binary,
                 force=force,
                 decont=decont,
+                ground_state=False,  # built above
             )
         )
     return failures
@@ -704,6 +758,7 @@ def build_convergence_tree(
     vasp_binary: Path | None = None,
     force: bool = False,
     decont: bool = False,
+    ground_state: bool = True,
 ) -> list[str]:
     """Step-size convergence folders of a defect: <out>/convergence_test_<all|occup>/.
 
@@ -713,7 +768,8 @@ def build_convergence_tree(
     displaced by `displacement`, through the shared perturbation runner. Works on a new
     defect folder and on one that already has its perturbation trees; existing convergence
     folders are kept unless `force`. With `decont`, one folder convergence_test_decont/ that runs
-    the full spin decontamination (see prepare_basis). Returns the list of failure messages.
+    the full spin decontamination (see prepare_basis), plus the defect's ground state ZFS_full
+    unless ``ground_state`` is False. Returns the list of failure messages.
     """
     steps = step_sizes(steps)
     if not modes or not steps:
@@ -726,8 +782,8 @@ def build_convergence_tree(
     n_modes = n_modes_from_phonon(phonon)
     section(LOGGER, f"Convergence folders {out.name}: modes {modes}, steps {steps}, {displacement} displacements")
     folders = DECONT_CONVERGENCE_FOLDER if decont else CONVERGENCE_FOLDER
-    if decont:
-        (out / DECONT_GROUND_STATE).mkdir(exist_ok=True)
+    if decont and ground_state:
+        failures.extend(build_decont_ground_state(out, vasp_binary=vasp_binary, max_hours=max_hours, force=force))
     for basis, src in zfs_sources(out, decont=decont).items():
         dst = out / folders[basis]
         if not _make_room(dst, force):
