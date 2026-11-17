@@ -59,7 +59,9 @@ def build_package_parser(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--conv",
         action="store_true",
-        help="Package convergence runs (runs/<mode>_pert_<p>/OUTCAR) into one npz instead of raw simulation folders.",
+        help="Package convergence runs (runs/<mode>_pert_<p>/OUTCAR) into one npz instead of raw simulation folders. "
+        "A full-decontamination folder (convergence_test_decont) gives one npz per spin sublevel "
+        "(runs/<mode>_pert_<p>/<sublevel>/OUTCAR), in one folder.",
     )
     parser.add_argument(
         "--ground-state",
@@ -70,7 +72,9 @@ def build_package_parser(parser: argparse.ArgumentParser) -> None:
         metavar="OUTCAR",
         help=(
             "With --conv: ground-state OUTCAR; its ZFS tensor is stored as 'd0' (the Q=0 point) in the npz. "
-            "Flag without a path: auto-discover <defect-folder>/ZFS_hyp/OUTCAR (all) or ZFS_occup/OUTCAR (occup)."
+            "Flag without a path: auto-discover <defect-folder>/ZFS_hyp/OUTCAR (all) or ZFS_occup/OUTCAR (occup). "
+            "Ignored for a full-decontamination folder: each sublevel's d0 is always "
+            "<defect-folder>/ZFS_full/<sublevel>/OUTCAR."
         ),
     )
     parser.add_argument(
@@ -101,7 +105,8 @@ def build_package_parser(parser: argparse.ArgumentParser) -> None:
         default=None,
         metavar="METHOD",
         help="ZFS calculation method(s) to package: all, approx and/or decont (full spin decontamination: one "
-        "file per spin sublevel in one folder). Default: every method the defect has trees for.",
+        "file per spin sublevel in one folder, each with its ground state from <defect-folder>/ZFS_full/<sublevel>; "
+        "only runs with a ZFS tensor in every sublevel). Default: every method the defect has trees for.",
     )
     parser.add_argument(
         "--no-mass-weighted",
@@ -837,6 +842,11 @@ def _scan_conv(args: argparse.Namespace, defect_folder: Path, root: Path) -> lis
     suffix = re.sub(r"^convergence[._-]*", "", root.name).lstrip("_-") or "conv"
     sublevels = decont_sublevels(root)
     if sublevels:
+        if getattr(args, "ground_state", None) not in (None, _GS_AUTO):
+            LOGGER.warning(
+                f"{root.name}: --ground-state {args.ground_state} ignored; each sublevel's d0 is "
+                f"{defect_folder.name}/ZFS_full/<sublevel>/OUTCAR"
+            )
         return _scan_conv_decont(defect_folder, root, suffix, sublevels)
     method = _conv_method(suffix)
     calc_method = normalize_calc_method(method) if method else None
