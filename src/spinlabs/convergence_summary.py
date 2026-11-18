@@ -61,8 +61,8 @@ LOGGER = get_logger(__name__)
 
 # One categorical slot per mode, in pack order; more modes than slots are not plotted
 COLORS = ["#2a78d6", "#eb6834", "#1baf7a", "#eda100", "#e87ba4", "#008300"]
-METHODS = {"all": "all bands", "approx": "defect band approx"}  # pack metadata 'method' -> column title
-STANDARD_KEYS = {"test_all", "test_occup"}  # folder suffixes the column title need not repeat
+METHODS = {"all": "all bands", "approx": "defect band approx", "decont": "full decont"}  # pack metadata 'method' -> column title
+STANDARD_KEYS = {"test_all", "test_occup", "test_decont"}  # folder suffixes the column title need not repeat
 FAINT = 0.4  # alpha of an unresolved coefficient's lines and points
 BAND_WIDTH, BAND_ALPHA = 10, 0.25  # a mode's safe |Q| band along its fit line
 COMMON_COLOR = "#e5f4e4"  # the |Q| column safe for every mode
