@@ -82,20 +82,29 @@ def test_scf_incar_writes_the_wavecar_and_skips_ldmatrix():
         assert _tag(incar, tag) == value, tag
 
 
-def test_sublevel_incar_keeps_the_triplet_for_vasp_and_gives_ldmatrix_the_singlet():
+def test_sublevel_incar_gives_vasp_and_ldmatrix_the_sublevel_determinant():
     levels = spin_sublevels(*parse_occupations(ZFS_INCAR))
-    incar = decont_sublevel_incar(ZFS_INCAR, levels[2], levels[0])
+    incar = decont_sublevel_incar(ZFS_INCAR, levels[2])
     for tag, value in (("ALGO", "None"), ("ISTART", "1"), ("ICHARG", "0"), ("LDMATRIX", ".TRUE."),
                        ("LWAVE", ".FALSE."), ("LCHARG", ".FALSE."), ("NSW", "0"), ("IBRION", "-1"), ("ENCUT", "520"),
-                       # VASP's own occupations: the ms = S triplet
-                       ("ISMEAR", "-2"), ("NUPDOWN", "2"),
-                       ("FERWE", "125*1.0 1*1.0 1*1.0 1*1.0 128*0.0"),
-                       ("FERDO", "125*1.0 1*1.0 1*0.0 1*0.0 128*0.0"),
-                       # LDMATRIX: the ms_0_128 determinant
+                       # the ms_0_128 determinant, for VASP (NUPDOWN = 2 ms) and for LDMATRIX alike
+                       ("ISMEAR", "-2"), ("NUPDOWN", "0"),
+                       ("FERWE", "125*1.0 1*1.0 1*1.0 1*0.0 128*0.0"),
+                       ("FERDO", "125*1.0 1*1.0 1*0.0 1*1.0 128*0.0"),
                        ("DOCCUP", "125*1.0 1*1.0 1*1.0 1*0.0 128*0.0"),
                        ("DOCCDO", "125*1.0 1*1.0 1*0.0 1*1.0 128*0.0")):
         assert _tag(incar, tag) == value, tag
     assert len(re.findall(r"^\s*ALGO\s*=", incar, re.M)) == 1
+    high_spin = decont_sublevel_incar(ZFS_INCAR, levels[0])
+    assert _tag(high_spin, "NUPDOWN") == "2" and _tag(high_spin, "FERWE") == _tag(high_spin, "DOCCUP")
+
+
+def test_quartet_sublevel_incars_have_nupdown_two_ms():
+    up, dn = [1.0] * 7 + [0.0] * 3, [1.0] * 4 + [0.0] * 6
+    levels = spin_sublevels(up, dn)
+    assert [_tag(decont_sublevel_incar("ENCUT = 400\n", lv), "NUPDOWN") for lv in levels] == ["3", "1", "1", "1"]
+    flipped = decont_sublevel_incar("ENCUT = 400\n", levels[1])
+    assert _tag(flipped, "FERWE") == _tag(flipped, "DOCCUP") == "3*1.0 1*1.0 1*0.0 1*1.0 1*1.0 3*0.0"
 
 
 def _defect(tmp_path: Path) -> Path:

@@ -205,15 +205,16 @@ def decont_scf_incar(incar: str) -> str:
     return patch_restart_incar(_set_tags(incar, {"LDMATRIX": ".FALSE."}))
 
 
-def decont_sublevel_incar(incar: str, level, high_spin) -> str:
+def decont_sublevel_incar(incar: str, level) -> str:
     """Step 4: the ZFS of one spin sublevel (an occupations.SpinSublevel) from the step-2 WAVECAR.
 
-    VASP itself keeps the high-spin (ms = S) state, ``high_spin``: FERWE/FERDO with ISMEAR = -2
-    and NUPDOWN = 2S. LDMATRIX evaluates the D-tensor of ``level``'s determinant, given by
-    DOCCUP/DOCCDO (the two sets are separate in the decontamination build of VASP; with
-    smearing instead, degenerate levels such as the NV e pair get half occupations). ALGO = None
-    keeps the WAVECAR's orbitals. Nothing is written back (LWAVE/LCHARG off), so the WAVECAR can
-    be a symlink.
+    Both occupation sets describe ``level``'s determinant: DOCCUP/DOCCDO, which LDMATRIX evaluates
+    in the decontamination build of VASP, and FERWE/FERDO with ISMEAR = -2 and NUPDOWN = 2 ms,
+    VASP's own occupations (with smearing instead, degenerate levels such as the NV e pair get
+    half occupations). VASP takes the spin of its 1/(S(2S-1)) prefactor from the FERWE/FERDO
+    magnetization, so the ms = S tensor comes out scaled and the ms = S - 1 ones as that
+    determinant gives them. ALGO = None keeps the WAVECAR's orbitals. Nothing is written back
+    (LWAVE/LCHARG off), so the WAVECAR can be a symlink.
     """
     return _set_tags(
         incar,
@@ -223,9 +224,9 @@ def decont_sublevel_incar(incar: str, level, high_spin) -> str:
             "ICHARG": "0",
             "LDMATRIX": ".TRUE.",
             "ISMEAR": "-2",
-            "NUPDOWN": str(high_spin.nupdown),
-            "FERWE": high_spin.doccup(),
-            "FERDO": high_spin.doccdo(),
+            "NUPDOWN": str(level.nupdown),
+            "FERWE": level.doccup(),
+            "FERDO": level.doccdo(),
             "DOCCUP": level.doccup(),
             "DOCCDO": level.doccdo(),
             "LWAVE": ".FALSE.",
@@ -272,7 +273,7 @@ def write_decont_inputs(inp: Path, incar: str, levels_dir: Path | None = None) -
     for level in levels:
         d = (levels_dir if levels_dir is not None else inp / SUBLEVELS_DIR) / level.name
         d.mkdir(parents=True, exist_ok=True)
-        (d / "INCAR").write_text(decont_sublevel_incar(incar, level, levels[0]))  # levels[0]: ms = S
+        (d / "INCAR").write_text(decont_sublevel_incar(incar, level))
     return [level.name for level in levels]
 
 
