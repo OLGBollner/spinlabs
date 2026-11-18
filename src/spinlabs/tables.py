@@ -19,9 +19,9 @@ LOGGER = get_logger(__name__)
 # Significant figures of every number in the tables.
 SIG_FIGS = 3
 _INIT_STATE_HEADERS = {"ms_1": "$m_s=+1$", "ms_0": "$m_s=0$", "ms_-1": "$m_s=-1$"}
-_METHOD_SUFFIX = {"all_bands": "", "defect_band_approx": " (spin corrected)"}
+_METHOD_SUFFIX = {"all_bands": "", "defect_band_approx": " (spin corrected)", "full_decont": " (full decontamination)"}
 # all_bands before the spin-corrected row of the same defect.
-_METHOD_RANK = {"all_bands": 0, "defect_band_approx": 1}
+_METHOD_RANK = {"all_bands": 0, "defect_band_approx": 1, "full_decont": 2}
 _PERT_RE = re.compile(r"(?<![A-Za-z])pert_([0-9.]+)")
 
 
@@ -256,10 +256,13 @@ def format_t1_table(
 METHOD_COLUMN = {
     "all_bands": "contaminated",  # ZFS_hyp: all-electron bands, no charge correction applied
     "defect_band_approx": "corrected",  # ZFS_occup: defect-band approximation, charge-corrected
+    "full_decont": "decontaminated",  # ZFS_full: full spin decontamination (spin sublevels)
 }
-COLUMNS = ("corrected", "contaminated")
-# The paper's names of the two methods: unpaired electrons (defect-band approximation) and all electrons
-COLUMN_NAMES = {"corrected": "UE", "contaminated": "AE"}
+COLUMNS = ("corrected", "contaminated")  # always in the defect table
+OPTIONAL_COLUMNS = ("decontaminated",)  # in the defect table when some defect has a value for it
+# The paper's names of the methods: unpaired electrons (defect-band approximation), all electrons, and the
+# full spin decontamination
+COLUMN_NAMES = {"corrected": "UE", "contaminated": "AE", "decontaminated": "FD"}
 
 # What the defect table fills in by hand per defect: the name it shows, the configuration (lattice sites),
 # and the measured D (MHz, as printed) with its BibTeX key. Defects missing here show their own name and ---.
@@ -326,12 +329,22 @@ def _method_column(npz_path: Path, calc_method: str | None = None) -> str | None
     return None
 
 
+def _is_sublevel_file(path: Path) -> bool:
+    """Whether a package file is one spin sublevel of a full-decontamination set."""
+    try:
+        with np.load(str(path), allow_pickle=True) as data:
+            return "spin_sublevel" in data.files
+    except (OSError, ValueError):
+        return False
+
+
 def collect_d_rows(paths: list[Path]) -> list[dict]:
     """One ground-state D (MHz) per data source.
 
     ``paths`` are packaged ZFS npz files and/or folders, which are searched
     for packaged npz files (``*_raw_zfs_data_*.npz``) and relaxed-structure
-    ground states (``ZFS_hyp/OUTCAR``, ``ZFS_occup/OUTCAR``).
+    ground states (``ZFS_hyp/OUTCAR``, ``ZFS_occup/OUTCAR``). The per-sublevel files of
+    a full-decontamination set count as one source, the decontaminated set.
     """
     from spinlabs.models import RawZFSData
 
@@ -340,6 +353,9 @@ def collect_d_rows(paths: list[Path]) -> list[dict]:
         if path.is_dir():
             rows += collect_outcar_rows(path)
         npz_files = sorted(path.rglob("*_raw_zfs_data_*.npz")) if path.is_dir() else [path]
+        # a full-decontamination set is one source: its folder, loaded (decontaminated) once
+        sets = sorted({f.parent for f in npz_files if _is_sublevel_file(f)})
+        npz_files = [f for f in npz_files if not _is_sublevel_file(f)] + sets
         for npz_path in npz_files:
             try:
                 data = RawZFSData.load(str(npz_path))
@@ -430,7 +446,7 @@ def _entry(merged: dict, defect: str, cell: str) -> dict:
     return merged.setdefault((defect, cell), {
         "defect": defect,
         "cell": cell,
-        "d": {c: None for c in COLUMNS},
+        "d": {c: None for c in (*COLUMNS, *OPTIONAL_COLUMNS)},
         "t1": {},
         "sources": {},
     })
@@ -610,19 +626,25 @@ def render_defect_table(
                     f"{defect}: no T1 state mapping for spin S = {spin} (T1_STATE_ROLES); its T1 columns show ---"
                 )
 
-    t1_keys = [(c, role) for c in COLUMNS for role in T1_ROLES] if include_t1 else []
-    n_cols = 5 + len(t1_keys)
+    entries = [e for cells in grouped.values() for e in cells]
+    columns = list(COLUMNS) + [
+        c for c in OPTIONAL_COLUMNS
+        if any(e["d"].get(c) is not None or any(k[0] == c for k in e["t1"]) for e in entries)
+    ]
+    t1_keys = [(c, role) for c in columns for role in T1_ROLES] if include_t1 else []
+    n_d = len(columns)
+    n_cols = 3 + n_d + len(t1_keys)
     mhz = r"(\si{\mega\hertz})"
     head = [r"Defect", "Configuration", r"$D_\text{experiment}$"]
-    head += [rf"$D_\text{{{COLUMN_NAMES[c]}}}$" for c in COLUMNS]
-    sub = ["", "", mhz, mhz, mhz]
+    head += [rf"$D_\text{{{COLUMN_NAMES[c]}}}$" for c in columns]
+    sub = ["", "", mhz] + [mhz] * n_d
     rules = ""
     if include_t1:
         n_roles = len(T1_ROLES)
-        head += [rf"\multicolumn{{{n_roles}}}{{c}}{{$T_{{1,\text{{{COLUMN_NAMES[c]}}}}}$ (ms)}}" for c in COLUMNS]
+        head += [rf"\multicolumn{{{n_roles}}}{{c}}{{$T_{{1,\text{{{COLUMN_NAMES[c]}}}}}$ (ms)}}" for c in columns]
         sub += [role.capitalize() for _, role in t1_keys]
         rules = "    " + " ".join(
-            rf"\cmidrule(lr){{{6 + i * n_roles}-{5 + (i + 1) * n_roles}}}" for i in range(len(COLUMNS))
+            rf"\cmidrule(lr){{{4 + n_d + i * n_roles}-{3 + n_d + (i + 1) * n_roles}}}" for i in range(len(columns))
         ) + "\n"
 
     footnote = "; ".join(f"({letter}) cell size {cell}" for cell, letter in letters.items())
@@ -662,7 +684,7 @@ def render_defect_table(
         if info.get("d_experiment") and info.get("cite"):
             experiment += rf"~\cite{{{info['cite']}}}"
         values = [info.get("name") or tex_defect(defect), info.get("configuration") or "---", experiment]
-        values += [joined([(e["d"][c], e["cell"]) for e in cells]) for c in COLUMNS]
+        values += [joined([(e["d"][c], e["cell"]) for e in cells]) for c in columns]
         roles = T1_STATE_ROLES.get(spins.get(defect), {})
         values += [joined_t1(cells, column, roles.get(role, ())) for column, role in t1_keys]
         lines.append("    " + " & ".join(values) + r" \\")

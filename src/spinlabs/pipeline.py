@@ -151,6 +151,8 @@ def find_default_phonon_file_for_raw(raw_zfs_file: str | Path | Sequence[str | P
         anchor = Path(raw_zfs_file[0])
     else:
         anchor = Path(raw_zfs_file)
+    if anchor.is_dir():  # a full-decontamination set folder: look from a file inside it
+        anchor = anchor / "set.npz"
     anchor_dir = anchor.parent
     candidates = [
         anchor_dir / "phonon_data.npz",

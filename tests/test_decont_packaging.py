@@ -142,7 +142,7 @@ def test_package_writes_one_file_per_sublevel_into_one_folder(tmp_path):
         assert raw.ground_state_zfs.to_unit("MHz").matrix[2, 2] == pytest.approx(2000.0 + OFFSET[lv])
 
     conn = ensure_db()
-    assert find_packaged(conn) == []  # a single sublevel is never a whole dataset
+    assert find_packaged(conn) == [folder.resolve()]  # the set, as one package: never a single sublevel
     sets = find_sublevel_sets(conn, defect="NV", cell_size=64, latest=True)
     assert len(sets) == 1 and sorted(sets[0]) == SUBLEVELS
     assert {p.parent for p in sets[0].values()} == {folder.resolve()}
@@ -154,7 +154,7 @@ def test_package_writes_one_file_per_sublevel_into_one_folder(tmp_path):
     from spinlabs.cli.package import _register_only
 
     _register_only(tmp_path / "data")
-    assert find_packaged(conn) == []
+    assert find_packaged(conn) == [folder.resolve()]
     assert sorted(find_sublevel_sets(conn)[0]) == SUBLEVELS
 
 
@@ -175,7 +175,7 @@ def test_convergence_is_packaged_per_sublevel_with_its_d0(tmp_path):
         assert list(data["perts"]) == [-STEP, STEP]
         assert data["tensors"][0, 1, 2, 2] == pytest.approx(2000.0 + OFFSET[lv] + STEP)
     conn = ensure_db()
-    assert find_convergence(conn) == []
+    assert find_convergence(conn) == [folder.resolve()]
     assert sorted(find_sublevel_sets(conn, kind="convergence_sublevel")[0]) == SUBLEVELS
 
 
@@ -216,3 +216,65 @@ def test_a_packaged_set_and_its_convergence_pack_are_decontaminated(tmp_path):
     conv = decontaminate_conv_set(load_conv_sublevel_set(tmp_path / "data" / "NV_64" / "full_decont" / DAY))
     assert conv["d0"][2, 2] == pytest.approx(gs)
     assert conv["tensors"].shape == (1, 2, 3, 3)
+
+
+def test_a_set_is_queried_and_loaded_as_one_decontaminated_dataset(tmp_path):
+    from spinlabs.models import RawZFSData
+    from spinlabs.registry import ensure_db, find_packaged, package_digest, package_info
+
+    defect, modes = _defect(tmp_path)
+    _run(_args(tmp_path, defect))
+    folder = (tmp_path / "data" / "NV_64" / f"pert_{STEP:g}" / "full_decont" / DAY).resolve()
+    conn = ensure_db()
+    assert find_packaged(conn, calc_method="full_decont", latest=True) == [folder]
+    assert find_packaged(conn, calc_method="full_decont", pert_order=[1, 2]) == [folder]
+    assert find_packaged(conn, calc_method="all_bands") == []
+    info = package_info(conn, folder)
+    assert info["calc_method"] == "full_decont" and info["pert_order"] == "[1, 2]" and info["defect"] == "NV"
+
+    raw = RawZFSData.load(folder)  # what --query hands the pipeline
+    assert raw.calc_method == "full_decont" and raw.spin_sublevel is None
+    gs = (OFFSET["ms_1"] - (OFFSET["ms_0_3"] + OFFSET["ms_0_4"]) / 2) / 2
+    assert raw.ground_state_zfs.to_unit("MHz").matrix[2, 2] == pytest.approx(gs)
+    assert RawZFSData.load(sorted(folder.glob("*.npz"))).ground_state_zfs.to_unit("MHz").matrix[2, 2] == pytest.approx(gs)
+    single = RawZFSData.load(next(folder.glob("*ms_1_*.npz")))  # one file is still that sublevel
+    assert single.spin_sublevel == "ms_1"
+
+    digest = package_digest(conn, folder)
+    assert len(digest) == 64 and digest == package_digest(conn, folder)
+
+    from spinlabs.cli.listing import package_table
+    from spinlabs.cli.run import _infer_method_from_file
+
+    assert _infer_method_from_file(folder) == "decont"
+    assert "full_decont" in package_table(conn)
+
+
+def test_the_d_table_shows_the_decontaminated_column_only_with_data(tmp_path):
+    from spinlabs.tables import collect_d_rows, merge_rows, render_defect_table
+
+    defect, _ = _defect(tmp_path)
+    _run(_args(tmp_path, defect))
+    rows = collect_d_rows([tmp_path / "data"])
+    assert [r["column"] for r in rows] == ["decontaminated"]  # one row for the set, not one per sublevel
+    gs = (OFFSET["ms_1"] - (OFFSET["ms_0_3"] + OFFSET["ms_0_4"]) / 2) / 2
+    assert rows[0]["d_mhz"] == pytest.approx(1.5 * gs)
+    tex = render_defect_table(merge_rows(rows, []), include_t1=False)
+    assert r"$D_\text{FD}$" in tex and r"$D_\text{AE}$" in tex
+    plain = render_defect_table(merge_rows([{**rows[0], "column": "contaminated"}], []), include_t1=False)
+    assert "FD" not in plain
+
+
+def test_a_convergence_set_loads_decontaminated(tmp_path):
+    from spinlabs.convergence import load_convergence
+    from spinlabs.convergence_summary import column_title
+
+    defect, _ = _defect(tmp_path)
+    args = argparse.Namespace(defect_folder=defect, output_root=tmp_path / "data", ground_state=None, yes=True,
+                              scan=False)
+    _run_conv(args, defect)
+    folder = tmp_path / "data" / "NV_64" / "full_decont" / DAY
+    conv = load_convergence(folder)
+    gs = (OFFSET["ms_1"] - (OFFSET["ms_0_3"] + OFFSET["ms_0_4"]) / 2) / 2
+    assert conv.q0[2, 2] == pytest.approx(gs) and sorted(conv.perts) == [-STEP, 0.0, STEP]
+    assert column_title(folder) == "NV_64 full decont"

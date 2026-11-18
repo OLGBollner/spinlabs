@@ -1086,6 +1086,16 @@ def apply_spin_correction(tensor: ZFSTensor, scale: float = SPIN_CORRECTION_SCAL
     return ZFSTensor(matrix=tensor.matrix * scale, unit=tensor.unit)
 
 
+def _group_by_sublevel(paths: Sequence[Path]) -> dict[Optional[str], list[Path]]:
+    """Package files grouped by their spin_sublevel key (None for files without one)."""
+    groups: dict[Optional[str], list[Path]] = {}
+    for path in paths:
+        with np.load(str(path), allow_pickle=True) as data:
+            name = str(data["spin_sublevel"]) if "spin_sublevel" in data.files else None
+        groups.setdefault(name, []).append(path)
+    return groups
+
+
 # --------------------------------------------------------------------------- #
 # full spin decontamination (Biktagirov): the alternative to the defect-band spin correction
 # --------------------------------------------------------------------------- #
@@ -1582,11 +1592,24 @@ class RawZFSData:
         If apply_corrections is True (default), defect_band_approx tensors are scaled by the
         factor of their spin (spin_correction_scale) exactly once on load; files already
         carrying the correction are skipped.
+
+        A full-decontamination set loads as one dataset: given its folder (what the registry
+        returns for it), or its per-sublevel files, the files are grouped by their spin_sublevel
+        key and combined with :meth:`decontaminated`.
         """
         if isinstance(in_path, (list, tuple)):
             paths = [Path(p) for p in in_path]
         else:
             paths = [Path(in_path)]
+        paths = [f for p in paths for f in (sorted(p.glob("*.npz")) if p.is_dir() else [p])]
+        if not paths:
+            raise FileNotFoundError(f"no .npz files in {in_path}")
+        by_sublevel = _group_by_sublevel(paths)
+        if len(by_sublevel) > 1:
+            if None in by_sublevel:
+                raise ValueError(f"cannot load spin-sublevel files together with other packages: {in_path}")
+            sets = {name: cls.load(files, apply_corrections=apply_corrections) for name, files in by_sublevel.items()}
+            return cls.decontaminated(sets).to_unit("J")
 
         raw_data = [np.load(str(p), allow_pickle=True) for p in paths]
         warn_unknown_keys(raw_data[0].files, cls.SCHEMA)

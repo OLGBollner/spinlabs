@@ -15,7 +15,7 @@ from spinlabs.logging_utils import get_logger, section
 
 LOGGER = get_logger(__name__)
 
-_METHODS = {"all": "all_bands", "approx": "defect_band_approx"}  # --method values -> registry calc_method
+_METHODS = {"all": "all_bands", "approx": "defect_band_approx", "decont": "full_decont"}  # --method -> calc_method
 
 
 def _add_output_args(parser: argparse.ArgumentParser) -> None:
@@ -325,8 +325,9 @@ def _add_query_args(parser: argparse.ArgumentParser, runs: bool = True) -> None:
     parser.add_argument(
         "--method",
         nargs="+",
-        choices=["all", "approx"],
-        help="Filter by calculation method(s): 'all' for all_bands, 'approx' for defect_band_approx",
+        choices=["all", "approx", "decont"],
+        help="Filter by calculation method(s): 'all' for all_bands, 'approx' for defect_band_approx, "
+        "'decont' for the full spin decontamination",
     )
     if not runs:
         parser.add_argument(

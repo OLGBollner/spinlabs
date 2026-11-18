@@ -47,9 +47,10 @@ def build_run_parser(parser: argparse.ArgumentParser) -> None:
     opt.add_argument(
         "--method",
         nargs="+",
-        choices=["all", "approx"],
-        help="Calculation method: 'all' for all_bands (ZFS_hyp), 'approx' for defect_band_approx (ZFS_occup). "
-        "Inferred from the input file name when omitted. With --query, both may be given",
+        choices=["all", "approx", "decont"],
+        help="Calculation method: 'all' for all_bands (ZFS_hyp), 'approx' for defect_band_approx (ZFS_occup), "
+        "'decont' for the full spin decontamination (a set of per-sublevel packages, ZFS_full). "
+        "Inferred from the input name when omitted. With --query, several may be given",
     )
     opt.add_argument(
         "--order",
@@ -138,17 +139,24 @@ def build_run_parser(parser: argparse.ArgumentParser) -> None:
     )
 
 
-_METHOD_MAP = {"all": ("all_bands", "ZFS_hyp"), "approx": ("defect_band_approx", "ZFS_occup")}
+_METHOD_MAP = {
+    "all": ("all_bands", "ZFS_hyp"),
+    "approx": ("defect_band_approx", "ZFS_occup"),
+    "decont": ("full_decont", "ZFS_full"),
+}
 
 
 def _infer_method_from_file(path: Path) -> str:
-    """Infer 'all' or 'approx' from a packaged filename (falls back to 'all')."""
+    """Infer 'all', 'approx' or 'decont' from a packaged file name or set folder (falls back to 'all')."""
+    path = Path(path)
+    if path.is_dir() or "full_decont" in str(path).lower():  # a set of per-sublevel packages
+        return "decont"
     name = path.name.lower()
     return "approx" if ("approx" in name or "zfs_occup" in name) else "all"
 
 
 def _infer_method(args: argparse.Namespace) -> str:
-    """Return 'all' or 'approx', inferring from input file/folder names when --method is omitted."""
+    """Return 'all', 'approx' or 'decont', inferring from input file/folder names when --method is omitted."""
     if args.method:
         return args.method[0]
     names = " ".join(
@@ -162,15 +170,22 @@ def _infer_method(args: argparse.Namespace) -> str:
         )
         if p
     ).lower()
-    has_all = "all_bands" in names or "zfs_hyp" in names
-    has_approx = "defect_band_approx" in names or "approx" in names or "zfs_occup" in names
-    if has_all == has_approx:
-        raise SystemExit(
-            "could not infer --method from input names; pass --method all or --method approx"
-            if not has_all
-            else "input names match both methods; pass --method all or --method approx explicitly"
+    found = [
+        method
+        for method, hit in (
+            ("all", "all_bands" in names or "zfs_hyp" in names),
+            ("approx", "defect_band_approx" in names or "approx" in names or "zfs_occup" in names),
+            ("decont", "full_decont" in names or "zfs_full" in names),
         )
-    return "all" if has_all else "approx"
+        if hit
+    ]
+    if len(found) != 1:
+        raise SystemExit(
+            "could not infer --method from input names; pass --method all, approx or decont"
+            if not found
+            else f"input names match {' and '.join(found)}; pass --method explicitly"
+        )
+    return found[0]
 
 
 def _validate(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None:

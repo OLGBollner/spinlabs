@@ -18,6 +18,7 @@ from spinlabs.registry import (
     ensure_db,
     find_packaged,
     find_runs,
+    package_info,
     stored_orders,
     unregistered_packages,
     unregistered_warning,
@@ -97,19 +98,21 @@ def _latest_packages(conn) -> dict[tuple, tuple]:
     """(defect, cell, method, pert) -> (path, orders, registered_at, n_versions) of the latest package."""
     latest = {}
     for path in find_packaged(conn, latest=True):
-        row = conn.execute(
-            "SELECT defect, cell_size, calc_method, pert_scale, pert_order, registered_at FROM files "
-            "WHERE path = ? AND kind = 'packaged_zfs'",
-            (str(path),),
-        ).fetchone()
-        if row is None:
+        info = package_info(conn, path)
+        if info is None:
             continue
-        defect, cell, method, pert, orders, registered = row
-        n = conn.execute(
-            "SELECT COUNT(*) FROM files WHERE kind = 'packaged_zfs' AND defect = ? AND cell_size = ? "
-            "AND calc_method = ? AND pert_scale = ?",
-            (defect, cell, method, pert),
-        ).fetchone()[0]
+        defect, cell, method, pert = info["defect"], info["cell_size"], info["calc_method"], info["pert_scale"]
+        orders, registered = info["pert_order"], info["registered_at"]
+        if info["kind"] == "packaged_zfs_sublevel":  # a full-decontamination set: count its folders
+            n = len({Path(p).parent for (p,) in conn.execute(
+                "SELECT path FROM files WHERE kind = 'packaged_zfs_sublevel' AND defect = ? AND cell_size = ? "
+                "AND calc_method = ? AND pert_scale = ?", (defect, cell, method, pert))})
+        else:
+            n = conn.execute(
+                "SELECT COUNT(*) FROM files WHERE kind = 'packaged_zfs' AND defect = ? AND cell_size = ? "
+                "AND calc_method = ? AND pert_scale = ?",
+                (defect, cell, method, pert),
+            ).fetchone()[0]
         latest[(defect, cell, method, pert)] = (path, orders, registered, n)
     return latest
 

@@ -77,10 +77,13 @@ from that snapshot.
   per spin sublevel into one folder, `data/<defect>_<cell>/pert_<p>/full_decont/<date>/`, each
   with a `spin_sublevel` key and its ground state from `ZFS_full/<sublevel>`; only runs with a
   ZFS tensor in every sublevel go in. `spinlabs package --conv` does the same for
-  `convergence_test_decont/` (`data/<defect>_<cell>/full_decont/<date>/`). They are registered
-  apart from the ordinary packages (`spinlabs.registry.find_sublevel_sets`) and loaded with
-  `spinlabs.decont.load_sublevel_set` / `load_conv_sublevel_set`; combining the sublevels into D
-  is left to the analysis.
+  `convergence_test_decont/` (`data/<defect>_<cell>/full_decont/<date>/`). Each set is one dataset
+  of method `decont` (calc_method `full_decont`): `--query`/`--latest` and `spinlabs list` find its
+  folder, and loading it (`RawZFSData.load`, `load_convergence`) combines the sublevels into the
+  decontaminated D (`RawZFSData.decontaminated`), so `spinlabs run`, `plot` and `tables` take
+  `--method decont` like `all`/`approx`. The per-sublevel files stay, with
+  `spinlabs.decont.load_sublevel_set` / `load_conv_sublevel_set` and
+  `spinlabs.registry.find_sublevel_sets` for the raw sublevels.
 - `add_convergence_tree.py`: add the convergence folders to an existing defect folder
   (`--modes`, and `--steps` or `--pert`); the displacement and VASP binary default to the
   ones its trees use.

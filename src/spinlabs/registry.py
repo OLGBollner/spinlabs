@@ -272,14 +272,22 @@ def package_digest(conn: sqlite3.Connection, path: str | Path) -> str:
     with the ``spinlabs package --register-only`` command instead of being registered.
     """
     path = Path(path).resolve()
+    if path.is_dir():  # a full-decontamination set: the digests of its sublevel files, together
+        members = [Path(p) for (p,) in conn.execute(
+            "SELECT path FROM files WHERE kind IN (?, ?) AND path LIKE ?",
+            (*SUBLEVEL_KINDS.values(), f"{path}/%"),
+        ) if Path(p).parent == path and Path(p).exists()]
+        if not members:
+            raise UnregisteredPackageError(unregistered_warning([path]))
+        return hashlib.sha256("".join(package_digest(conn, m) for m in sorted(members)).encode()).hexdigest()
     row = conn.execute(
-        """SELECT kind, defect, cell_size, calc_method, pert_order, pert_scale, sha256, registered_at
+        """SELECT kind, defect, cell_size, calc_method, pert_order, pert_scale, sha256, registered_at, spin_sublevel
            FROM files WHERE path = ?""",
         (str(path),),
     ).fetchone()
     if row is None:
         raise UnregisteredPackageError(unregistered_warning([path]))
-    kind, defect, cell_size, calc_method, pert_order, pert_scale, digest, registered_at = row
+    kind, defect, cell_size, calc_method, pert_order, pert_scale, digest, registered_at, spin_sublevel = row
     registered = datetime.fromisoformat(registered_at)
     if registered.tzinfo is None:
         registered = registered.replace(tzinfo=timezone.utc)
@@ -289,7 +297,7 @@ def package_digest(conn: sqlite3.Connection, path: str | Path) -> str:
     register_file(
         conn, path, kind,
         defect=defect, cell_size=cell_size, calc_method=calc_method,
-        pert_order=sorted(stored_orders(pert_order)) or None, pert_scale=pert_scale,
+        pert_order=sorted(stored_orders(pert_order)) or None, pert_scale=pert_scale, spin_sublevel=spin_sublevel,
     )
     (new,) = conn.execute("SELECT sha256 FROM files WHERE path = ?", (str(path),)).fetchone()
     if new != digest:
@@ -485,6 +493,53 @@ def find_sublevel_sets(
     return [dict(sorted(e["files"].items())) for e in ordered]
 
 
+def package_info(conn: sqlite3.Connection, path: str | Path) -> dict | None:
+    """Registry row of a package file, or of a full-decontamination set given by its folder.
+
+    Keys: id, kind, defect, cell_size, calc_method, pert_scale, pert_order (JSON list), registered_at.
+    For a set: kind packaged_zfs_sublevel, its newest file's id and registration, and the orders
+    every sublevel file has. None when the registry does not know the path.
+    """
+    columns = "id, kind, defect, cell_size, calc_method, pert_scale, pert_order, registered_at"
+    path = Path(path).resolve()
+    if not path.is_dir():
+        row = conn.execute(f"SELECT {columns} FROM files WHERE path = ?", (str(path),)).fetchone()
+        return dict(zip(columns.split(", "), row)) if row else None
+    rows = [dict(zip(columns.split(", "), r)) for r in conn.execute(
+        f"SELECT {columns} FROM files WHERE kind = 'packaged_zfs_sublevel' AND path LIKE ? ORDER BY id",
+        (f"{path}/%",),
+    )]
+    if not rows:
+        return None
+    orders = frozenset.intersection(*(stored_orders(r["pert_order"]) for r in rows))
+    return {**rows[-1], "pert_order": json.dumps(sorted(orders))}
+
+
+def _group_sublevel_sets(rows: list[tuple]) -> list[tuple]:
+    """(path, pert_order, defect, cell_size, calc_method, pert_scale) rows, oldest first, with the
+    sublevel files of each full-decontamination set folded into one row for their folder.
+
+    A set's orders are the ones every sublevel file has; it sorts by its newest file. Rows are
+    (id, path, pert_order, defect, cell_size, calc_method, pert_scale, kind).
+    """
+    out: list[tuple] = []
+    sets: dict[Path, dict] = {}
+    for row_id, path, stored, *config, kind in rows:
+        if kind != "packaged_zfs_sublevel":
+            out.append((row_id, path, stored, *config))
+            continue
+        if not Path(path).exists():
+            continue
+        folder = Path(path).parent
+        entry = sets.setdefault(folder, {"id": row_id, "orders": None, "config": config})
+        entry["id"] = max(entry["id"], row_id)
+        orders = stored_orders(stored)
+        entry["orders"] = orders if entry["orders"] is None else entry["orders"] & orders
+    for folder, entry in sets.items():
+        out.append((entry["id"], str(folder), json.dumps(sorted(entry["orders"])), *entry["config"]))
+    return [row[1:] for row in sorted(out, key=lambda r: r[0])]
+
+
 def find_packaged(
     conn: sqlite3.Connection,
     *,
@@ -497,6 +552,9 @@ def find_packaged(
 ) -> list[Path]:
     """Packaged ZFS files matching the filters.
 
+    A full-decontamination set (one file per spin sublevel, calc_method full_decont) counts as one
+    package: its folder is returned, which RawZFSData.load turns into the decontaminated dataset.
+
     With ``latest`` one package per configuration (defect, cell, method,
     pert-scale) is kept: the one with the most perturbation orders, and among
     those the newest (:func:`more_complete`), so repackaged data replaces older
@@ -505,8 +563,8 @@ def find_packaged(
     a file keeps its id but rewrites ``registered_at``.
     """
     sql = (
-        "SELECT path, pert_order, defect, cell_size, calc_method, pert_scale FROM files"
-        " WHERE kind = 'packaged_zfs'"
+        "SELECT id, path, pert_order, defect, cell_size, calc_method, pert_scale, kind FROM files"
+        " WHERE kind IN ('packaged_zfs', 'packaged_zfs_sublevel')"
     )
     params: list[object] = []
     if defect is not None:
@@ -524,10 +582,10 @@ def find_packaged(
     if pert_order is not None:
         wanted = set(parse_orders(pert_order))
     sql += " ORDER BY id"
-    cur = conn.execute(sql, params)  # type: ignore[arg-type]
+    rows = _group_sublevel_sets(conn.execute(sql, params).fetchall())  # type: ignore[arg-type]
     results = []
     newest: dict[tuple, tuple[frozenset[int], Path]] = {}
-    for p_, stored, *config in cur.fetchall():
+    for p_, stored, *config in rows:
         if pert_order is not None:
             # Exact set membership on the stored JSON list, not substring matching.
             try:
@@ -694,28 +752,44 @@ def find_convergence(
 ) -> list[Path]:
     """Packaged convergence files ('package --conv') matching the filters, oldest first.
 
+    A full-decontamination set (one file per spin sublevel) counts as one pack: its folder is
+    returned, which spinlabs.convergence.load_convergence decontaminates.
+
     Several values of one filter match any of them. With ``latest`` one file per
     convergence folder is kept, the one with the newest date in its name: files are named
     ``<defect>_<cell>_<date>_conv_<folder suffix>.npz``, so the folder is the
     configuration plus the suffix (two folders of one method, e.g. ``test_all`` and
     ``test_all_mass_weighted``, are kept apart).
     """
-    sql = "SELECT path, defect, cell_size, calc_method FROM files WHERE kind = 'convergence'"
+    sql = ("SELECT path, defect, cell_size, calc_method, kind FROM files"
+           " WHERE kind IN ('convergence', 'convergence_sublevel')")
     params: list[object] = []
     for column, values in (("defect", list(defects)), ("cell_size", [int(c) for c in cell_sizes]),
                            ("calc_method", list(calc_methods))):
         if values:
             sql += f" AND {column} IN ({', '.join('?' * len(values))})"
             params.extend(values)
-    rows = [(Path(p), config) for p, *config in conn.execute(sql + " ORDER BY id", params) if Path(p).exists()]
+    # (path returned, file name it is dated and keyed by, config): a full-decontamination set's
+    # sublevel files fold into one row for their folder, named by its first file without the sublevel
+    rows: list[tuple[Path, str, tuple]] = []
+    folders: set[Path] = set()
+    for p, *config, kind in conn.execute(sql + " ORDER BY id", params):
+        path = Path(p)
+        if not path.exists():
+            continue
+        if kind == "convergence":
+            rows.append((path, path.stem, tuple(config)))
+        elif path.parent not in folders:
+            folders.add(path.parent)
+            rows.append((path.parent, re.sub(r"_ms_[\d.]+(_\d+)?$", "", path.stem), tuple(config)))
     if not latest:
-        return [path for path, _ in rows]
+        return [path for path, _, _ in rows]
     # Newest by the packaging date in the name; registration order says little, since
     # --register-only registers a whole data folder at once. Stable sort: same date -> id order.
-    rows.sort(key=lambda row: re.findall(r"_(\d{8})_conv_", row[0].name)[:1])
+    rows.sort(key=lambda row: re.findall(r"_(\d{8})_conv_", row[1])[:1])
     newest: dict[tuple, Path] = {}
-    for path, config in rows:
-        key = (*config, path.stem.partition("_conv_")[2])
+    for path, name, config in rows:
+        key = (*config, name.partition("_conv_")[2])
         newest.pop(key, None)  # re-insert so the result stays in order of the newest files
         newest[key] = path
     return list(newest.values())

@@ -37,7 +37,7 @@ def add_input_args(parser: argparse.ArgumentParser) -> argparse._ArgumentGroup:
     opt.add_argument("-ph", "--phonon-file", metavar="FILE", help="phonopy.yaml or phonon_data.npz")
     opt.add_argument(
         "--method",
-        choices=["all", "approx"],
+        choices=["all", "approx", "decont"],
         help="Calculation method; inferred from the input name when omitted (as for run)",
     )
     opt.add_argument(

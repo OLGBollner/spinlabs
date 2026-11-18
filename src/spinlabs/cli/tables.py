@@ -7,7 +7,7 @@ from pathlib import Path
 
 from spinlabs.cli import add_verbosity_args
 from spinlabs.logging_utils import get_logger
-from spinlabs.registry import ensure_db, find_packaged, more_complete, parse_orders, stored_orders
+from spinlabs.registry import ensure_db, find_packaged, more_complete, package_info, parse_orders, stored_orders
 from spinlabs.tables import (
     collect_d_rows,
     collect_t1_rows,
@@ -64,8 +64,8 @@ def _add_run_filter_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--method",
         nargs="+",
-        choices=["all", "approx"],
-        help="Only 'all' (all_bands) and/or 'approx' (defect_band_approx) runs",
+        choices=["all", "approx", "decont"],
+        help="Only 'all' (all_bands), 'approx' (defect_band_approx) and/or 'decont' (full_decont) runs",
     )
     parser.add_argument(
         "--order", nargs="+", type=int, choices=[1, 2, 12], help="Only runs containing these perturbation orders"
@@ -82,7 +82,7 @@ def _add_output_args(parser: argparse.ArgumentParser) -> None:
     add_verbosity_args(parser)
 
 
-_METHODS = {"all": "all_bands", "approx": "defect_band_approx"}
+_METHODS = {"all": "all_bands", "approx": "defect_band_approx", "decont": "full_decont"}
 
 
 def _filters(args: argparse.Namespace) -> list[tuple[str, object]]:
@@ -140,12 +140,11 @@ def _latest_package_per_method(conn, args: argparse.Namespace) -> list[Path]:
     best: dict[tuple, tuple[frozenset[int], Path, int]] = {}
     for defect, cell, method in product(args.defect or [None], args.cell_size or [None], args.method or [None]):
         for path in find_packaged(conn, defect=defect, cell_size=cell, calc_method=_METHODS.get(method), latest=True):
-            row = conn.execute(
-                "SELECT defect, cell_size, calc_method, pert_order, id FROM files WHERE path = ?", (str(path),)
-            ).fetchone()
-            if row is None:
+            info = package_info(conn, path)
+            if info is None:
                 continue
-            key, orders, rid = tuple(row[:3]), stored_orders(row[3]), row[4]
+            key = (info["defect"], info["cell_size"], info["calc_method"])
+            orders, rid = stored_orders(info["pert_order"]), info["id"]
             previous = best.get(key)
             if previous is None or more_complete(orders, previous[0]) and (
                 len(orders) > len(previous[0]) or rid > previous[2]
