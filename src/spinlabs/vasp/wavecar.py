@@ -1,4 +1,4 @@
-"""Read and rewrite single bands of a VASP WAVECAR, and align a degenerate down-spin pair to the up spin.
+"""Read and rewrite single bands of a VASP WAVECAR, and align the unpaired down-spin orbitals to the up spin.
 
 Used by the full spin decontamination: a spin-flipped determinant moves the electron of up band k
 to down band k, which is only the same spatial orbital when the two channels chose the same basis
@@ -112,13 +112,13 @@ class PairAlignment:
 
 
 def align_down_pair(path: str | Path, bands, out: str | Path | None = None, k: int = 0) -> PairAlignment:
-    """Rotate the down-channel ``bands`` (1-based, a degenerate set) onto the up-channel ones.
+    """Rotate the down-channel ``bands`` (1-based) onto the up-channel ones.
 
     The unitary U maximises Re tr <up|down U> (polar decomposition of the overlap block
     M = <up_i|down_j>: M = W S V^H, U = V W^H), so afterwards <up_i|down'_j> = W S W^H is
     Hermitian with the largest possible diagonal. Written in place, or to a copy at ``out``.
-    The band eigenvalues and occupations in the k-point header are left as they are (the bands
-    are degenerate). Returns the overlaps before and after.
+    The band eigenvalues and occupations in the k-point header are left as they are. Returns the
+    overlaps before and after.
     """
     bands = tuple(int(b) for b in bands)
     path = Path(path)
@@ -143,31 +143,33 @@ def read_eigenvalues(path: str | Path, spin: int, k: int = 0) -> np.ndarray:
     return rec[4::3]
 
 
-def degenerate_groups(bands, eigenvalues: np.ndarray, tol: float) -> list[tuple[int, ...]]:
-    """1-based ``bands`` split into runs whose neighbouring eigenvalues differ by at most ``tol`` (eV)."""
+def consecutive_groups(bands) -> list[tuple[int, ...]]:
+    """1-based ``bands`` split into runs of consecutive band indices."""
     groups: list[list[int]] = []
     for band in sorted(bands):
-        if groups and band == groups[-1][-1] + 1 and abs(eigenvalues[band - 1] - eigenvalues[band - 2]) <= tol:
+        if groups and band == groups[-1][-1] + 1:
             groups[-1].append(band)
         else:
             groups.append([band])
     return [tuple(g) for g in groups]
 
 
-DEGENERACY_TOL = 1e-3  # eV: bands this close count as one degenerate level
 MIN_SPAN = 0.9  # smallest singular value of the up/down overlap block for the channels to share a level
 
 
-def align_unpaired(run_dir: str | Path, tol: float = DEGENERACY_TOL, min_span: float = MIN_SPAN) -> list[PairAlignment]:
-    """Align the down channel to the up channel for every degenerate level among the unpaired bands.
+def align_unpaired(run_dir: str | Path, min_span: float = MIN_SPAN) -> list[PairAlignment]:
+    """Align the down channel to the up channel over the unpaired bands, degenerate or not.
 
     The unpaired bands (occupied up, empty down) come from the run's INCAR occupations
-    (DOCCUP/DOCCDO or FERWE/FERDO, spinlabs.vasp.occupations); they are grouped by the up-channel
-    eigenvalues in ``run_dir``/WAVECAR, and each group of two or more bands is aligned in place
-    (:func:`align_down_pair`). A non-degenerate band needs nothing. ValueError when a group is
-    not degenerate in the down channel too, or when the two channels' bands do not span the same
-    space (smallest singular value of the overlap below ``min_span``): the flips would then not
-    move an electron into the orbital it left, and no alignment can fix that.
+    (DOCCUP/DOCCDO or FERWE/FERDO, spinlabs.vasp.occupations); each run of consecutive unpaired
+    bands with two or more members is aligned in place as one set (:func:`align_down_pair`).
+    There is no degeneracy condition: a displacement that splits a degenerate level (an E mode
+    splitting the NV e pair) can split it in opposite order in the two channels, and the flips
+    then need the down bands matched to the up ones all the same. The down unpaired orbitals are
+    empty in the SCF, so the rotation leaves its state alone, and ALGO = None keeps the rotated
+    orbitals. ValueError when the two channels' bands do not span the same space (smallest
+    singular value of the overlap below ``min_span``): the flips would then not move an electron
+    into the orbital it left, and no alignment can fix that.
     """
     from spinlabs.vasp.occupations import parse_occupations
 
@@ -177,16 +179,10 @@ def align_unpaired(run_dir: str | Path, tol: float = DEGENERACY_TOL, min_span: f
     unpaired = [i + 1 for i, (u, d) in enumerate(zip(up, dn)) if u > 0.5 and d < 0.5]
     if not unpaired:
         raise ValueError(f"no unpaired band in the occupations of {run_dir / 'INCAR'}")
-    eig_up, eig_dn = read_eigenvalues(wavecar, 0), read_eigenvalues(wavecar, 1)
     results = []
-    for group in degenerate_groups(unpaired, eig_up, tol):
+    for group in consecutive_groups(unpaired):
         if len(group) < 2:
             continue
-        spread = np.ptp(eig_dn[[b - 1 for b in group]])
-        if spread > tol:
-            raise ValueError(
-                f"bands {group} are degenerate in the up channel but spread {spread * 1e3:.2f} meV in the down channel"
-            )
         span = np.linalg.svd(pair_overlap(wavecar, group), compute_uv=False)
         if span.min() < min_span:
             raise ValueError(
@@ -211,7 +207,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"WAVECAR alignment failed: {error}")
         return 1
     if not results:
-        print("WAVECAR: no degenerate unpaired level, nothing to align")
+        print("WAVECAR: fewer than two unpaired bands, nothing to align")
     for r in results:
         line = f"aligned down bands {list(r.bands)} to up: "
         if len(r.bands) == 2:

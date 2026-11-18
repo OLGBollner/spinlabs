@@ -13,10 +13,10 @@
 #
 # A tree whose input/ has a sublevels/ folder (create_perturbation_tree.py --full-decont) runs the
 # full spin decontamination in every run directory: 1. perturb the structure, 2. SCF with
-# input/INCAR, which writes the WAVECAR (.scf_done), 2b. the down-spin orbitals of every degenerate
-# unpaired level (the NV e pair) rotated onto the up-spin ones in that WAVECAR (.wavecar_aligned:
-# the SCF picks their basis at random in each channel, and a spin flip must put the electron in
-# the orbital it left), 3. one subfolder per spin sublevel
+# input/INCAR, which writes the WAVECAR (.scf_done), 2b. the unpaired down-spin orbitals (the NV e
+# pair, degenerate or split by the displacement) rotated onto the up-spin ones in that WAVECAR
+# (.wavecar_aligned: each channel picks its own basis or order of the pair, and a spin flip must put
+# the electron in the orbital it left), 3. one subfolder per spin sublevel
 # (input/sublevels/<name>: ms=S and every ms=S-1 spin flip), 4. in each, the ZFS from ../WAVECAR
 # (a symlink) with ALGO=None. The run directory is done once every sublevel has its ZFS block;
 # its WAVECAR is kept.

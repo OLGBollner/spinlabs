@@ -6,7 +6,7 @@ import pytest
 from spinlabs.vasp.wavecar import (
     align_down_pair,
     align_unpaired,
-    degenerate_groups,
+    consecutive_groups,
     main,
     pair_overlap,
     read_bands,
@@ -79,9 +79,9 @@ def _rotated_run(tmp_path, eig_dn=EIG, theta=74.0, mix_outside=False):
     return tmp_path
 
 
-def test_degenerate_groups():
-    assert degenerate_groups([3, 4], np.array(EIG), 1e-3) == [(3, 4)]
-    assert degenerate_groups([2, 3, 4], np.array(EIG), 1e-3) == [(2,), (3, 4)]
+def test_consecutive_groups():
+    assert consecutive_groups([4, 3]) == [(3, 4)]
+    assert consecutive_groups([2, 4, 5]) == [(2,), (4, 5)]
 
 
 def test_the_unpaired_degenerate_pair_is_aligned_in_place(tmp_path):
@@ -94,10 +94,12 @@ def test_the_unpaired_degenerate_pair_is_aligned_in_place(tmp_path):
     assert align_unpaired(run)[0].angle() == pytest.approx(0.0, abs=1e-3)  # a second pass changes nothing
 
 
-def test_a_pair_split_in_the_down_channel_is_refused(tmp_path):
-    run = _rotated_run(tmp_path, eig_dn=[0.0, 1.0, 5.0, 5.2])
-    with pytest.raises(ValueError, match="down channel"):
-        align_unpaired(run)
+def test_a_split_pair_is_aligned_too(tmp_path):
+    """An E displacement splits the pair, possibly in opposite order in the two channels: still aligned."""
+    run = _rotated_run(tmp_path, eig_dn=[0.0, 1.0, 5.2, 5.0], theta=90.0)  # down pair swapped
+    (result,) = align_unpaired(run)
+    assert result.angle() == pytest.approx(90.0, abs=1e-3) and result.angle("after") == pytest.approx(0.0, abs=1e-3)
+    assert np.allclose(np.abs(pair_overlap(run / "WAVECAR", (3, 4))), np.eye(2), atol=1e-5)
 
 
 def test_channels_without_a_common_level_are_refused(tmp_path, capsys):
