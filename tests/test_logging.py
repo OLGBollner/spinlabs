@@ -244,8 +244,8 @@ def test_set_db_run_id_safe_without_handler():
     set_db_run_id(1)
 
 
-def test_console_level_independent_of_db_capture(tmp_path):
-    """DEBUG records are captured to the DB even when the console shows only INFO."""
+def test_db_keeps_info_and_above_not_debug(tmp_path):
+    """The DB keeps INFO and above whatever the console shows; DEBUG stays on the console only."""
     import spinlabs.logging_utils as lu
     import spinlabs.registry as reg
     from spinlabs.logging_utils import (
@@ -261,10 +261,36 @@ def test_console_level_independent_of_db_capture(tmp_path):
     attach_db_logging(reg.ensure_db())
     get_logger()
     logger.debug("dbg-only message")
+    logger.info("info message")
     detach_db_logging()
 
     rows = reg.list_run_logs(reg.ensure_db())
-    assert any(r["message"] == "dbg-only message" and r["level"] == "DEBUG" for r in rows)
+    assert not any(r["message"] == "dbg-only message" for r in rows)
+    assert any(r["message"] == "info message" and r["level"] == "INFO" for r in rows)
+
+
+def test_db_log_records_written_in_batches(monkeypatch, _isolated_registry):
+    """Records are buffered: written once a batch is full, at once for ERROR, and on detach."""
+    import spinlabs.logging_utils as lu
+    import spinlabs.registry as reg
+
+    monkeypatch.setattr(lu, "DB_LOG_BATCH", 3)
+    conn = reg.ensure_db()
+    lu.attach_db_logging(conn)
+    log = logging.getLogger("spinlabs")
+    try:
+        count = lambda: len(reg.list_run_logs(reg.ensure_db()))  # noqa: E731
+        log.info("a")
+        log.info("b")
+        assert count() == 0  # still buffered
+        log.info("c")
+        assert count() == 3  # batch full
+        log.error("boom")
+        assert count() == 4  # errors are written at once
+        log.info("d")
+    finally:
+        lu.detach_db_logging()
+    assert [r["message"] for r in reg.list_run_logs(conn)] == ["a", "b", "c", "boom", "d"]
 
 
 @pytest.mark.parametrize(

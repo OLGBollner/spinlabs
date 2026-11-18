@@ -10,6 +10,7 @@ from __future__ import annotations
 from collections.abc import Iterable, Sequence
 import hashlib
 import json
+import logging
 import os
 import re
 import sqlite3
@@ -19,6 +20,8 @@ from pathlib import Path
 _env_dir = os.environ.get("SPINLABS_REGISTRY_DIR")
 REGISTRY_DIR = Path(_env_dir) if _env_dir else Path.home() / ".spinlabs"
 REGISTRY_PATH = REGISTRY_DIR / "registry.db"
+
+logger = logging.getLogger(__name__)
 
 def parse_orders(value: object) -> list[int]:
     """Perturbation orders named by ``value``, as a sorted list.
@@ -246,6 +249,48 @@ def register_file(
     return int(cur.fetchone()[0])
 
 
+class UnregisteredPackageError(LookupError):
+    """A packaged file the registry does not know; the message names the register command."""
+
+
+def package_digest(conn: sqlite3.Connection, path: str | Path) -> str:
+    """Registered sha256 of the packaged file at ``path``: a content key for caches.
+
+    A file modified after its registration (mtime later than ``registered_at``), or
+    one registered without a hash, is re-hashed and re-registered with its existing
+    metadata, so a package rewritten in place (rsync) gets a new key; a changed hash
+    is logged. A file the registry does not know raises :class:`UnregisteredPackageError`
+    with the ``spinlabs package --register-only`` command instead of being registered.
+    """
+    path = Path(path).resolve()
+    row = conn.execute(
+        """SELECT kind, defect, cell_size, calc_method, pert_order, pert_scale, sha256, registered_at
+           FROM files WHERE path = ?""",
+        (str(path),),
+    ).fetchone()
+    if row is None:
+        raise UnregisteredPackageError(unregistered_warning([path]))
+    kind, defect, cell_size, calc_method, pert_order, pert_scale, digest, registered_at = row
+    registered = datetime.fromisoformat(registered_at)
+    if registered.tzinfo is None:
+        registered = registered.replace(tzinfo=timezone.utc)
+    modified = datetime.fromtimestamp(path.stat().st_mtime, timezone.utc)
+    if digest is not None and modified <= registered:
+        return digest
+    register_file(
+        conn, path, kind,
+        defect=defect, cell_size=cell_size, calc_method=calc_method,
+        pert_order=sorted(stored_orders(pert_order)) or None, pert_scale=pert_scale,
+    )
+    (new,) = conn.execute("SELECT sha256 FROM files WHERE path = ?", (str(path),)).fetchone()
+    if new != digest:
+        logger.warning(
+            "package changed since its registration (%s), re-registered with sha256 %s: %s",
+            registered_at, new[:12], path,
+        )
+    return new
+
+
 def insert_run_log(
     conn: sqlite3.Connection,
     level: str,
@@ -258,6 +303,14 @@ def insert_run_log(
         "INSERT INTO run_logs (run_id, ts, level, logger, message) VALUES (?, ?, ?, ?, ?)",
         (run_id, _now(), level, logger_name, message),
     )
+    conn.commit()
+
+
+def insert_run_logs(conn: sqlite3.Connection, rows: list[tuple[int | None, str, str, str, str]]) -> None:
+    """Append several log records ``(run_id, ts, level, logger, message)`` to ``run_logs`` in one commit."""
+    if not rows:
+        return
+    conn.executemany("INSERT INTO run_logs (run_id, ts, level, logger, message) VALUES (?, ?, ?, ?, ?)", rows)
     conn.commit()
 
 

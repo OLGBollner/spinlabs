@@ -1,7 +1,9 @@
 """``spinlabs run coupling``: the ZFSManager stage alone, for debugging.
 
-Loads the inputs exactly as ``spinlabs run`` does, computes the first- and
-(when present) second-order spin-phonon couplings, and prints a summary.
+Loads the inputs exactly as ``spinlabs run`` does, with its coupling settings
+(production defaults: inconsistent pairs excluded, off-diagonal fill on),
+computes the first- and (when present) second-order spin-phonon couplings, and
+prints a summary.
 Nothing is written to disk or to the registry.
 """
 
@@ -10,6 +12,7 @@ import argparse
 import numpy as np
 
 from spinlabs.cli import add_verbosity_args
+from spinlabs.cli.production import add_coupling_args, coupling_options
 from spinlabs.constants import CONSTANTS
 from spinlabs.logging_utils import get_logger, section
 from spinlabs.registry import parse_orders
@@ -20,7 +23,10 @@ _V_KEYS = ("V_0_0", "V_p_m", "V_0_pm")
 
 
 def add_input_args(parser: argparse.ArgumentParser) -> argparse._ArgumentGroup:
-    """Input and coupling options shared by the run stages that start from raw ZFS data."""
+    """Input and coupling options shared by the run stages that start from raw ZFS data.
+
+    The coupling options and their defaults are those of ``spinlabs run`` (spinlabs.cli.production).
+    """
     inputs = parser.add_argument_group("input mode (exactly one)")
     inputs.add_argument("--sim-folder", nargs="+", metavar="DIR", help="Path to VASP simulation folder(s)")
     inputs.add_argument("--raw-zfs-file", metavar="FILE", help="Path to a raw ZFS .npz dataset file")
@@ -44,24 +50,8 @@ def add_input_args(parser: argparse.ArgumentParser) -> argparse._ArgumentGroup:
     opt.add_argument("--pert-scale", type=float, help="Override perturbation scale (as for run)")
     opt.add_argument("--defect", help="Override defect name")
     opt.add_argument("--cell-size", type=int, help="Override supercell size")
-    opt.add_argument(
-        "--exclude-inconsistent-pairs",
-        action="store_true",
-        help="Drop second-order entries departing from the first-order expectation (kept and listed by default)",
-    )
-    opt.add_argument("--keep-inconsistent-pairs", action="store_true", help=argparse.SUPPRESS)
-    opt.add_argument(
-        "--degenerate-pairs-from-symmetry",
-        action="store_true",
-        help="Take the second-order coupling of each degenerate Ex-Ey pair from its Ex-Ex derivative (as for run)",
-    )
-    opt.add_argument(
-        "--offdiag-from-diagonal",
-        action="store_true",
-        help="Approximate every second-order pair (i, j), i != j, that was not run from the diagonal couplings: "
-        "sqrt(V_ii V_jj) per coupling type, and sqrt(V00_aa V_ee) for A x E pairs; a heuristic, only for the "
-        "types the pair's symmetry allows (computed pairs keep their values)",
-    )
+    # the ZFSManager settings of `spinlabs run`, production defaults included
+    add_coupling_args(opt)
     return opt
 
 
@@ -83,7 +73,8 @@ def build_coupling_parser(parser: argparse.ArgumentParser) -> None:
 
 
 def load_manager(args: argparse.Namespace, command: str):
-    """ZFSManager for the inputs in ``args``, loaded as ``spinlabs run`` loads them.
+    """ZFSManager for the inputs in ``args``, loaded as ``spinlabs run`` loads them and with its coupling
+    settings (by default inconsistent pairs excluded and the off-diagonal fill on; see spinlabs.cli.production).
 
     Returns ``(manager, phonon_path, orders)``; ``orders`` is what to compute.
     """
@@ -140,13 +131,7 @@ def load_manager(args: argparse.Namespace, command: str):
         defect=args.defect,
         cell_size=args.cell_size,
     )
-    manager = ZFSManager(
-        raw_data=raw_data,
-        spectrum=spectrum,
-        exclude_inconsistent_pairs=args.exclude_inconsistent_pairs,
-        degenerate_pairs_from_symmetry=args.degenerate_pairs_from_symmetry,
-        offdiag_from_diagonal=args.offdiag_from_diagonal,
-    )
+    manager = ZFSManager(raw_data=raw_data, spectrum=spectrum, **coupling_options(args))
     manager.calc_method = calc_method
     if not manager.zfs_tensors:
         raise SystemExit("No first-order tensors in the input; every coupling needs the first-order derivatives.")

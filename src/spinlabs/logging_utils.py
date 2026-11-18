@@ -35,8 +35,9 @@ from __future__ import annotations
 import logging
 import sqlite3
 import sys
+from datetime import datetime, timezone
 
-from spinlabs.registry import insert_run_log
+from spinlabs.registry import insert_run_logs
 
 ROOT_LOGGER_NAME = "spinlabs"
 
@@ -44,20 +45,28 @@ _db_handler: SQLiteLogHandler | None = None
 _stream_handler: logging.StreamHandler | None = None
 
 
-class SQLiteLogHandler(logging.Handler):
-    """Persist log records into the ``run_logs`` table of the registry DB.
+# The DB keeps INFO and above: DEBUG output (per-mode derivative dumps, thousands of lines per run) stays on
+# the console (-v). Records are written in batches of DB_LOG_BATCH, each with one commit; a commit per record
+# made a run spend minutes in sqlite.
+DB_LOG_LEVEL = logging.INFO
+DB_LOG_BATCH = 200
 
-    Uses its own connection so the per-record commit never interleaves with
-    the caller's transactions (WAL mode keeps writers from starving readers).
+
+class SQLiteLogHandler(logging.Handler):
+    """Persist log records of level DB_LOG_LEVEL and above into the ``run_logs`` table of the registry DB.
+
+    Records are buffered and written with one commit per batch: every DB_LOG_BATCH records, at once for
+    ERROR and above, and on :meth:`flush` (called before a run-id backfill, a re-point and a detach).
     ``run_id`` starts as ``None`` (logs emitted before the run is registered)
     and is backfilled for this handler's own records once the run row exists
     (see :func:`set_db_run_id`).
     """
 
     def __init__(self, conn: sqlite3.Connection, run_id: int | None = None) -> None:
-        super().__init__()
+        super().__init__(level=DB_LOG_LEVEL)
         self.conn = conn
         self.run_id = run_id
+        self._buffer: list[tuple[int | None, str, str, str, str]] = []
         # Log records emitted before the run is registered carry run_id NULL;
         # remember the highest existing id so backfilling later only touches
         # records emitted through this handler, never older unattached ones.
@@ -77,9 +86,29 @@ class SQLiteLogHandler(logging.Handler):
 
     def emit(self, record: logging.LogRecord) -> None:
         try:
-            insert_run_log(self.conn, record.levelname, record.name, self.format(record), self.run_id)
+            ts = datetime.fromtimestamp(record.created, timezone.utc).isoformat(timespec="seconds")
+            self._buffer.append((self.run_id, ts, record.levelname, record.name, self.format(record)))
+            if len(self._buffer) >= DB_LOG_BATCH or record.levelno >= logging.ERROR:
+                self.flush()
         except Exception:
             self.handleError(record)
+
+    def flush(self) -> None:
+        """Write the buffered records in one commit."""
+        self.acquire()
+        try:
+            rows, self._buffer = self._buffer, []
+            if rows:
+                try:
+                    insert_run_logs(self.conn, rows)
+                except sqlite3.Error as e:
+                    print(f"spinlabs: {len(rows)} log records not written to the registry: {e}", file=sys.stderr)
+        finally:
+            self.release()
+
+    def close(self) -> None:
+        self.flush()
+        super().close()
 
 
 def attach_db_logging(conn: sqlite3.Connection, run_id: int | None = None) -> SQLiteLogHandler:
@@ -98,6 +127,7 @@ def attach_db_logging(conn: sqlite3.Connection, run_id: int | None = None) -> SQ
         _db_handler = SQLiteLogHandler(conn, run_id)
         logger.addHandler(_db_handler)
     else:
+        _db_handler.flush()  # buffered records belong to the old connection
         _db_handler.conn = conn
         _db_handler.run_id = run_id
     return _db_handler
@@ -113,6 +143,7 @@ def detach_db_logging() -> None:
     """Remove the shared DB log handler, if attached."""
     global _db_handler
     if _db_handler is not None:
+        _db_handler.flush()
         logging.getLogger(ROOT_LOGGER_NAME).removeHandler(_db_handler)
         _db_handler = None
 
@@ -128,6 +159,7 @@ def set_db_run_id(run_id: int | None) -> None:
     global _db_handler
     if _db_handler is None:
         return
+    _db_handler.flush()  # the backfill below must see every record emitted so far
     try:
         _db_handler.conn.execute(
             "UPDATE run_logs SET run_id = ? WHERE run_id IS NULL AND id > ?",

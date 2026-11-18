@@ -1,9 +1,9 @@
 """Compare the spin-phonon couplings of the two ZFS methods mode by mode.
 
-"contaminated": all occupied bands enter the spin density (spin-contaminated
-valence bands included). "corrected": only the unpaired defect bands
-(defect_band_approx). For every first-order mode the three couplings are
-computed from dD = D(Q) - D0 in the contaminated ground state's principal frame,
+AE (all electrons, all_bands): all occupied bands enter the spin density (spin-contaminated
+valence bands included). UE (unpaired electrons, defect_band_approx): only the unpaired defect
+bands. For every first-order mode the three couplings are
+computed from dD = D(Q) - D0 in the AE ground state's principal frame,
 with the formulas of ZFSManager.calculate_first_order_derivatives:
 
     V_00  = |dD_zz - (dD_xx + dD_yy)/2| / 3           (A1 modes)
@@ -13,14 +13,16 @@ with the formulas of ZFSManager.calculate_first_order_derivatives:
 and set against the mode's localization from the IPR (PhononSpectrum.get_ipr,
 N_eff = 1/IPR atoms). Writes, to figures/method_comparison/:
 
-    coupling_scatter.pdf    corrected vs contaminated per mode, colored by IPR
+    coupling_scatter.pdf    UE vs AE per mode, colored by IPR
     ratio_vs_ipr.pdf        per-mode ratio vs N_eff; running median and quartiles, binned strength ratios
     unpaired_fraction.pdf   share of the coupling strength the unpaired bands carry
     e_direction.pdf         alignment of the E responses of the two methods
     method_comparison.tex   summary table (booktabs, siunitx)
     method_comparison.csv   per-mode values
 
-Usage (from the repo root): python scripts/plot_method_comparison.py [--defects NV_512 ...] [--pert 0.025]
+and prints the UE/AE coupling ratios per defect and channel (print_ratios).
+
+Usage (from the repo root): python scripts/plot_method_comparison.py [--defects NV_512 ...] [--pert 0.05]
 """
 
 from __future__ import annotations
@@ -33,6 +35,7 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 import numpy as np
 from matplotlib.colors import LinearSegmentedColormap, LogNorm
+from matplotlib.ticker import LogFormatterSciNotation
 
 from spinlabs.convergence import principal_frame
 from spinlabs.models import RawZFSData, ZFSTensor
@@ -41,12 +44,12 @@ from spinlabs.parsers import parse_phonon_data
 DEFECTS = ("NV_512", "DiV_128", "ClV_128", "ClV_576")
 TEX_NAMES = {"NV_512": r"NV$^-$ (512)", "DiV_128": r"V$_\text{Si}$V$_\text{C}$ (128)",
              "ClV_128": r"Cl$_\text{C}$V$_\text{Si}$ (128)", "ClV_576": r"Cl$_\text{C}$V$_\text{Si}$ (576)"}
-PLOT_NAMES = {"NV_512": "NV (512)", "DiV_128": "DiV (128)", "ClV_128": "ClV (128)", "ClV_576": "ClV (576)"}
+PLOT_NAMES = {"NV_512": "NV$^{-}$ (512)", "DiV_128": "VV$^0$ (128)", "ClV_128": "ClV$^{+}$ (128)", "ClV_576": "ClV$^{+}$ (576)"}
 CHANNELS = ("V00", "Vpm", "V0pm")
 CH_LABEL = {"V00": r"$V_{00}$", "Vpm": r"$V_{+-}$", "V0pm": r"$V_{0\pm}$"}
 CH_COLOR = {"V00": "#2a78d6", "Vpm": "#eb6834", "V0pm": "#1baf7a"}  # validated, all pairs (light)
 CH_MARKER = {"V00": "o", "Vpm": "s", "V0pm": "^"}  # second encoding: aqua is below 3:1 contrast
-SNR_MIN = 10.0  # a mode enters the ratios only when its contaminated coupling is this far above noise
+SNR_MIN = 10.0  # a mode enters the ratios only when its AE coupling is this far above noise
 # Runs known to have failed (0-based mode index): ClV_576 all bands runs/1 gives dD = -1245 MHz
 # for an acoustic mode.
 BAD = {("ClV_576", "all_bands"): {0}}
@@ -120,13 +123,13 @@ def analyse(defect: str, pert: str) -> dict:
 
 
 def channel_rows(res: dict, ch: str) -> list[dict]:
-    """Modes that carry channel ch by symmetry and are resolved above noise in the contaminated run."""
+    """Modes that carry channel ch by symmetry and are resolved above noise in the AE run."""
     want = "A1" if ch == "V00" else "E"
     return [r for r in res["rows"] if (r["sym"] == "A1") == (want == "A1") and r["cont"][ch] > SNR_MIN * res["noise"]]
 
 
 def strength_ratio(rows: list[dict], ch: str) -> float:
-    """sqrt(sum V_corr^2 / sum V_cont^2): rates go as V^2, so this weighs modes as T1 does."""
+    """sqrt(sum V_UE^2 / sum V_AE^2): rates go as V^2, so this weighs modes as T1 does."""
     a = np.array([r["cont"][ch] for r in rows])
     b = np.array([r["corr"][ch] for r in rows])
     return float(np.sqrt((b**2).sum() / (a**2).sum())) if len(a) else np.nan
@@ -156,13 +159,26 @@ def _style() -> None:
     })
 
 
+SCATTER_FONT = 14  # paper figure: axis labels and titles; ticks and panel text 2 pt smaller
+
+
 def plot_scatter(results: list[dict], out: Path) -> None:
-    fig, axes = plt.subplots(len(results), 3, figsize=(7.6, 2.2 * len(results)), squeeze=False)
+    small = SCATTER_FONT - 2
+    with plt.rc_context({"font.size": SCATTER_FONT, "axes.labelsize": SCATTER_FONT, "axes.titlesize": SCATTER_FONT,
+                         "xtick.labelsize": small, "ytick.labelsize": small}):
+        _plot_scatter(results, out, small)
+
+
+def _plot_scatter(results: list[dict], out: Path, small: float) -> None:
+    fig, axes = plt.subplots(len(results), 3, figsize=(10.5, 3.1 * len(results)), squeeze=False)
     # room for each panel's own y tick labels next to its left neighbour
     fig.subplots_adjust(wspace=0.45, hspace=0.3)
-    iprs = [r["ipr"] for res in results for r in res["rows"]]
-    norm = LogNorm(vmin=min(iprs), vmax=max(iprs))
     for row, res in enumerate(results):
+        # Colour scale per row (defect): the IPR range of the modes drawn in that row, so the differences in
+        # localization within a panel stand out; each row gets its own colour bar
+        iprs = [r["ipr"] for ch in CHANNELS for r in channel_rows(res, ch)]
+        norm = LogNorm(vmin=min(iprs), vmax=max(iprs))
+        sc = None
         for col, ch in enumerate(CHANNELS):
             ax = axes[row, col]
             rows = channel_rows(res, ch)
@@ -174,7 +190,7 @@ def plot_scatter(results: list[dict], out: Path) -> None:
             c = np.array([r["ipr"] for r in rows])
             order = np.argsort(c)  # localized modes on top
             sc = ax.scatter(a[order], np.maximum(b[order], 1e-3 * a.min()), c=c[order], cmap=IPR_CMAP, norm=norm,
-                            s=9, lw=0.3, edgecolors="#ffffff", marker=CH_MARKER[ch], zorder=2)
+                            s=22, lw=0.4, edgecolors="#ffffff", marker=CH_MARKER[ch], zorder=2)
             lo, hi = min(a.min(), b[b > 0].min()), max(a.max(), b.max())
             line = np.array([lo, hi])
             ax.plot(line, line, color=INK2, lw=0.8, ls="--", zorder=1)
@@ -185,16 +201,20 @@ def plot_scatter(results: list[dict], out: Path) -> None:
             ax.set_xlim(lo / 1.5, hi * 1.5)
             ax.set_ylim(lo / 1.5, hi * 1.5)
             ax.grid(True, color=GRID, lw=0.5, zorder=0)
-            ax.text(0.04, 0.95, f"{PLOT_NAMES[res['defect']]}\nratio {ratio:.2f}", transform=ax.transAxes,
-                    va="top", fontsize=7.5, color=INK)
+            panel = chr(ord("a") + row * len(CHANNELS) + col)  # (a)-(i), row by row, for the text to refer to
+            ax.text(0.04, 0.95, f"({panel}) {PLOT_NAMES[res['defect']]}\n$\\rho = {ratio:.2f}$",
+                    transform=ax.transAxes, va="top", fontsize=small, color=INK)
             if row == 0:
                 ax.set_title(CH_LABEL[ch])
             if row == len(results) - 1:
-                ax.set_xlabel("contaminated (MHz/Q)")
+                ax.set_xlabel(r"$|V_\mathrm{AE}|$ (MHz)")
             if col == 0:
-                ax.set_ylabel("corrected (MHz/Q)")
-    cbar = fig.colorbar(sc, ax=axes, shrink=0.5, pad=0.02)
-    cbar.set_label("mode IPR (localization)")
+                ax.set_ylabel(r"$|V_\mathrm{UE}|$ (MHz)")
+        if sc is not None:
+            cbar = fig.colorbar(sc, ax=axes[row, :].tolist(), pad=0.02, fraction=0.03)
+            cbar.set_label("mode IPR")
+            # a row's range can be under a decade: label the minor ticks too, so every bar reads off a range
+            cbar.ax.yaxis.set_minor_formatter(LogFormatterSciNotation(labelOnlyBase=False, minor_thresholds=(1.5, 0.3)))
     fig.savefig(out)
     plt.close(fig)
 
@@ -291,7 +311,7 @@ def plot_ratio_vs_ipr(results: list[dict], out: Path) -> None:
     for ax in axes[-1]:
         ax.set_xlabel("$N_\\mathrm{eff}$ = 1/IPR  (→ localized)")
     for ax in axes[:, 0]:
-        ax.set_ylabel("$V_\\mathrm{corr}/V_\\mathrm{cont}$")
+        ax.set_ylabel("$V_\\mathrm{UE}/V_\\mathrm{AE}$")
     for ax in list(axes.flat)[len(results):]:
         ax.set_axis_off()
     handles = [Patch(color=CH_COLOR[ch], label=CH_LABEL[ch]) for ch in CHANNELS] + [
@@ -321,7 +341,7 @@ def plot_unpaired_fraction(results: list[dict], out: Path) -> None:
     ax.set_xlim(0.01, 5)
     ax.set_yticks(y)
     ax.set_yticklabels([PLOT_NAMES[r["defect"]] for r in results])
-    ax.set_xlabel("$\\Sigma V_\\mathrm{corr}^2 / \\Sigma V_\\mathrm{cont}^2$  (coupling strength of the unpaired bands)")
+    ax.set_xlabel("$\\Sigma V_\\mathrm{UE}^2 / \\Sigma V_\\mathrm{AE}^2$  (coupling strength of the unpaired bands)")
     ax.grid(True, axis="x", color=GRID, lw=0.5)
     ax.legend(loc="upper left", bbox_to_anchor=(1.0, 1.0), frameon=False)
     fig.tight_layout()
@@ -340,7 +360,7 @@ def plot_e_direction(results: list[dict], out: Path) -> None:
         ax.text(0.04, 0.95, f"median {np.median(cos):.2f}\nn = {len(cos)}", transform=ax.transAxes, va="top",
                 fontsize=7.5)
         ax.set_title(PLOT_NAMES[res["defect"]])
-        ax.set_xlabel("cos(dD$_E^\\mathrm{corr}$, dD$_E^\\mathrm{cont}$)")
+        ax.set_xlabel("cos(dD$_E^\\mathrm{UE}$, dD$_E^\\mathrm{AE}$)")
         ax.grid(True, axis="y", color=GRID, lw=0.5)
     axes[0, 0].set_ylabel("fraction of E modes")
     fig.tight_layout()
@@ -348,7 +368,7 @@ def plot_e_direction(results: list[dict], out: Path) -> None:
     plt.close(fig)
 
 
-def write_table(results: list[dict], out: Path) -> None:
+def write_table(results: list[dict], out: Path, pert: str) -> None:
     lines = [
         "% generated by scripts/plot_method_comparison.py",
         r"% requires \usepackage{booktabs} and \usepackage{siunitx}",
@@ -356,7 +376,7 @@ def write_table(results: list[dict], out: Path) -> None:
         r"  \centering",
         r"  \begin{tabular}{lcccccccc}",
         r"    \toprule",
-        r"    Defect & $D_\text{cont}$ & $D_\text{corr}$ & \multicolumn{3}{c}{$\Sigma V_\text{corr}^2/\Sigma V_\text{cont}^2$}"
+        r"    Defect & $D_\text{AE}$ & $D_\text{UE}$ & \multicolumn{3}{c}{$\Sigma V_\text{UE}^2/\Sigma V_\text{AE}^2$}"
         r" & \multicolumn{2}{c}{$\rho_\text{IPR}$} & $\langle\cos\rangle_E$ \\",
         r"    \cmidrule(lr){4-6} \cmidrule(lr){7-8}",
         r"    & (\si{\mega\hertz}) & (\si{\mega\hertz}) & $V_{00}$ & $V_{+-}$ & $V_{0\pm}$ & $V_{+-}$ & $V_{0\pm}$ & \\",
@@ -374,11 +394,11 @@ def write_table(results: list[dict], out: Path) -> None:
     lines += [
         r"    \bottomrule",
         r"  \end{tabular}",
-        r"  \caption{First-order spin-phonon couplings with only the unpaired defect bands (corrected) vs"
-        r" all bands (contaminated), at $Q = 0.025$. $\Sigma V_\text{corr}^2/\Sigma V_\text{cont}^2$: coupling"
+        r"  \caption{First-order spin-phonon couplings with only the unpaired defect bands (UE) vs"
+        r" all bands (AE), at $Q = " + pert + r"$. $\Sigma V_\text{UE}^2/\Sigma V_\text{AE}^2$: coupling"
         r" strength carried by the unpaired bands, summed over modes resolved above " + f"{SNR_MIN:g}"
         r"$\times$ the noise. $\rho_\text{IPR}$: rank correlation of the per-mode ratio"
-        r" $V_\text{corr}/V_\text{cont}$ with the mode IPR. $\langle\cos\rangle_E$: median alignment of the"
+        r" $V_\text{UE}/V_\text{AE}$ with the mode IPR. $\langle\cos\rangle_E$: median alignment of the"
         r" E-type ZFS changes of the two methods.}",
         r"  \label{tab:method_comparison}",
         r"\end{table*}",
@@ -387,7 +407,7 @@ def write_table(results: list[dict], out: Path) -> None:
 
 
 def write_ipr_table(results: list[dict]) -> str:
-    text = ["strength ratio sqrt(sum V_corr^2 / sum V_cont^2) by IPR group (n modes, share of contaminated V^2)"]
+    text = ["strength ratio sqrt(sum V_UE^2 / sum V_AE^2) by IPR group (n modes, share of AE V^2)"]
     for res in results:
         text.append(f"{res['defect']}:")
         for ch in CHANNELS:
@@ -399,9 +419,32 @@ def write_ipr_table(results: list[dict]) -> str:
     return "\n".join(text)
 
 
+def print_ratios(results: list[dict], pert: str) -> str:
+    """UE/AE coupling ratios per defect and channel, over the modes resolved above noise (channel_rows).
+
+    rms     sqrt(sum V_UE^2 / sum V_AE^2): the factor on the rate-weighted coupling (rates go as V^2);
+            the ratio drawn in the scatter panels
+    median  median of the per-mode V_UE / V_AE
+    all     rms over the three channels together
+    """
+    head = f"UE/AE coupling ratio at step {pert} (n: modes resolved above {SNR_MIN:g} x noise)"
+    lines = [head, f"{'defect':10}" + "".join(f"{ch:>24}" for ch in CHANNELS) + f"{'all':>10}",
+             f"{'':10}" + "".join(f"{'rms':>9}{'median':>9}{'n':>6}" for _ in CHANNELS) + f"{'rms':>10}"]
+    for res in results:
+        cells, ae2, ue2 = [], 0.0, 0.0
+        for ch in CHANNELS:
+            rows = channel_rows(res, ch)
+            per_mode = [r["corr"][ch] / r["cont"][ch] for r in rows]
+            cells.append(f"{strength_ratio(rows, ch):9.3f}{np.median(per_mode) if rows else np.nan:9.3f}{len(rows):6d}")
+            ae2 += sum(r["cont"][ch] ** 2 for r in rows)
+            ue2 += sum(r["corr"][ch] ** 2 for r in rows)
+        lines.append(f"{res['defect']:10}" + "".join(cells) + f"{np.sqrt(ue2 / ae2):10.3f}")
+    return "\n".join(lines)
+
+
 def write_csv(results: list[dict], out: Path) -> None:
     with out.open("w") as fh:
-        fh.write("defect,mode,sym,freq_meV,ipr,V00_cont,V00_corr,Vpm_cont,Vpm_corr,V0pm_cont,V0pm_corr,cos_E\n")
+        fh.write("defect,mode,sym,freq_meV,ipr,V00_AE,V00_UE,Vpm_AE,Vpm_UE,V0pm_AE,V0pm_UE,cos_E\n")
         for res in results:
             for r in res["rows"]:
                 fh.write(",".join(str(x) for x in (
@@ -414,21 +457,29 @@ def main() -> int:
     warnings.filterwarnings("ignore")
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--defects", nargs="+", default=list(DEFECTS))
-    ap.add_argument("--pert", default="0.025")
+    ap.add_argument("--pert", default="0.05")
     ap.add_argument("-o", "--outdir", type=Path, default=Path("figures/method_comparison"))
     args = ap.parse_args()
     args.outdir.mkdir(parents=True, exist_ok=True)
     _style()
-    results = [analyse(d, args.pert) for d in args.defects]
+    defects = [d for d in args.defects if glob.glob(f"data/{d}/pert_{args.pert}/defect_band_approx/*/*.npz")
+               and glob.glob(f"data/{d}/pert_{args.pert}/all_bands/*/*.npz")]
+    for d in sorted(set(args.defects) - set(defects)):
+        print(f"skipped {d}: no AE and UE data at step {args.pert}")
+    results = [analyse(d, args.pert) for d in defects]
     plot_scatter(results, args.outdir / "coupling_scatter.pdf")
     plot_ratio_vs_ipr(results, args.outdir / "ratio_vs_ipr.pdf")
     plot_unpaired_fraction(results, args.outdir / "unpaired_fraction.pdf")
     plot_e_direction(results, args.outdir / "e_direction.pdf")
-    write_table(results, args.outdir / "method_comparison.tex")
+    write_table(results, args.outdir / "method_comparison.tex", args.pert)
     write_csv(results, args.outdir / "method_comparison.csv")
     summary = write_ipr_table(results)
     (args.outdir / "ipr_groups.txt").write_text(summary + "\n")
     print(summary)
+    print()
+    ratios = print_ratios(results, args.pert)
+    print(ratios)
+    (args.outdir / "ratios.txt").write_text(ratios + "\n")
     print(f"-> {args.outdir}/")
     return 0
 

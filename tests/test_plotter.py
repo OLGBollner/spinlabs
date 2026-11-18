@@ -89,7 +89,7 @@ class TestPlotter:
 
         fig, ax = plot_t1([p1, p2])
         labels = [line.get_label() for line in ax.get_lines()]
-        assert labels == ["NV 512 ($m_s=0$)", "ClV 128 (decontaminated, $m_s=+1$)"]
+        assert labels == ["NV 512 (AO, $m_s=0$)", "ClV 128 (UO, $m_s=+1$)"]
         # one colour per file
         assert ax.get_lines()[0].get_color() != ax.get_lines()[1].get_color()
         plt.close(fig)
@@ -180,7 +180,7 @@ class TestPlotter:
         assert len(saved) == 1
         # unique metadata parts in order of first appearance
         assert saved[0].stem.startswith("overlay_NV_512")
-        assert "defect_band" in saved[0].stem
+        assert "UO" in saved[0].stem and "defect_band" not in saved[0].stem
 
     def test_plot_t1_log_scale(self, tmp_path):
         """The y axis is logarithmic."""
@@ -231,3 +231,47 @@ class TestPlotter:
 
         out_file = tmp_path / "figures" / "test_output.png"
         assert out_file.exists()
+
+
+def test_init_state_label_for_any_spin():
+    from spinlabs.plotter import init_state_label
+
+    assert init_state_label("ms_0") == "$m_s=0$"
+    assert init_state_label("ms_1") == "$m_s=+1$"
+    assert init_state_label("ms_-1") == "$m_s=-1$"
+    assert init_state_label("ms_pm1_2") == r"$m_s=\pm 1/2$"
+    assert init_state_label("ms_pm3_2") == r"$m_s=\pm 3/2$"
+
+
+def test_find_t1_files_finds_spin_three_halves_states(tmp_path):
+    from spinlabs.relaxation_dynamics import find_t1_files
+
+    for state in ("ms_pm3_2", "ms_pm1_2"):
+        (tmp_path / f"t1_relaxation_{state}.npz").touch()
+    assert [p.name for p in find_t1_files(tmp_path)] == ["t1_relaxation_ms_pm1_2.npz", "t1_relaxation_ms_pm3_2.npz"]
+    for state in ("ms_-1", "ms_0", "ms_1"):
+        (tmp_path / f"t1_relaxation_{state}.npz").touch()
+    assert [p.name for p in find_t1_files(tmp_path)][:3] == [
+        "t1_relaxation_ms_1.npz",
+        "t1_relaxation_ms_0.npz",
+        "t1_relaxation_ms_-1.npz",
+    ]
+
+
+def test_plot_t1_colour_per_run_and_style_per_state(tmp_path):
+    """Several runs with several states: one colour per run, one line style per state, legend outside."""
+    paths = []
+    for defect in ("NV", "ClV", "DiV"):
+        for state in ("ms_1", "ms_0", "ms_-1"):
+            path = tmp_path / f"{defect}_{state}.npz"
+            np.savez(path, temperatures=np.array([100.0, 200.0]), t1_fit=np.array([1e-3, 2e-3]), defect=defect,
+                     cell_size="128", calc_method="all_bands", init_state=state)
+            paths.append(path)
+    fig, ax = plot_t1(paths)
+    lines = ax.get_lines()
+    assert len({lines[i].get_color() for i in range(9)}) == 3
+    assert lines[0].get_color() == lines[2].get_color() != lines[3].get_color()
+    assert [lines[i].get_linestyle() for i in range(3)] == ["-", "--", ":"]
+    assert lines[3].get_linestyle() == "-"
+    assert ax.get_legend().get_bbox_to_anchor().x0 > ax.get_window_extent().x1 - 1
+    plt.close(fig)

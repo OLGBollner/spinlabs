@@ -475,3 +475,74 @@ def test_only_run_folders_directly_under_runs_are_parsed(tmp_path):
     parsed = parse_perturbation_directory(tree, order=2, amplitude=(0.025, 0.025), max_workers=1)
     assert list(parsed) == [(84, 84)]
     assert parsed[(84, 84)].zfs_tensor.to_unit("MHz").matrix[2, 2] == pytest.approx(2000.0)
+
+
+class TestSpinFromNupdown:
+    """The defect-band correction factor follows the spin S = NUPDOWN / 2 of the runs' input/INCAR."""
+
+    @staticmethod
+    def _tree(tmp_path: Path, name: str, nupdown: int | None) -> Path:
+        root = tmp_path / name
+        TestParsers._create_mock_outcar(root / "ZFS_occup" / "OUTCAR", d_diag=(-1000.0, -1000.0, 2000.0))
+        sim_dir = root / "first_order" / "pert_0.1"
+        TestParsers._create_mock_outcar(
+            sim_dir / "defect_band_approx" / "runs" / "5" / "OUTCAR", d_diag=(-990.0, -990.0, 1980.0)
+        )
+        if nupdown is not None:
+            incar = sim_dir / "defect_band_approx" / "input" / "INCAR"
+            incar.parent.mkdir(parents=True, exist_ok=True)
+            incar.write_text(f"ISPIN = 2\nNUPDOWN = {nupdown}  # fixed moment\nLDMATRIX = .TRUE.\n")
+        return sim_dir
+
+    def test_spin_three_halves_scales_by_two_thirds(self, tmp_path):
+        raw = parse_zfs_simulation_dataset(self._tree(tmp_path, "V_Si_128", 3), calc_method="approx")
+        assert raw.spin == pytest.approx(1.5)
+        assert raw.ground_state_zfs.matrix[2, 2] == pytest.approx(2000.0 * 2 / 3)
+        assert raw.first_order[4].zfs_tensor.matrix[2, 2] == pytest.approx(1980.0 * 2 / 3)
+
+    def test_spin_one_scales_by_three_halves(self, tmp_path):
+        raw = parse_zfs_simulation_dataset(self._tree(tmp_path, "NV_64", 2), calc_method="approx")
+        assert raw.spin == pytest.approx(1.0)
+        assert raw.ground_state_zfs.matrix[2, 2] == pytest.approx(3000.0)
+
+    def test_ground_state_outcar_is_the_fallback(self, tmp_path):
+        sim_dir = self._tree(tmp_path, "V_Si_128", None)
+        outcar = tmp_path / "V_Si_128" / "ZFS_occup" / "OUTCAR"
+        outcar.write_text("   NUPDOWN=       3.0000    fix difference up-down\n" + outcar.read_text())
+        raw = parse_zfs_simulation_dataset(sim_dir, calc_method="approx")
+        assert raw.spin == pytest.approx(1.5)
+        assert raw.ground_state_zfs.matrix[2, 2] == pytest.approx(2000.0 * 2 / 3)
+
+    def test_missing_nupdown_warns_and_assumes_spin_one(self, tmp_path, caplog):
+        with caplog.at_level("WARNING", logger="spinlabs"):
+            raw = parse_zfs_simulation_dataset(self._tree(tmp_path, "NV_64", None), calc_method="approx")
+        assert raw.spin is None
+        assert raw.ground_state_zfs.matrix[2, 2] == pytest.approx(3000.0)
+        assert "no NUPDOWN" in caplog.text
+
+    def test_unknown_spin_raises(self, tmp_path):
+        with pytest.raises(ValueError, match="S = 2"):
+            parse_zfs_simulation_dataset(self._tree(tmp_path, "X_64", 4), calc_method="approx")
+
+    def test_spin_survives_save_and_load_without_rescaling(self, tmp_path):
+        raw = parse_zfs_simulation_dataset(self._tree(tmp_path, "V_Si_128", 3), calc_method="approx")
+        out = tmp_path / "v_si.npz"
+        raw.save(out)
+        loaded = RawZFSData.load(out).to_unit("MHz")
+        assert loaded.spin == pytest.approx(1.5)
+        assert loaded.ground_state_zfs.matrix[2, 2] == pytest.approx(2000.0 * 2 / 3)
+
+    def test_legacy_file_with_spin_scaled_by_its_factor(self, tmp_path):
+        raw = TestSpinCorrectionOnLoad._make_raw("defect_band_approx")
+        raw.spin = 1.5
+        out = tmp_path / "legacy_v_si.npz"
+        raw.save(out)
+        loaded = RawZFSData.load(out).to_unit("MHz")
+        assert loaded.ground_state_zfs.matrix[2, 2] == pytest.approx(2000.0 * 2 / 3)
+
+    def test_combine_different_spins_raises(self):
+        a = TestSpinCorrectionOnLoad._make_raw("defect_band_approx")
+        b = copy.deepcopy(a)
+        a.spin, b.spin = 1.0, 1.5
+        with pytest.raises(ValueError, match="spin mismatch"):
+            a + b

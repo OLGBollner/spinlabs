@@ -22,6 +22,46 @@ INIT_POPULATIONS = {
 }
 
 
+def _abs_m_name(m: float) -> str:
+    """|m| in a state name: "1", "2" for integers, "1_2", "3_2" for 1/2, 3/2 (no "/" or "." in file names)."""
+    twice = int(round(2 * abs(m)))
+    return str(twice // 2) if twice % 2 == 0 else f"{twice}_2"
+
+
+def init_populations(spin: float = 1.0) -> dict[str, list[float]]:
+    """Named initial populations over the levels m = S, ..., -S (spinlabs.spin.spin_projections order).
+
+    S = 1: INIT_POPULATIONS (ms_1, ms_0, ms_-1). Any other spin: one state per |m|, the two levels +-|m| equally
+    populated ("ms_pm1_2" = p(+1/2) = p(-1/2) = 1/2, "ms_pm3_2" for S = 3/2; "ms_0" for m = 0 of an integer spin).
+    T1 is fitted to the summed population of the initially populated levels (RelaxationDynamics).
+    """
+    from spinlabs.spin import spin_projections
+
+    ms = spin_projections(spin)
+    if len(ms) == 3:
+        return {name: list(pop) for name, pop in INIT_POPULATIONS.items()}
+    states = {}
+    for size in sorted({abs(m) for m in ms}):
+        members = [m for m in ms if abs(m) == size]
+        name = "ms_0" if size == 0 else f"ms_pm{_abs_m_name(size)}"
+        states[name] = [1.0 / len(members) if abs(m) == size else 0.0 for m in ms]
+    return states
+
+
+def init_states(spin: float = 1.0) -> tuple[str, ...]:
+    """Initial-state names of a spin, in table order (INIT_STATES for S = 1)."""
+    return INIT_STATES if float(spin) == 1.0 else tuple(init_populations(spin))
+
+
+def rates_file_spin(data_file) -> float:
+    """Spin of a directional-rates file: its "spin" entry, else the largest m among its "m_to_m'" keys."""
+    data = np.load(data_file, allow_pickle=True)
+    if "spin" in data.files:
+        return float(data["spin"])
+    ms = [float(part) for key in data.files if "_to_" in key for part in key.split("_to_")]
+    return max(ms) if ms else 1.0
+
+
 def normalize_init_state(value: str) -> str:
     """Accept ``ms_0``, ``ms0``, ``0`` (and likewise for 1/-1/+1) and return the ``ms_<m>`` name."""
     text = str(value).strip().lower().removeprefix("ms").lstrip("_").removeprefix("+")
@@ -34,47 +74,70 @@ def t1_file_name(init_state: str) -> str:
 
 
 def find_t1_files(run_dir: str | Path) -> list[Path]:
-    """T1 result files in a run directory, in :data:`INIT_STATES` order.
+    """T1 result files in a run directory: the :data:`INIT_STATES` of S = 1 in that order, then any other
+    state (S = 3/2: ms_pm1_2, ms_pm3_2) by name.
 
     Runs solve the dynamics for several initial states into
     ``t1_relaxation_<state>.npz``; older runs hold a single
     ``t1_relaxation.npz``, which is returned when no per-state file exists.
     """
     run_dir = Path(run_dir)
-    files = [run_dir / t1_file_name(s) for s in INIT_STATES if (run_dir / t1_file_name(s)).exists()]
+    prefix = t1_file_name("")[: -len(".npz")]
+    found = {p.name[len(prefix) : -len(".npz")]: p for p in run_dir.glob(f"{prefix}?*.npz")}
+    files = [found.pop(s) for s in INIT_STATES if s in found] + [found[s] for s in sorted(found)]
     legacy = run_dir / "t1_relaxation.npz"
     return files or ([legacy] if legacy.exists() else [])
 
 
 class RelaxationDynamics:
+    """Population dynamics dp/dt = A p over the levels m = S, ..., -S, and T1 from it.
+
+    ``init_state`` is the initial population over the levels (init_populations), ``rates_data`` a directional-rates
+    npz with one "m_to_m'" series per ordered pair (spinlabs.spin.direction_key) and "temperatures"; the spin is
+    its "spin" entry or the largest m of its keys. T1 is fitted to the summed population of the initially
+    populated levels (the one level of S = 1's ms_* states; both levels of an S = 3/2 doublet). The spin-1 code
+    this generalizes is kept as spinlabs.legacy_spin1.RelaxationDynamicsSpin1.
+    """
+
     def __init__(self, init_state, rates_data):
         self.defect: str = None
         self.cell_size: int = None
         self.sim_type: str = None
 
-        self.population: np.ndarray = np.array(init_state)
+        self.population: np.ndarray = np.array(init_state, dtype=float)
+        self.spin: float = rates_file_spin(rates_data)
         self.rate_matrices, self.temperatures = self.read_data(rates_data)
+        if self.population.shape != (self.rate_matrices.shape[-1],):
+            raise ValueError(
+                f"initial population {self.population.tolist()} does not match the {self.rate_matrices.shape[-1]} "
+                f"levels of spin {self.spin:g}"
+            )
+        # The levels whose summed population is fitted: the initially populated ones
+        self.observed: np.ndarray = self.population > 0
 
     def read_data(self, data_file):
+        from spinlabs.spin import direction_key, spin_projections
+
         data = np.load(data_file, allow_pickle=True)
         self.defect = data.get("defect")
         self.cell_size = data.get("cell_size")
         self.sim_type = "(spin corrected)" if data.get("calc_method") == "defect_band_approx" else ""
 
-        rate_matrices = []
-
-        for i, t in enumerate(data.get("temperatures")):
-            A = [
-                [-data["1_to_0"][i] - data["1_to_-1"][i], data["0_to_1"][i], data["-1_to_1"][i]],
-                [data["1_to_0"][i], -data["0_to_1"][i] - data["0_to_-1"][i], data["-1_to_0"][i]],
-                [data["1_to_-1"][i], data["0_to_-1"][i], -data["-1_to_0"][i] - data["-1_to_1"][i]],
-            ]
-
-            rate_matrices.append(A)
-
+        ms = spin_projections(self.spin)
         temperatures = np.array(data.get("temperatures", []))
+        # A[i, j] = rate of m_j -> m_i; each column sums to zero (A[j, j] = minus the rates out of m_j)
+        rate_matrices = np.zeros((len(temperatures), len(ms), len(ms)))
+        for j, m in enumerate(ms):
+            out = [(i, np.asarray(data[direction_key(m, mp)], dtype=float)) for i, mp in enumerate(ms) if mp != m]
+            for i, rate in out:
+                rate_matrices[:, i, j] = rate
+            rate_matrices[:, j, j] = -sum(rate for _, rate in out)
 
-        return np.array(rate_matrices), temperatures
+        return rate_matrices, temperatures
+
+    def observed_population(self, populations: np.ndarray) -> np.ndarray:
+        """Summed population of the observed (initially populated) levels; ``populations`` has levels last."""
+        return np.asarray(populations)[..., self.observed].sum(axis=-1)
 
     @staticmethod
     def _decay_modes(A: np.ndarray) -> tuple[np.ndarray, np.ndarray, int]:
@@ -98,7 +161,10 @@ class RelaxationDynamics:
             raise ValueError(f"Incorrect temperature format: {T}")
         return temp_index
 
-    def fit_T1_exp(self, population, time_points, steady_state, T1_eigenval):
+    @staticmethod
+    def _fitted_T1(population, time_points, steady_state, T1_eigenval):
+        """T1 of a * exp(-t / T1) + c fitted to the population, or None when the fit fails."""
+
         def exp_func(t, T1, c, a):
             return a * np.exp(-t / T1) + c
 
@@ -111,12 +177,14 @@ class RelaxationDynamics:
                 # may overflow exp, and the result is checked below.
                 warnings.simplefilter("ignore", OptimizeWarning)
                 popt, _ = curve_fit(exp_func, time_points, population, p0=initial_guess, maxfev=5000)
-            extracted_T1 = float(popt[0])
-            if not np.isfinite(extracted_T1) or extracted_T1 <= 0:
-                return T1_eigenval
-            return extracted_T1
         except Exception:
-            return T1_eigenval
+            return None
+        extracted_T1 = float(popt[0])
+        return extracted_T1 if np.isfinite(extracted_T1) and extracted_T1 > 0 else None
+
+    def fit_T1_exp(self, population, time_points, steady_state, T1_eigenval):
+        fitted = self._fitted_T1(population, time_points, steady_state, T1_eigenval)
+        return T1_eigenval if fitted is None else fitted
 
     def simulate_relaxation(self, time_points, T=None, temp_index=None):
         if temp_index is None:
@@ -183,21 +251,32 @@ class RelaxationDynamics:
         return time_points
 
     def get_T1_fit(self, T=None, temp_index=None):
+        return self.get_T1_fit_details(T=T, temp_index=temp_index)[0]
+
+    def get_T1_fit_details(self, T=None, temp_index=None) -> tuple[float, float, str]:
+        """T1 (s) from the population fit, the eigenvalue T1 (s), and where the T1 came from.
+
+        The source is "fit" (exponential + offset fitted to the summed population of the initially populated
+        levels, observed_population), "eigenvalue" (the fallback: no relaxation slower than 1/MIN_DECAY_RATE, or a
+        failed fit) or "none" (0 K, NaN). The eigenvalue T1 is the slowest decay of the rate matrix, which the
+        observed population need not contain; it sets the fit's start value and time window.
+        """
         T1_eigenval, _, _ = self.get_T1_eigenval(T=T, temp_index=temp_index)
-        steady_state = self.get_steady_state(T=T, temp_index=temp_index)[self.population.argmax()]
+        steady_state = float(self.observed_population(self.get_steady_state(T=T, temp_index=temp_index)))
 
         if T1_eigenval > 1.0 / MIN_DECAY_RATE:
-            return T1_eigenval
+            return T1_eigenval, T1_eigenval, "eigenvalue"
 
         time_points = self.get_time_estimate(T, temp_index)
         if time_points is None:
-            return np.nan
+            return np.nan, T1_eigenval, "none"
 
-        population = self.simulate_relaxation(time_points, T=T, temp_index=temp_index)[:, self.population.argmax()]
+        population = self.observed_population(self.simulate_relaxation(time_points, T=T, temp_index=temp_index))
 
-        T1_fit = self.fit_T1_exp(population, time_points, steady_state, T1_eigenval)
-
-        return T1_fit
+        fitted = self._fitted_T1(population, time_points, steady_state, T1_eigenval)
+        if fitted is None:
+            return T1_eigenval, T1_eigenval, "eigenvalue"
+        return fitted, T1_eigenval, "fit"
 
     def fit_rate_scaling(self, low_T, high_T, file=None):
         k_B = Cn.Boltzmann / Cn.e  # eV·K⁻¹

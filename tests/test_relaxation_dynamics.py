@@ -67,3 +67,21 @@ def test_fitted_t1_matches_the_eigenvalue_at_ghz_rates(tmp_path):
     rd = RelaxationDynamics([0.0, 1.0, 0.0], _rates_file(tmp_path, _rates(1e9)))
     t1_eig, _, _ = rd.get_T1_eigenval(temp_index=0)
     assert rd.get_T1_fit(temp_index=0) == pytest.approx(t1_eig, rel=1e-3)
+
+
+def test_fit_details_say_where_t1_came_from(tmp_path):
+    """A resolvable decay is fitted; one slower than the cutoff falls back to the eigenvalue (inf).
+
+    From m_s = 0 the population decays at 3 Omega (Omega = 1/s here), not at the slowest eigenvalue (the
+    +1 <-> -1 mode, invisible in p_0), so the fit and the eigenvalue differ.
+    """
+    rd = RelaxationDynamics([0.0, 1.0, 0.0], _rates_file(tmp_path, _rates(1.0)))
+    t1, t1_eig, source = rd.get_T1_fit_details(temp_index=0)
+    assert source == "fit"
+    assert t1 == rd.get_T1_fit(temp_index=0)
+    assert t1 == pytest.approx(1.0 / 3.0, rel=1e-6)
+    assert t1_eig == pytest.approx(1.0 / (1.0 + 2e-4), rel=1e-6)
+
+    slow = RelaxationDynamics([0.0, 1.0, 0.0], _rates_file(tmp_path, _rates(1e-12)))
+    t1, t1_eig, source = slow.get_T1_fit_details(temp_index=0)
+    assert source == "eigenvalue" and t1 == t1_eig == np.inf
