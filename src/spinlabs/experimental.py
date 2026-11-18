@@ -3,19 +3,21 @@
 The CSV layout is WebPlotDigitizer's export of several datasets from one figure, under an optional
 citation line:
 
-    Jarmola et al. (2012)    citation, as the legend shows it (optional; one cell)
+    Author et al. (2000)     citation, as the legend shows it (optional; one cell)
     K,Hz                     units: one x and one y unit for every series (or one pair per series)
-    S8,,S3,,S2,              series names, each over its X and Y column
-    X,Y,X,Y,X,Y              column roles
-    59.97,0.106,6.556,...    data; shorter series leave their cells empty
+    sample_a,,sample_b,      series names, each over its X and Y column
+    X,Y,X,Y                  column roles
+    10.0,1.0,20.0,5.0        data, one point per series per row
+    30.0,2.0,40.0,8.0
+    50.0,4.0,,               a shorter series leaves its cells empty
 
 Rows are in digitizing order, so each series is sorted by x when read. The source (the paper) is
-the file name, e.g. ``Jarmola_2012``.
+the file name, e.g. ``Author_2000``.
 
 A series measures either the relaxation itself, T1 or 1/T1 of a polarized state (``kind`` "relaxation",
-e.g. Jarmola et al. 2012), or a single-transition rate, named by its label: ``omega`` (or Ω) for
-|0> <-> |+-1>, ``gamma`` (or γ) for |+1> <-> |-1> (e.g. Lin et al. 2021). relaxation_series turns a
-source's Omega and gamma into T1 with the spinlabs rate-equation solver.
+any label other than the two below), or a single-transition rate, named by its label: ``omega`` (or Ω)
+for |0> <-> |+-1>, ``gamma`` (or γ) for |+1> <-> |-1>. relaxation_series turns a source's Omega and
+gamma into T1 with the spinlabs rate-equation solver.
 """
 
 from __future__ import annotations
