@@ -12,6 +12,11 @@ of two rows:
   first-order run (D(Q)), for every Q whose 2Q was run on the same side (filled +Q, open -Q),
   with the fit's 2c as a line.
 
+With ``central`` both rows show central differences instead, one point per |Q| run on both
+sides: |D(Q) - D(-Q)| / 2Q and |D(Q) + D(-Q) - 2 D0| / Q^2. They cancel the odd (even) Taylor
+terms the forward ones carry, so the truncation is d Q^2 and 2 e Q^2, from a quartic fit to every
+run; no step is a 2Q helper (convergence.snr_report).
+
 The points carry no error bars: the uncertainty that decides whether a point is measured is
 the dashed total-error curve (noise and D0's offset), below.
 
@@ -47,6 +52,7 @@ from spinlabs.convergence import (
     SNR_TARGET,
     TRUNC_TOL,
     d0_offset,
+    difference_errors,
     fit_points,
     helper_step,
     load_convergence,
@@ -72,26 +78,34 @@ _ORDER_NAMES = {1: "first order", 2: "second order"}
 WEAK_FRACTION = 0.05
 
 
-def quotients(p, parts, p0):
+def quotients(p, parts, p0, central=False):
     """The measured finite differences of one mode, as (signed Q, norm) arrays.
 
     first: |D(Q) - D0| / |Q| per run; second: the forward difference |D(2Q) - 2 D(Q) + D0| / Q^2
-    per Q whose 2Q was run on the same side.
+    per Q whose 2Q was run on the same side. ``central``: |D(Q) - D(-Q)| / 2Q and
+    |D(Q) + D(-Q) - 2 D0| / Q^2 per Q > 0 run on both sides.
     """
     def at(q):
         i = np.flatnonzero(np.isclose(p, q))
         return parts[i[0]] if len(i) else None
 
     nonzero = p[~np.isclose(p, 0.0)]
-    first = [(q, np.linalg.norm(at(q) - p0) / abs(q)) for q in nonzero]
-    second = [(q, np.linalg.norm(at(2 * q) - 2 * at(q) + p0) / q**2) for q in nonzero if at(2 * q) is not None]
+    if central:
+        both = [q for q in nonzero if q > 0 and at(-q) is not None]
+        first = [(q, np.linalg.norm(at(q) - at(-q)) / (2 * q)) for q in both]
+        second = [(q, np.linalg.norm(at(q) + at(-q) - 2 * p0) / q**2) for q in both]
+    else:
+        first = [(q, np.linalg.norm(at(q) - p0) / abs(q)) for q in nonzero]
+        second = [(q, np.linalg.norm(at(2 * q) - 2 * at(q) + p0) / q**2) for q in nonzero if at(2 * q) is not None]
     return tuple(np.array(rows, dtype=float).reshape(-1, 2) for rows in (first, second))
 
 
-def analyse(path, modes=None, noise=None, target=SNR_TARGET, tol=TRUNC_TOL):
+def analyse(path, modes=None, noise=None, target=SNR_TARGET, tol=TRUNC_TOL, central=False):
     """Per mode of one pack: (mode, perts, first, second quotients, SNR report); plus noise and D0 offset.
 
     ``modes`` keeps only those modes (1-based, as packed); ``noise`` replaces the pooled sigma.
+    ``central`` takes central differences (quotients), with every run a point and in the fit; the
+    noise and D0 offset stay those of the forward analysis, so both compare on one sigma.
     """
     path = Path(path)
     conv = load_convergence(path)
@@ -120,11 +134,17 @@ def analyse(path, modes=None, noise=None, target=SNR_TARGET, tol=TRUNC_TOL):
     for mode, p, mode_parts, f in zip(conv.modes, perts, parts, fit):
         if modes and int(mode) not in modes:
             continue
-        report = snr_report(p[f], mode_parts[f], sigma, source, offset, target, tol, pair=(p, mode_parts))
+        if central:
+            report = snr_report(p, mode_parts, sigma, source, offset, target, tol, central=True)
+        else:
+            report = snr_report(p[f], mode_parts[f], sigma, source, offset, target, tol, pair=(p, mode_parts))
         if report is None:
             LOGGER.warning(f"{path.name} mode {mode}: too few finished amplitudes for an SNR estimate; not plotted")
             continue
-        first, second = quotients(p, mode_parts, p0)  # second needs the helper's D(2Q)
+        first, second = quotients(p, mode_parts, p0, central)  # forward second needs the helper's D(2Q)
+        if central:
+            rows.append((int(mode), p, first, second, report))
+            continue
         first = first[fit_points(first[:, 0], helper)]  # the helper is no first-order point
         rows.append((int(mode), p[f], first, second, report))
     return rows, sigma, float(np.linalg.norm(offset))
@@ -192,8 +212,8 @@ def safe_window(r, order: int) -> tuple[float, float, bool] | None:
     only a lower limit (``upper_known`` False): these amplitudes do not limit it.
     """
     if order == 1:
-        return (r.q_lo1, r.q_hi1, r.c_resolved) if r.b_resolved else None
-    return (r.q_lo2, r.q_hi2, r.d_resolved) if r.c_resolved else None
+        return (r.q_lo1, r.q_hi1, r.next1_resolved) if r.b_resolved else None
+    return (r.q_lo2, r.q_hi2, r.next2_resolved) if r.c_resolved else None
 
 
 def below_target_everywhere(r, measured, order: int) -> bool:
@@ -274,11 +294,11 @@ def plot_signed(ax, rows, marker, color, alpha, big=9, small=5):
 
 def plot_convergence_summary(
     packs, output, *, modes=None, noise=None, target=SNR_TARGET, tol=TRUNC_TOL, weak_fraction=WEAK_FRACTION,
-    dpi=200, show=False,
+    central=False, dpi=200, show=False,
 ) -> Path:
     """One figure, one column per pack (e.g. a defect's all-bands and defect-band packs); returns its path.
 
-    ``weak_fraction``: see shade_safe_windows.
+    ``weak_fraction``: see shade_safe_windows. ``central``: central instead of forward differences.
     """
     packs = [Path(p) for p in packs]
     # each column ticks its own pack's step sizes, so only the rows of one column share x; a row shares
@@ -288,7 +308,7 @@ def plot_convergence_summary(
     )
     spectra: dict = {}  # registered phonon symmetries, parsed once per figure
     for col, path in enumerate(packs):
-        rows, sigma, offset = analyse(path, modes, noise, target, tol)
+        rows, sigma, offset = analyse(path, modes, noise, target, tol, central)
         title = column_title(path)
         if len(rows) > len(COLORS):
             LOGGER.warning(
@@ -304,13 +324,14 @@ def plot_convergence_summary(
         for color, (mode, p, first, second, r) in zip(COLORS, rows):
             a1 = 1.0 if r.b_resolved else FAINT
             a2 = 1.0 if r.c_resolved else FAINT
-            plot_signed(first_ax, first, "o", color, a1)
-            first_ax.axhline(r.b, color=color, lw=1, alpha=0.7 * a1)
-            plot_signed(second_ax, second, "s", color, a2)
-            second_ax.axhline(2 * r.c, color=color, lw=1, alpha=0.7 * a2)
+            for ax, rows_, marker, level, alpha in ((first_ax, first, "o", r.b, a1), (second_ax, second, "s", 2 * r.c, a2)):
+                if central:  # one point per |Q|, from both sides
+                    ax.plot(rows_[:, 0], rows_[:, 1], marker, ls="", ms=7, color=color, alpha=alpha)
+                else:
+                    plot_signed(ax, rows_, marker, color, alpha)
+                ax.axhline(level, color=color, lw=1, alpha=0.7 * alpha)
         # the quotient's error with D0's offset: points near or below it are not measured
-        err1 = float(np.hypot(np.sqrt(2) * sigma, offset))
-        err2 = float(np.hypot(np.sqrt(6) * sigma, offset))
+        err1, err2 = difference_errors(sigma, offset, central)
         first_ax.plot(q, err1 / q, "--", color="0.35", lw=1)
         second_ax.plot(q, err2 / q**2, "--", color="0.35", lw=1)
         # log |Q| axis ticked at the step sizes that were run, not at decades
@@ -326,7 +347,10 @@ def plot_convergence_summary(
         for ax, order in ((first_ax, 1), (second_ax, 2)):
             shade_safe_windows(ax, rows, order, (q[0], q[-1]), f"{title} {_ORDER_NAMES[order]}", weak_fraction)
         first_ax.set_title(f"{title}: σ = {sigma:.2g} MHz, D0 offset {offset:.2g} MHz", fontsize=12)
-        if col == 0:  # the rows share y: one label per row
+        if col == 0 and central:  # the rows share y: one label per row
+            first_ax.set_ylabel(r"first order, central $\|D(Q) - D(-Q)\| / 2Q$ (MHz/Q)")
+            second_ax.set_ylabel(r"second order, central $\|D(Q) + D(-Q) - 2D_0\| / Q^2$ (MHz/Q²)")
+        elif col == 0:
             first_ax.set_ylabel(r"first order $\|D(Q) - D_0\| / Q$ (MHz/Q)")
             second_ax.set_ylabel(r"second order $\|D(2Q) - 2D(Q) + D_0\| / Q^2$ (MHz/Q²)")
         second_ax.set_xlabel("|Q| (step size)")
@@ -338,18 +362,17 @@ def plot_convergence_summary(
         error_handle = Line2D([], [], ls="--", color="0.35", label="error incl. D0 offset")
         modes_legend = first_ax.legend(handles=mode_handles, loc="lower right", fontsize=10)
         first_ax.add_artist(modes_legend)
-        first_ax.legend(handles=[
-            Line2D([], [], marker="o", ls="", color="0.35", mfc="0.35", label="+Q"),
-            Line2D([], [], marker="o", ls="", color="0.35", mfc="white", label="−Q"),
-            Line2D([], [], ls="-", color="0.35", label="b (fit, Q → 0)"),
-            error_handle,
-        ], loc="lower left", fontsize=10)
-        second_ax.legend(handles=[
-            Line2D([], [], marker="s", ls="", color="0.35", mfc="0.35", label="+Q"),
-            Line2D([], [], marker="s", ls="", color="0.35", mfc="white", label="−Q"),
-            Line2D([], [], ls="-", color="0.35", label="2c (fit, Q → 0)"),
-            error_handle,
-        ], loc="lower left", fontsize=10)
+        for ax, marker, line in ((first_ax, "o", "b"), (second_ax, "s", "2c")):
+            if central:
+                points = [Line2D([], [], marker=marker, ls="", color="0.35", label="central (±Q)")]
+            else:
+                points = [Line2D([], [], marker=marker, ls="", color="0.35", mfc="0.35", label="+Q"),
+                          Line2D([], [], marker=marker, ls="", color="0.35", mfc="white", label="−Q")]
+            ax.legend(handles=[
+                *points,
+                Line2D([], [], ls="-", color="0.35", label=f"{line} ({'quartic fit' if central else 'fit'}, Q → 0)"),
+                error_handle,
+            ], loc="lower left", fontsize=10)
     fig.tight_layout()
     output = Path(output)
     output.parent.mkdir(parents=True, exist_ok=True)

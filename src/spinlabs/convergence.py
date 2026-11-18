@@ -96,14 +96,19 @@ def cubic_fit(perts: np.ndarray, values: np.ndarray) -> tuple[np.ndarray, np.nda
     at Q=0 and a - D0 measures D0's offset from them. values is (n_Q, ...).
     Returns (coef (4, ...) = a, b, c, d; residuals at the Q != 0 points; design matrix).
     """
+    return poly_fit(perts, values, 3)
+
+
+def poly_fit(perts: np.ndarray, values: np.ndarray, degree: int) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """cubic_fit with any degree: coef is (degree + 1, ...), constant term first."""
     perts = np.asarray(perts, dtype=float)
     keep = ~np.isclose(perts, 0.0)
     q = perts[keep]
-    X = np.vander(q, 4, increasing=True)
+    X = np.vander(q, degree + 1, increasing=True)
     flat = values[keep].reshape(len(q), -1)
     coef = np.linalg.lstsq(X, flat, rcond=None)[0]
     resid = flat - X @ coef
-    return coef.reshape((4,) + values.shape[1:]), resid.reshape(values[keep].shape), X
+    return coef.reshape((degree + 1,) + values.shape[1:]), resid.reshape(values[keep].shape), X
 
 
 def helper_step(perts: np.ndarray) -> float | None:
@@ -165,6 +170,18 @@ def d0_offset(perts: list[np.ndarray], parts_by_mode: list[np.ndarray], d0_parts
     return np.median(np.array(icpt), axis=0) - d0_parts if icpt else np.zeros(5)
 
 
+def difference_errors(sigma: float, offset: float, central: bool = False) -> tuple[float, float]:
+    """(err1, err2) in MHz: the errors of the finite differences whose quotients by Q and Q^2 estimate b and 2c.
+
+    Forward (the production schemes): D(Q) - D0 and D(2Q) - 2 D(Q) + D0, with the noise of two and
+    three runs and D0's offset once. Central: (D(Q) - D(-Q))/2, free of D0, and
+    D(Q) + D(-Q) - 2 D0, which takes D0's offset twice.
+    """
+    if central:
+        return float(sigma / np.sqrt(2)), float(np.hypot(np.sqrt(6) * sigma, 2 * offset))
+    return float(np.hypot(np.sqrt(2) * sigma, offset)), float(np.hypot(np.sqrt(6) * sigma, offset))
+
+
 @dataclass
 class SNRReport:
     """Noise, D0 offset, Taylor coefficients and the safe amplitude window of one mode.
@@ -176,6 +193,10 @@ class SNRReport:
     error hypot(sqrt 6 sigma, offset)/Q^2 and truncation 6 d Q on 2c. An unresolved
     coefficient is replaced by its upper bound, so the window's upper end is then a
     lower limit.
+
+    ``central`` reports the central differences instead (difference_errors): first order
+    (D(Q) - D(-Q))/2Q with truncation d Q^2, second order (D(Q) + D(-Q) - 2 D0)/Q^2 with
+    truncation 2 e Q^2 on 2c, e from a quartic fit (snr_report).
     """
 
     sigma: float
@@ -193,34 +214,43 @@ class SNRReport:
     target: float = SNR_TARGET
     tol: float = TRUNC_TOL
     b_resolved: bool = True
+    central: bool = False
+    e: float = float("nan")  # quartic coefficient, central only
+    e_resolved: bool = False
 
     @property
     def err1(self) -> float:
-        """Error of D(Q) - D0 (MHz): noise of two runs and D0's offset."""
-        return float(np.hypot(np.sqrt(2) * self.sigma, self.offset))
+        """Error of the first-order difference (MHz): D(Q) - D0, or (D(Q) - D(-Q))/2 when central."""
+        return difference_errors(self.sigma, self.offset, self.central)[0]
 
     @property
     def err2(self) -> float:
-        """Error of D(2Q) - 2 D(Q) + D0 (MHz): noise of three runs and D0's offset."""
-        return float(np.hypot(np.sqrt(6) * self.sigma, self.offset))
+        """Error of the second-order difference (MHz): D(2Q) - 2 D(Q) + D0, or D(Q) + D(-Q) - 2 D0 when central."""
+        return difference_errors(self.sigma, self.offset, self.central)[1]
+
+    @property
+    def next1_resolved(self) -> bool:
+        """Whether the Taylor term truncating the first-order difference is resolved (c; d when central)."""
+        return self.d_resolved if self.central else self.c_resolved
+
+    @property
+    def next2_resolved(self) -> bool:
+        """Whether the Taylor term truncating the second-order difference is resolved (d; e when central)."""
+        return self.e_resolved if self.central else self.d_resolved
 
     def first_order(self, q) -> tuple[np.ndarray, np.ndarray]:
         """(noise + offset, truncation) relative errors of the first-order coefficient at q."""
         q = np.asarray(q, dtype=float)
-        return self.err1 / (self.b * q), self._c_up * q / self.b
+        # the window's upper end is where the truncation reaches tol: forward c Q / b, central d Q^2 / b
+        trunc = self.tol * (q / self.q_hi1) ** (2 if self.central else 1)
+        return self.err1 / (self.b * q), trunc
 
     def second_order(self, q) -> tuple[np.ndarray, np.ndarray]:
         """(noise + offset, truncation) relative errors of the diagonal second-order coefficient at q."""
         q = np.asarray(q, dtype=float)
-        return self.err2 / (2 * self.c * q**2), 3 * self._d_up * q / self.c
-
-    @property
-    def _c_up(self) -> float:
-        return self.tol * self.b / self.q_hi1
-
-    @property
-    def _d_up(self) -> float:
-        return self.tol * self.c / (3 * self.q_hi2)
+        # forward 3 d Q / c, central e Q^2 / c
+        trunc = self.tol * (q / self.q_hi2) ** (2 if self.central else 1)
+        return self.err2 / (2 * self.c * q**2), trunc
 
 
 def snr_report(
@@ -232,6 +262,7 @@ def snr_report(
     target: float = SNR_TARGET,
     tol: float = TRUNC_TOL,
     pair: tuple[np.ndarray, np.ndarray] | None = None,
+    central: bool = False,
 ) -> SNRReport | None:
     """Fit D(Q) per traceless part with a cubic and derive SNR and the safe Q window.
 
@@ -242,12 +273,17 @@ def snr_report(
     the second-order c and d, since the pair scheme's (D(2Q) - 2 D(Q) + D0)/Q^2 at the largest
     Q is built from the helper's D(2Q), and its truncation 6 d Q needs d over that range. b,
     the first-order window and the noise come from ``perts`` without it.
-    Returns None without D0 or with fewer than 5 other amplitudes.
+    ``central`` reports the central differences (SNRReport): every run is a +-Q pair of them, so
+    no step is a helper, ``pair`` is not used, and a quartic fit to ``perts`` gives b, c, d and the
+    e that truncates the second order; the noise is still that of the cubic.
+    Returns None without D0 or with fewer than 5 other amplitudes (6 when central).
     """
     perts = np.asarray(perts, dtype=float)
     zero = np.isclose(perts, 0.0)
-    if not zero.any() or np.sum(~zero) < 5:
+    if not zero.any() or np.sum(~zero) < (6 if central else 5):
         return None
+    if central:
+        return _central_snr_report(perts, parts, sigma, sigma_source, offset, target, tol)
     coef, resid, X = cubic_fit(perts, parts)
     if sigma is None:
         dof = (int(np.sum(~zero)) - 4) * parts.shape[1]
@@ -291,13 +327,57 @@ def snr_report(
     )
 
 
+def _central_snr_report(perts, parts, sigma, sigma_source, offset, target, tol) -> SNRReport:
+    """snr_report for the central differences; perts and parts include D0 and every step."""
+    zero = np.isclose(perts, 0.0)
+    coef, resid, _X = cubic_fit(perts, parts)
+    if sigma is None:  # the noise as the forward report takes it, so both compare on one sigma
+        dof = (int(np.sum(~zero)) - 4) * parts.shape[1]
+        sigma = float(np.sqrt(np.sum(resid**2) / dof))
+        sigma_source = f"this mode's cubic-fit residuals, {dof} dof"
+    if offset is None:
+        offset = coef[0] - parts[zero][0]
+    delta = float(np.linalg.norm(offset))
+    coef, _resid, X = poly_fit(perts, parts, 4)
+    se = sigma * np.sqrt(np.diag(np.linalg.inv(X.T @ X)))
+    # the norm over 5 parts of pure-noise coefficients is ~ sqrt 5 standard errors
+    floor = SIGNIFICANCE * se * np.sqrt(parts.shape[1])
+    b, c, d, e = np.linalg.norm(coef[1:], axis=1)
+    d_up, e_up = max(d, floor[3]), max(e, floor[4])
+    err1, err2 = difference_errors(sigma, delta, central=True)
+    qmax = float(np.max(np.abs(perts)))
+    return SNRReport(
+        sigma=sigma,
+        sigma_source=sigma_source,
+        offset=delta,
+        b=float(b),
+        c=float(c),
+        d=float(d),
+        b_resolved=bool(b > floor[1] and b * qmax > SIGNIFICANCE * err1),
+        c_resolved=bool(c > floor[2] and 2 * c * qmax**2 > SIGNIFICANCE * err2),
+        d_resolved=bool(d > floor[3]),
+        # SNR: b Q / err1, 2 c Q^2 / err2; truncation: d Q^2 / b, e Q^2 / c
+        q_lo1=float(target * err1 / b),
+        q_hi1=float(np.sqrt(tol * b / d_up)),
+        q_lo2=float(np.sqrt(target * err2 / (2 * c))),
+        q_hi2=float(np.sqrt(tol * c / e_up)),
+        target=target,
+        tol=tol,
+        central=True,
+        e=float(e),
+        e_resolved=bool(e > floor[4]),
+    )
+
+
 def format_snr(report: SNRReport, qs: list[float]) -> str:
     """Text block: noise, coefficients, per-|Q| SNR and truncation, and the safe windows."""
     r = report
     lines = [
         f"noise sigma {r.sigma:.3g} MHz per tensor element ({r.sigma_source}); D0 offset {r.offset:.3g} MHz",
         f"|b| {r.b:.4g} MHz/Q, |c| {r.c:.4g} MHz/Q^2{'' if r.c_resolved else ' (unresolved)'}, "
-        f"|d| {r.d:.4g} MHz/Q^3{'' if r.d_resolved else ' (unresolved)'}",
+        f"|d| {r.d:.4g} MHz/Q^3{'' if r.d_resolved else ' (unresolved)'}"
+        + (f", |e| {r.e:.4g} MHz/Q^4{'' if r.e_resolved else ' (unresolved)'} (central differences)"
+           if r.central else ""),
         "  SNR = coefficient / (noise + D0 offset)",
         f"  {'|Q|':>8}  {'SNR 1st':>9}  {'trunc 1st':>10}  {'SNR 2nd':>9}  {'trunc 2nd':>10}",
     ]
@@ -305,8 +385,8 @@ def format_snr(report: SNRReport, qs: list[float]) -> str:
         n1, t1 = r.first_order(q)
         n2, t2 = r.second_order(q)
         lines.append(
-            f"  {q:>8.4g}  {1 / n1:>9.3g}  {'<' if not r.c_resolved else ' '}{t1:>9.2%}"
-            f"  {1 / n2:>9.3g}  {'<' if not r.d_resolved else ' '}{t2:>9.2%}"
+            f"  {q:>8.4g}  {1 / n1:>9.3g}  {'<' if not r.next1_resolved else ' '}{t1:>9.2%}"
+            f"  {1 / n2:>9.3g}  {'<' if not r.next2_resolved else ' '}{t2:>9.2%}"
         )
 
     def window(lo: float, hi: float, bound: bool) -> str:
@@ -317,8 +397,8 @@ def format_snr(report: SNRReport, qs: list[float]) -> str:
         return f"none (SNR {r.target:g} needs |Q| >= {lo:.3g}, truncation exceeds {r.tol:.0%} above {hi:.3g})"
 
     lines.append(f"safe |Q| (SNR >= {r.target:g}, truncation <= {r.tol:.0%}; '<' marks an upper bound):")
-    lines.append(f"  first order : {window(r.q_lo1, r.q_hi1, not r.c_resolved)}")
-    lines.append(f"  second order: {window(r.q_lo2, r.q_hi2, not r.d_resolved)}")
+    lines.append(f"  first order : {window(r.q_lo1, r.q_hi1, not r.next1_resolved)}")
+    lines.append(f"  second order: {window(r.q_lo2, r.q_hi2, not r.next2_resolved)}")
     return "\n".join(lines)
 
 
@@ -456,12 +536,12 @@ def common_window(reports: dict[int, SNRReport]) -> str:
 
     for m, r in reports.items():
         lines.append(
-            f"  {m:>6}  {cell(r.q_lo1, r.q_hi1, r.b_resolved, r.c_resolved):>22}"
-            f"  {cell(r.q_lo2, r.q_hi2, r.c_resolved, r.d_resolved):>22}"
+            f"  {m:>6}  {cell(r.q_lo1, r.q_hi1, r.b_resolved, r.next1_resolved):>22}"
+            f"  {cell(r.q_lo2, r.q_hi2, r.c_resolved, r.next2_resolved):>22}"
         )
     for order, lo_key, hi_key, signal, next_term in (
-        ("first order ", "q_lo1", "q_hi1", "b_resolved", "c_resolved"),
-        ("second order", "q_lo2", "q_hi2", "c_resolved", "d_resolved"),
+        ("first order ", "q_lo1", "q_hi1", "b_resolved", "next1_resolved"),
+        ("second order", "q_lo2", "q_hi2", "c_resolved", "next2_resolved"),
     ):
         los = {m: getattr(r, lo_key) for m, r in reports.items() if getattr(r, signal)}
         his = {m: getattr(r, hi_key) for m, r in reports.items() if getattr(r, signal) and getattr(r, next_term)}
