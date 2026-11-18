@@ -317,8 +317,13 @@ decont_sublevels() {
   done
   if [ "$left" -eq 0 ]; then
     : > .done
-    rm -f CHGCAR CHG
-    echo "$ID: Done! $1 (all sublevels: $SUBLEVELS; WAVECAR kept)"
+    if [ "$ORDER" = "ground_state" ]; then
+      rm -f CHG  # the ground state keeps its CHGCAR (and WAVECAR)
+      echo "$ID: Done! $1 (all sublevels: $SUBLEVELS; WAVECAR and CHGCAR kept)"
+    else
+      rm -f CHGCAR CHG
+      echo "$ID: Done! $1 (all sublevels: $SUBLEVELS; WAVECAR kept)"
+    fi
   else
     echo "$ID: $1: $left sublevel(s) without a ZFS block -- the next submission reruns them from the WAVECAR"
   fi

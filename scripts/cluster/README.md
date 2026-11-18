@@ -67,7 +67,7 @@ from that snapshot.
   filled at creation: the SCF input (INCAR, POSCAR, KPOINTS, POTCAR, CHGCAR from ZFS_hyp), one
   `ms_*/INCAR` per sublevel and `run_ground_state.sh`. Submit it on its own from there with
   `sh run_ground_state.sh` (one job, the runner's `ground_state` mode); the trees' jobs do not
-  run it. A rerun skips a finished SCF and sublevels.
+  run it. A rerun skips a finished SCF and sublevels. Unlike the runs, it keeps its CHGCAR.
   `spinlabs package` (method `decont`, picked by default when the trees exist) writes one npz
   per spin sublevel into one folder, `data/<defect>_<cell>/pert_<p>/full_decont/<date>/`, each
   with a `spin_sublevel` key and its ground state from `ZFS_full/<sublevel>`; only runs with a

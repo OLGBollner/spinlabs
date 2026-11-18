@@ -109,6 +109,7 @@ def test_the_ground_state_folder_is_ready_to_submit_on_its_own(tmp_path):
     r = _run_ground_state(tmp_path, folder.parent)
     assert r.returncode == 0, r.stdout + r.stderr
     assert (ground / ".done").is_file() and (ground / "WAVECAR").is_file()
+    assert (ground / "CHGCAR").is_file()  # kept in the ground state (the runs drop theirs)
     for level in SUBLEVELS:
         assert (ground / level / ".done").is_file()
         assert os.readlink(ground / level / "WAVECAR") == "../WAVECAR"
