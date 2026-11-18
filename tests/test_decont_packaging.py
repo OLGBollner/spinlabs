@@ -8,7 +8,14 @@ import numpy as np
 import pytest
 
 from spinlabs.cli.package import _run, _run_conv
-from spinlabs.decont import high_spin, load_conv_sublevel_set, load_sublevel_set, sublevel_info
+from spinlabs.decont import (
+    decontaminate_conv_set,
+    high_spin,
+    load_conv_sublevel_set,
+    load_decontaminated,
+    load_sublevel_set,
+    sublevel_info,
+)
 from spinlabs.parsers import parse_decont_dataset
 
 INCAR = """ENCUT = 520
@@ -191,3 +198,21 @@ def test_an_old_registry_gets_the_spin_sublevel_column(tmp_path, monkeypatch):
     conn = reg.ensure_db()
     assert "spin_sublevel" in {row[1] for row in conn.execute("PRAGMA table_info(files)")}
     assert conn.execute("SELECT path, spin_sublevel FROM files").fetchall() == [("/x.npz", None)]
+
+
+def test_a_packaged_set_and_its_convergence_pack_are_decontaminated(tmp_path):
+    defect, modes = _defect(tmp_path)
+    _run(_args(tmp_path, defect))
+    raw = load_decontaminated(tmp_path / "data" / "NV_64" / f"pert_{STEP:g}" / "full_decont" / DAY)
+    # S = 1: (D(ms_1) - mean D(ms_0)) / 2 along the axis
+    gs = (2000.0 + OFFSET["ms_1"] - (2000.0 + (OFFSET["ms_0_3"] + OFFSET["ms_0_4"]) / 2)) / 2
+    assert raw.calc_method == "full_decont" and raw.spin_sublevel is None
+    assert raw.ground_state_zfs.to_unit("MHz").matrix[2, 2] == pytest.approx(gs)
+    assert sorted(raw.first_order) == [m - 1 for m in modes] and sorted(raw.second_order) == [(m - 1, m - 1) for m in modes]
+
+    args = argparse.Namespace(defect_folder=defect, output_root=tmp_path / "data", ground_state=None, yes=True,
+                              scan=False)
+    _run_conv(args, defect)
+    conv = decontaminate_conv_set(load_conv_sublevel_set(tmp_path / "data" / "NV_64" / "full_decont" / DAY))
+    assert conv["d0"][2, 2] == pytest.approx(gs)
+    assert conv["tensors"].shape == (1, 2, 3, 3)

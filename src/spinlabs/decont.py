@@ -75,3 +75,34 @@ def load_conv_sublevel_set(folder: str | Path) -> dict[str, dict]:
     if not out:
         raise ValueError(f"no spin sublevel convergence files in {folder}")
     return dict(sorted(out.items(), key=lambda item: (-sublevel_info(item[0])[0], item[0])))
+
+
+def load_decontaminated(folder: str | Path) -> RawZFSData:
+    """The full-decontamination dataset of one packaged sublevel set (RawZFSData.decontaminated)."""
+    return RawZFSData.decontaminated(load_sublevel_set(folder))
+
+
+def decontaminate_conv_set(conv_set: dict[str, dict]) -> dict:
+    """One convergence pack's arrays from a sublevel set (load_conv_sublevel_set), decontaminated.
+
+    modes, perts and energies come from the m_s = S set; tensors and d0 (when every sublevel has
+    it) are combined per grid point with models.decontaminate_tensors. A point missing in any
+    sublevel stays NaN.
+    """
+    from spinlabs.models import decontaminate_tensors
+
+    names = list(conv_set)
+    spin = max(sublevel_info(n)[0] for n in names)
+    high = conv_set[high_spin(names)]
+    lows = [conv_set[n] for n in names if np.isclose(sublevel_info(n)[0], spin - 1)]
+    if len(lows) != round(2 * spin):
+        raise ValueError(f"expected {round(2 * spin)} m_s = {spin - 1:g} sublevels for S = {spin:g}, got {len(lows)}")
+    for low in lows:
+        if list(low["modes"]) != list(high["modes"]) or list(low["perts"]) != list(high["perts"]):
+            raise ValueError("the sublevels' convergence grids differ")
+    tensors = decontaminate_tensors(high["tensors"], [low["tensors"] for low in lows], spin)
+    out = {"modes": high["modes"], "perts": high["perts"], "tensors": tensors, "energies": high.get("energies"),
+           "metadata": {**high["metadata"], "spin_sublevel": None, "decontaminated_from": names}}
+    if "d0" in high and all("d0" in low for low in lows):
+        out["d0"] = decontaminate_tensors(high["d0"], [low["d0"] for low in lows], spin)
+    return out

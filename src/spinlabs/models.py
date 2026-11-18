@@ -240,6 +240,17 @@ class ZFSTensor:
         ref = None if self.reference is None else R @ np.asarray(self.reference, dtype=float) @ R.T
         return ZFSTensor(matrix=rotated_mat, unit=self.unit, reference=ref)
 
+    @classmethod
+    def decontaminated(cls, high_spin: ZFSTensor, flipped: Sequence[ZFSTensor], spin: float) -> ZFSTensor:
+        """The spin-decontaminated tensor (Biktagirov) from VASP's LDMATRIX output of the sublevels.
+
+        ``high_spin`` is the m_s = S run, ``flipped`` the m_s = S - 1 runs (one per flipped unpaired
+        band), each as VASP reports it; see :func:`decontaminate_tensors`. In the unit of ``high_spin``.
+        """
+        unit = high_spin.unit
+        matrix = decontaminate_tensors(high_spin.matrix, [t.to_unit(unit).matrix for t in flipped], spin)
+        return cls(matrix=matrix, unit=unit, reference=high_spin.reference)
+
 
 def check_original_indices(
     original_indices: np.ndarray,
@@ -1075,6 +1086,44 @@ def apply_spin_correction(tensor: ZFSTensor, scale: float = SPIN_CORRECTION_SCAL
     return ZFSTensor(matrix=tensor.matrix * scale, unit=tensor.unit)
 
 
+# --------------------------------------------------------------------------- #
+# full spin decontamination (Biktagirov): the alternative to the defect-band spin correction
+# --------------------------------------------------------------------------- #
+def vasp_dmatrix_scale(spin: float) -> float:
+    """What VASP's LDMATRIX divides the pair sum d_v by for a run whose FERWE/FERDO give spin ``spin``.
+
+    S(2S-1) for S >= 1 (the usual D = d_v / (S(2S-1))); below S = 1 VASP reports d_v unscaled
+    ("DMATRIX_CALC: WARNING: S= ... < 1/2, reporting D-matrix without 1/S/(2S-1) scaling").
+    """
+    return float(spin * (2 * spin - 1)) if spin >= 1 else 1.0
+
+
+def decontaminate_tensors(high_spin: np.ndarray, flipped: Sequence[np.ndarray], spin: float) -> np.ndarray:
+    """Spin-decontaminated D from the m_s = S and m_s = S - 1 sublevels, as VASP reports them.
+
+    Biktagirov et al.: D^SS = d / (S(S - 1/2)) for one determinant, and the decontaminated
+
+        D~ = (d(m_s = S) - mean d(m_s = S - 1)) / (2S - 1).
+
+    VASP's pair sum is d_v = 2 d (its D = d_v / (S(2S - 1)) is the same D^SS), and it reports
+    D_v = d_v / vasp_dmatrix_scale(S') with S' from the run's own FERWE/FERDO magnetization: S for
+    the m_s = S run, S - 1 for the spin flips (unscaled for S - 1 < 1). So
+
+        d(m_s) = vasp_dmatrix_scale(m_s) * D_v(m_s) / 2,
+
+    which for S = 1 and S = 3/2 gives D~ = (S(S - 1/2) D_v(S) - mean D_v(S - 1) / 2) / (2S - 1).
+    ``flipped`` are the m_s = S - 1 tensors, one per flipped unpaired band (2S of them).
+    """
+    spin = float(spin)
+    if spin < 1:
+        raise ValueError(f"spin decontamination needs S >= 1 (a zero-field splitting), got S = {spin:g}")
+    if not len(flipped):
+        raise ValueError("no m_s = S - 1 tensors to decontaminate with")
+    d_high = vasp_dmatrix_scale(spin) * np.asarray(high_spin, dtype=float) / 2
+    d_low = vasp_dmatrix_scale(spin - 1) * np.mean([np.asarray(t, dtype=float) for t in flipped], axis=0) / 2
+    return (d_high - d_low) / (2 * spin - 1)
+
+
 def _scale_correction_fields(fields: dict, scale: float = SPIN_CORRECTION_SCALE) -> dict:
     """Returns a copy of RawZFSData constructor kwargs with approx tensors scaled by ``scale``.
 
@@ -1625,6 +1674,72 @@ class RawZFSData:
                 scale = spin_correction_scale(fields.get("spin"))
                 LOGGER.info(f"applied spin correction (defect_band_approx, x{scale:.4g}): {p}")
         return obj.to_unit("J")
+
+    @classmethod
+    def decontaminated(cls, sublevels: dict[str, RawZFSData]) -> RawZFSData:
+        """One full-decontamination dataset from a set of per-sublevel datasets (spinlabs.decont).
+
+        ``sublevels`` maps sublevel names (ms_1, ms_0_127, ...; spinlabs.decont.sublevel_info) to
+        their RawZFSData, e.g. from spinlabs.decont.load_sublevel_set. The m_s = S set is the high-spin
+        one; every m_s = S - 1 set is a spin flip. The ground state and every perturbation entry
+        present in all of them are combined with ZFSTensor.decontaminated (see decontaminate_tensors).
+        The result is calc_method "full_decont" with no spin_sublevel, in MHz, ready for the analysis
+        like any other package.
+        """
+        from spinlabs.decont import sublevel_info
+
+        if not sublevels:
+            raise ValueError("no sublevels to decontaminate")
+        ms = {name: sublevel_info(name)[0] for name in sublevels}
+        spin = max(ms.values())
+        highs = [n for n, m in ms.items() if m == spin]
+        lows = [n for n, m in ms.items() if np.isclose(m, spin - 1)]
+        if len(highs) != 1:
+            raise ValueError(f"expected one m_s = {spin:g} sublevel, got {highs}")
+        if len(lows) != round(2 * spin):
+            raise ValueError(f"expected {round(2 * spin)} m_s = {spin - 1:g} sublevels for S = {spin:g}, got {lows}")
+        sets = {n: raw.to_unit("MHz") for n, raw in sublevels.items()}
+        high = sets[highs[0]]
+        for name, raw in sets.items():
+            for attr in ("defect", "cell_size", "pert_scale", "displacement_convention"):
+                if getattr(raw, attr) != getattr(high, attr):
+                    raise ValueError(f"sublevel {name}: {attr} {getattr(raw, attr)} != {getattr(high, attr)}")
+        if high.spin is not None and not np.isclose(high.spin, spin):
+            raise ValueError(f"the high-spin set says S = {high.spin:g}, its name m_s = {spin:g}")
+
+        def tensor(entry) -> np.ndarray:
+            return entry.zfs_tensor.matrix if isinstance(entry, PerturbationEntry) else np.asarray(entry["tensor"])
+
+        def combine(attr: str) -> dict:
+            keys = set(getattr(high, attr))
+            for raw in sets.values():
+                keys &= set(getattr(raw, attr))
+            out = {}
+            for key in sorted(keys, key=str):
+                hs = getattr(high, attr)[key]
+                matrix = decontaminate_tensors(tensor(hs), [tensor(getattr(sets[n], attr)[key]) for n in lows], spin)
+                if isinstance(hs, PerturbationEntry):
+                    out[key] = PerturbationEntry(order=hs.order, mode_indices=hs.mode_indices, amplitude=hs.amplitude,
+                                                 zfs_tensor=ZFSTensor(matrix=matrix, unit="MHz"), energy=hs.energy)
+                else:
+                    out[key] = {**hs, "tensor": matrix, "unit": "MHz"}
+            return out
+
+        if any(raw.ground_state_zfs is None for raw in sets.values()):
+            raise ValueError("every sublevel needs its ground-state tensor")
+        ground = ZFSTensor.decontaminated(high.ground_state_zfs, [sets[n].ground_state_zfs for n in lows], spin)
+        return replace(
+            high,
+            calc_method="full_decont",
+            spin=spin,
+            spin_sublevel=None,
+            spin_correction_applied=False,
+            ground_state_zfs=ground,
+            first_order=combine("first_order"),
+            second_order=combine("second_order"),
+            first_order_minus=combine("first_order_minus"),
+            metadata={**high.metadata, "decontaminated_from": sorted(sublevels)},
+        )
 
     def _apply_spin_correction(self) -> None:
         """Scales defect_band_approx tensors by the factor of ``self.spin`` exactly once.
