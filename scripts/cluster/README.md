@@ -84,6 +84,13 @@ from that snapshot.
   `--method decont` like `all`/`approx`. The per-sublevel files stay, with
   `spinlabs.decont.load_sublevel_set` / `load_conv_sublevel_set` and
   `spinlabs.registry.find_sublevel_sets` for the raw sublevels.
+- `spinlabs update <defect> --set EDIFF=1E-7 ISYM=0 [--dry-run] [--yes] [--skip-done]`: set INCAR
+  tags in every INCAR under a folder (ZFS_*, the trees' input/ and input/sublevels/*/, ZFS_full and
+  its ms_*/, runs/*), leaving out .spinlabs-code/ snapshots and data/. A tag is replaced where set
+  (inline comments kept) and appended where missing; a summary per tag (old -> new) comes first.
+  Only tags that must agree across all runs are allowed (accuracy, symmetry, parallelization);
+  occupation/spin, run-control and system-size tags are refused with the reason. Finished runs
+  (.done) are flagged, since their results keep the old value; --skip-done leaves them out.
 - `add_convergence_tree.py`: add the convergence folders to an existing defect folder
   (`--modes`, and `--steps` or `--pert`); the displacement and VASP binary default to the
   ones its trees use.

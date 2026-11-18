@@ -26,6 +26,7 @@ def build_parser() -> argparse.ArgumentParser:
     from spinlabs.cli.plotting import build_plot_parser
     from spinlabs.cli.run import build_run_parser
     from spinlabs.cli.tables import build_table_parser
+    from spinlabs.cli.update import build_update_parser
 
     parser = argparse.ArgumentParser(prog="spinlabs", description="SpinLabs command line tools")
     subparsers = parser.add_subparsers(dest="domain", required=True)
@@ -43,6 +44,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
 
     build_package_parser(subparsers.add_parser("package", help="Package (or with --scan, only parse) raw ZFS simulation data into a single .npz"))
+
+    build_update_parser(subparsers.add_parser("update", help="Set INCAR tags consistently across every run under a folder"))
 
     return parser
 
