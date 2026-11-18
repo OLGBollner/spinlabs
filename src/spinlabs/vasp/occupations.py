@@ -230,10 +230,12 @@ def expand_occupations(value: str) -> list[float]:
 
 
 def parse_occupations(incar: str) -> tuple[list[float], list[float]]:
-    """The (up, down) band occupations of an INCAR's DOCCUP and DOCCDO (the last of each wins)."""
+    """The (up, down) band occupations of an INCAR: DOCCUP/DOCCDO, else FERWE/FERDO (the last of each wins)."""
     up, dn = parse_tag(incar, "DOCCUP"), parse_tag(incar, "DOCCDO")
     if up is None or dn is None:
-        raise ValueError("INCAR has no DOCCUP/DOCCDO occupations")
+        up, dn = parse_tag(incar, "FERWE"), parse_tag(incar, "FERDO")
+    if up is None or dn is None:
+        raise ValueError("INCAR has no DOCCUP/DOCCDO or FERWE/FERDO occupations")
     up_occ, dn_occ = expand_occupations(up), expand_occupations(dn)
     if len(up_occ) != len(dn_occ):
         raise ValueError(f"DOCCUP has {len(up_occ)} bands, DOCCDO {len(dn_occ)}")

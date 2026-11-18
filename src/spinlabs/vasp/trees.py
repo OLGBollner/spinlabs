@@ -205,11 +205,15 @@ def decont_scf_incar(incar: str) -> str:
     return patch_restart_incar(_set_tags(incar, {"LDMATRIX": ".FALSE."}))
 
 
-def decont_sublevel_incar(incar: str, level) -> str:
+def decont_sublevel_incar(incar: str, level, high_spin) -> str:
     """Step 4: the ZFS of one spin sublevel (an occupations.SpinSublevel) from the step-2 WAVECAR.
 
-    ALGO = None keeps the WAVECAR's orbitals; only the occupations (and NUPDOWN) differ between
-    the sublevels. Nothing is written back (LWAVE/LCHARG off), so the WAVECAR can be a symlink.
+    VASP itself keeps the high-spin (ms = S) state, ``high_spin``: FERWE/FERDO with ISMEAR = -2
+    and NUPDOWN = 2S. LDMATRIX evaluates the D-tensor of ``level``'s determinant, given by
+    DOCCUP/DOCCDO (the two sets are separate in the decontamination build of VASP; with
+    smearing instead, degenerate levels such as the NV e pair get half occupations). ALGO = None
+    keeps the WAVECAR's orbitals. Nothing is written back (LWAVE/LCHARG off), so the WAVECAR can
+    be a symlink.
     """
     return _set_tags(
         incar,
@@ -218,7 +222,10 @@ def decont_sublevel_incar(incar: str, level) -> str:
             "ISTART": "1",
             "ICHARG": "0",
             "LDMATRIX": ".TRUE.",
-            "NUPDOWN": str(level.nupdown),
+            "ISMEAR": "-2",
+            "NUPDOWN": str(high_spin.nupdown),
+            "FERWE": high_spin.doccup(),
+            "FERDO": high_spin.doccdo(),
             "DOCCUP": level.doccup(),
             "DOCCDO": level.doccdo(),
             "LWAVE": ".FALSE.",
@@ -265,7 +272,7 @@ def write_decont_inputs(inp: Path, incar: str, levels_dir: Path | None = None) -
     for level in levels:
         d = (levels_dir if levels_dir is not None else inp / SUBLEVELS_DIR) / level.name
         d.mkdir(parents=True, exist_ok=True)
-        (d / "INCAR").write_text(decont_sublevel_incar(incar, level))
+        (d / "INCAR").write_text(decont_sublevel_incar(incar, level, levels[0]))  # levels[0]: ms = S
     return [level.name for level in levels]
 
 

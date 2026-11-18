@@ -83,13 +83,14 @@ def _check_decont_incars(folder: Path) -> list[str]:
         if not text:
             problems.append(f"FAIL: missing input/{name}")
             continue
-        for tag, want in (("ALGO", "none"), ("ISTART", "1"), ("LDMATRIX", ".true."), ("LWAVE", ".false.")):
+        for tag, want in (("ALGO", "none"), ("ISTART", "1"), ("LDMATRIX", ".true."), ("LWAVE", ".false."),
+                          ("ISMEAR", "-2")):
             if (_tag_value(text, tag) or "").lower() != want:
                 problems.append(f"FAIL: {name}: {tag} is {_tag_value(text, tag)}, should be {want}")
         isym = _tag_value(text, "ISYM")
         if isym != "0":
             problems.append(f"WARNING: {name}: ISYM={isym if isym is not None else 'unset'}, trees are built with ISYM=0")
-        for tag in ("NUPDOWN", "DOCCUP", "DOCCDO"):
+        for tag in ("NUPDOWN", "FERWE", "FERDO", "DOCCUP", "DOCCDO"):
             if _tag_value(text, tag) is None:
                 problems.append(f"FAIL: {name}: {tag} not set")
     return problems

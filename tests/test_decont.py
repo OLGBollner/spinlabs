@@ -39,6 +39,13 @@ def test_nv_triplet_gives_ms1_and_the_two_spin_flips():
         assert sum(level.up) + sum(level.dn) == sum(NV_UP) + sum(NV_DN)
 
 
+def test_occupations_are_read_from_ferwe_when_there_is_no_doccup():
+    incar = "FERWE = 125*1.0 3*1.0 128*0.0\nFERDO = 125*1.0 1*1.0 2*0.0 128*0.0\n"
+    assert parse_occupations(incar) == (NV_UP, NV_DN)
+    with pytest.raises(ValueError, match="FERWE"):
+        parse_occupations("ENCUT = 520\n")
+
+
 def test_quartet_gives_ms_three_halves_and_three_flips():
     up, dn = [1.0] * 7 + [0.0] * 3, [1.0] * 4 + [0.0] * 6
     levels = spin_sublevels(up, dn)
@@ -75,13 +82,18 @@ def test_scf_incar_writes_the_wavecar_and_skips_ldmatrix():
         assert _tag(incar, tag) == value, tag
 
 
-def test_sublevel_incar_reads_the_wavecar_with_algo_none():
-    level = spin_sublevels(*parse_occupations(ZFS_INCAR))[2]
-    incar = decont_sublevel_incar(ZFS_INCAR, level)
-    for tag, value in (("ALGO", "None"), ("ISTART", "1"), ("ICHARG", "0"), ("LDMATRIX", ".TRUE."), ("NUPDOWN", "0"),
-                       ("LWAVE", ".FALSE."), ("LCHARG", ".FALSE."), ("NSW", "0"), ("IBRION", "-1"),
+def test_sublevel_incar_keeps_the_triplet_for_vasp_and_gives_ldmatrix_the_singlet():
+    levels = spin_sublevels(*parse_occupations(ZFS_INCAR))
+    incar = decont_sublevel_incar(ZFS_INCAR, levels[2], levels[0])
+    for tag, value in (("ALGO", "None"), ("ISTART", "1"), ("ICHARG", "0"), ("LDMATRIX", ".TRUE."),
+                       ("LWAVE", ".FALSE."), ("LCHARG", ".FALSE."), ("NSW", "0"), ("IBRION", "-1"), ("ENCUT", "520"),
+                       # VASP's own occupations: the ms = S triplet
+                       ("ISMEAR", "-2"), ("NUPDOWN", "2"),
+                       ("FERWE", "125*1.0 1*1.0 1*1.0 1*1.0 128*0.0"),
+                       ("FERDO", "125*1.0 1*1.0 1*0.0 1*0.0 128*0.0"),
+                       # LDMATRIX: the ms_0_128 determinant
                        ("DOCCUP", "125*1.0 1*1.0 1*1.0 1*0.0 128*0.0"),
-                       ("DOCCDO", "125*1.0 1*1.0 1*0.0 1*1.0 128*0.0"), ("ENCUT", "520")):
+                       ("DOCCDO", "125*1.0 1*1.0 1*0.0 1*1.0 128*0.0")):
         assert _tag(incar, tag) == value, tag
     assert len(re.findall(r"^\s*ALGO\s*=", incar, re.M)) == 1
 
