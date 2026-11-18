@@ -59,6 +59,10 @@ from that snapshot.
   `ms_<S-1>_<k>`: k's electron moved to the down channel, NUPDOWN = 2S-2 (NV: `ms_1`,
   `ms_0_127`, `ms_0_128`). The runner sees `input/sublevels/` and does, per run directory:
   1. perturb the structure, 2. the SCF (`.scf_done` once converged, from the OSZICAR),
+  2b. the down-spin orbitals of every degenerate unpaired level (the NV e pair) rotated onto the
+  up-spin ones in its WAVECAR (`python -m spinlabs.vasp.wavecar align .`, `.wavecar_aligned`; the
+  SCF picks their basis at random per channel, and a spin flip must land in the orbital it left;
+  a run whose channels cannot be matched gets a CHECK file and no sublevel runs),
   3. a subfolder per sublevel with its INCAR, the run's POSCAR/KPOINTS/POTCAR and
   `WAVECAR -> ../WAVECAR`, 4. VASP there (ALGO=None, ISTART=1, LWAVE off); a sublevel gets
   `.done` with its ZFS block, the run directory once all have it. WAVECAR is kept; CHGCAR/CHG

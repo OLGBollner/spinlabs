@@ -4,6 +4,8 @@ import os
 import subprocess
 from pathlib import Path
 
+import numpy as np
+
 from test_displacement_scripts import ENV, REPO, SCRIPTS, STEP, _defect
 
 INCAR = """ENCUT = 520
@@ -21,11 +23,33 @@ ZFS = (" Spin-spin contribution to zero-field splitting tensor (MHz)\n ---\n"
        "  -1.0  -1.0  2.0  0.0  0.0  0.0\n ---\n")
 
 
+def _scf_wavecar(path: Path, nb: int = 8, nplw: int = 40) -> None:
+    """The WAVECAR the fake SCF writes: one k-point, complex64; the unpaired pair (bands 3, 4 of the
+    INCAR above) degenerate in both channels, the down pair rotated 70 deg against the up pair."""
+    rng = np.random.default_rng(1)
+    q, _ = np.linalg.qr(rng.normal(size=(nplw, nb)) + 1j * rng.normal(size=(nplw, nb)))
+    up = q.T
+    down = up.copy()
+    t = np.radians(70.0)
+    down[2:4] = np.array([[np.cos(t), np.sin(t)], [-np.sin(t), np.cos(t)]]) @ up[2:4]
+    eig = [0.0, 1.0, 5.0, 5.0, 8.0, 9.0, 10.0, 11.0]
+    recl = nplw * 8 + 8 * (4 + 3 * nb)
+    records = [np.array([recl, 2, 45200], dtype=np.float64), np.array([1, nb, 520.0, *np.eye(3).ravel(), 0.0])]
+    for coeffs in (up, down):
+        records.append(np.array([nplw, 0, 0, 0, *[x for b in range(nb) for x in (eig[b], 0.0, 1.0)]]))
+        records.extend(np.asarray(c, dtype=np.complex64) for c in coeffs)
+    with open(path, "wb") as f:
+        for rec in records:
+            raw = rec.tobytes()
+            f.write(raw + b"\0" * (recl - len(raw)))
+
+
 def _fake_slurm(tmp_path: Path) -> Path:
     """srun as a fake VASP: an ALGO=None run writes a ZFS block (none in the folder named by $FAIL_IN),
     the SCF writes WAVECAR, CHGCAR and a converged OSZICAR. Every call is logged to $SRUN_LOG."""
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir(exist_ok=True)
+    _scf_wavecar(bin_dir / "WAVECAR.scf")
     (bin_dir / "srun").write_text(f"""#!/bin/sh
 here=$(basename "$(pwd)")
 if grep -q '^ALGO = None' INCAR; then
@@ -35,7 +59,7 @@ if grep -q '^ALGO = None' INCAR; then
   echo ' Elapsed time (sec):  10.0' >> OUTCAR
 else
   echo "scf $here" >> "$SRUN_LOG"
-  echo wave > WAVECAR; echo chg > CHGCAR
+  cp "{bin_dir}/WAVECAR.scf" WAVECAR; echo chg > CHGCAR
   printf 'DAV:   1    -0.1E+02   -0.1E-05\\n   1 F= -10.0\\n' > OSZICAR
   echo ' Elapsed time (sec):  100.0' > OUTCAR
 fi
@@ -74,6 +98,7 @@ def test_each_run_does_the_scf_then_every_sublevel_from_its_wavecar(tmp_path):
     assert sorted(p.name for p in (folder / "runs").iterdir() if (p / ".done").is_file()) == RUNS
     for d in [folder / "runs" / run for run in RUNS]:
         assert (d / "WAVECAR").is_file() and not (d / "WAVECAR").is_symlink()  # kept
+        assert (d / ".wavecar_aligned").is_file()
         assert not (d / "CHGCAR").exists()
         for level in SUBLEVELS:
             assert (d / level / ".done").is_file()
@@ -84,6 +109,11 @@ def test_each_run_does_the_scf_then_every_sublevel_from_its_wavecar(tmp_path):
     # the ground state is its own job: the tree's job leaves ZFS_full as it was made
     ground = folder.parent / "ZFS_full"
     assert not (ground / ".attempted").exists() and not (ground / "OUTCAR").exists()
+    # every SCF's down e pair was rotated onto the up pair before the sublevels ran
+    assert r.stdout.count("aligned down bands [3, 4] to up: rotation 70.0 -> 0.00 deg") == len(RUNS)
+    from spinlabs.vasp.wavecar import pair_overlap
+
+    assert np.allclose(np.abs(pair_overlap(folder / "runs" / RUNS[0] / "WAVECAR", (3, 4))), np.eye(2), atol=1e-5)
     log = (tmp_path / "srun.log").read_text().split("\n")
     assert sum(line.startswith("scf") for line in log) == len(RUNS)
     assert sum(line.startswith("zfs") for line in log) == len(RUNS) * len(SUBLEVELS)
@@ -110,6 +140,7 @@ def test_the_ground_state_folder_is_ready_to_submit_on_its_own(tmp_path):
     assert r.returncode == 0, r.stdout + r.stderr
     assert (ground / ".done").is_file() and (ground / "WAVECAR").is_file()
     assert (ground / "CHGCAR").is_file()  # kept in the ground state (the runs drop theirs)
+    assert (ground / ".wavecar_aligned").is_file() and "rotation 70.0 -> 0.00 deg" in r.stdout
     for level in SUBLEVELS:
         assert (ground / level / ".done").is_file()
         assert os.readlink(ground / level / "WAVECAR") == "../WAVECAR"
@@ -162,3 +193,14 @@ def test_an_unconverged_scf_runs_no_sublevel(tmp_path):
     assert r.returncode == 1
     ground = folder.parent / "ZFS_full"
     assert not (ground / ".scf_done").exists() and not (ground / "ms_1" / "OUTCAR").exists()
+
+
+def test_a_wavecar_that_cannot_be_aligned_stops_the_sublevels(tmp_path):
+    folder = _tree(tmp_path)
+    bin_dir = _fake_slurm(tmp_path)
+    (bin_dir / "WAVECAR.scf").write_bytes(b"not a wavecar")
+    r = _run(tmp_path, folder, bin_dir=bin_dir)
+    assert r.returncode == 0, r.stdout + r.stderr
+    run = folder / "runs" / RUNS[0]
+    assert (run / ".scf_done").is_file() and not (run / ".wavecar_aligned").exists()
+    assert not (run / "ms_1").exists() and "WAVECAR alignment failed" in (run / "CHECK").read_text()

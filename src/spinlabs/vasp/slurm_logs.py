@@ -81,6 +81,8 @@ def _attempt_reason(attempt: _Attempt, run_dir: Path) -> str:
         return "creating the perturbed structure failed"
     if "not the intended displacement" in text:
         return "perturbed POSCAR failed the displacement check"
+    if "WAVECAR alignment failed" in text:
+        return "the WAVECAR's degenerate down-spin orbitals could not be aligned to the up spin"
     if "no sublevel runs" in text:
         return "the SCF before the spin sublevels failed its check"
     if m := _VASP_EXIT.search(text):

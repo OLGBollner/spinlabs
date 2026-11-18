@@ -13,7 +13,10 @@
 #
 # A tree whose input/ has a sublevels/ folder (create_perturbation_tree.py --full-decont) runs the
 # full spin decontamination in every run directory: 1. perturb the structure, 2. SCF with
-# input/INCAR, which writes the WAVECAR (.scf_done), 3. one subfolder per spin sublevel
+# input/INCAR, which writes the WAVECAR (.scf_done), 2b. the down-spin orbitals of every degenerate
+# unpaired level (the NV e pair) rotated onto the up-spin ones in that WAVECAR (.wavecar_aligned:
+# the SCF picks their basis at random in each channel, and a spin flip must put the electron in
+# the orbital it left), 3. one subfolder per spin sublevel
 # (input/sublevels/<name>: ms=S and every ms=S-1 spin flip), 4. in each, the ZFS from ../WAVECAR
 # (a symlink) with ALGO=None. The run directory is done once every sublevel has its ZFS block;
 # its WAVECAR is kept.
@@ -282,6 +285,21 @@ decont_scf() {
   return 0
 }
 
+# decont_align LABEL: step 2b, once per SCF (.wavecar_aligned). 0 = aligned (or nothing to align).
+decont_align() {
+  if [ -f .wavecar_aligned ]; then
+    return 0
+  fi
+  if ALIGN_MSG=$(python -m spinlabs.vasp.wavecar align . 2>&1); then
+    echo "$ID: $1: $ALIGN_MSG"
+    : > .wavecar_aligned
+    return 0
+  fi
+  echo "$ID: $1: $ALIGN_MSG -- no sublevel runs"
+  printf '%s\n' "$ALIGN_MSG" > CHECK
+  return 1
+}
+
 # decont_sublevels LABEL: steps 3 and 4, the ZFS of every spin sublevel without .done from the
 # run directory's WAVECAR; the run directory gets .done once all have their ZFS block.
 decont_sublevels() {
@@ -362,12 +380,14 @@ run_one() {
     cd "$TARGET_DIR"
     echo "$ID: starting job for $label"
     echo "$ID: $label: SCF finished earlier -- ZFS of the sublevels left from its WAVECAR"
-    decont_sublevels "$label"
+    if decont_align "$label"; then
+      decont_sublevels "$label"
+    fi
     cd "$HEAD_DIR"
     release_lock
     return 0
   fi
-  rm -f "$TARGET_DIR"/.scf_done
+  rm -f "$TARGET_DIR"/.scf_done "$TARGET_DIR"/.wavecar_aligned
   # Files only: a decontamination tree's input/ also holds the sublevels/ folder.
   for f in "$INPUT_DIR"/*; do
     if [ -f "$f" ]; then
@@ -402,7 +422,7 @@ run_one() {
     echo "$ID: $label: the unperturbed structure (input/POSCAR)"
   fi
   if [ "$DECONT" = 1 ]; then
-    if decont_scf "$label"; then
+    if decont_scf "$label" && decont_align "$label"; then
       decont_sublevels "$label"
     fi
     cd "$HEAD_DIR"
@@ -450,9 +470,10 @@ if [ "$ORDER" = "ground_state" ]; then
   if scf_reusable .; then
     echo "$ID: ground state: SCF finished earlier -- ZFS of the sublevels left from its WAVECAR"
   else
-    rm -f .scf_done
+    rm -f .scf_done .wavecar_aligned
     decont_scf "ground state" || exit 1
   fi
+  decont_align "ground state" || exit 1
   decont_sublevels "ground state"
   [ -f .done ] && [ "$VASP_FAILED" -eq 0 ] || exit 1
   exit 0

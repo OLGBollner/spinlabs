@@ -131,3 +131,95 @@ def align_down_pair(path: str | Path, bands, out: str | Path | None = None, k: i
     down = read_bands(target, 1, bands, k).astype(np.complex128)
     write_bands(target, 1, bands, u.T @ down, k)  # row j of the result: sum_i U_ij down_i
     return PairAlignment(bands, np.abs(m), np.abs(pair_overlap(target, bands, k)), u)
+
+
+def read_eigenvalues(path: str | Path, spin: int, k: int = 0) -> np.ndarray:
+    """Band eigenvalues (eV) of 0-based ``spin`` at ``k``, from the k-point header record."""
+    path = Path(path)
+    header = read_header(path)
+    with open(path, "rb") as f:
+        f.seek(header.k_header_record(spin, k) * header.recl)
+        rec = np.fromfile(f, dtype=np.float64, count=4 + 3 * header.nb)
+    return rec[4::3]
+
+
+def degenerate_groups(bands, eigenvalues: np.ndarray, tol: float) -> list[tuple[int, ...]]:
+    """1-based ``bands`` split into runs whose neighbouring eigenvalues differ by at most ``tol`` (eV)."""
+    groups: list[list[int]] = []
+    for band in sorted(bands):
+        if groups and band == groups[-1][-1] + 1 and abs(eigenvalues[band - 1] - eigenvalues[band - 2]) <= tol:
+            groups[-1].append(band)
+        else:
+            groups.append([band])
+    return [tuple(g) for g in groups]
+
+
+DEGENERACY_TOL = 1e-3  # eV: bands this close count as one degenerate level
+MIN_SPAN = 0.9  # smallest singular value of the up/down overlap block for the channels to share a level
+
+
+def align_unpaired(run_dir: str | Path, tol: float = DEGENERACY_TOL, min_span: float = MIN_SPAN) -> list[PairAlignment]:
+    """Align the down channel to the up channel for every degenerate level among the unpaired bands.
+
+    The unpaired bands (occupied up, empty down) come from the run's INCAR occupations
+    (DOCCUP/DOCCDO or FERWE/FERDO, spinlabs.vasp.occupations); they are grouped by the up-channel
+    eigenvalues in ``run_dir``/WAVECAR, and each group of two or more bands is aligned in place
+    (:func:`align_down_pair`). A non-degenerate band needs nothing. ValueError when a group is
+    not degenerate in the down channel too, or when the two channels' bands do not span the same
+    space (smallest singular value of the overlap below ``min_span``): the flips would then not
+    move an electron into the orbital it left, and no alignment can fix that.
+    """
+    from spinlabs.vasp.occupations import parse_occupations
+
+    run_dir = Path(run_dir)
+    wavecar = run_dir / "WAVECAR"
+    up, dn = parse_occupations((run_dir / "INCAR").read_text())
+    unpaired = [i + 1 for i, (u, d) in enumerate(zip(up, dn)) if u > 0.5 and d < 0.5]
+    if not unpaired:
+        raise ValueError(f"no unpaired band in the occupations of {run_dir / 'INCAR'}")
+    eig_up, eig_dn = read_eigenvalues(wavecar, 0), read_eigenvalues(wavecar, 1)
+    results = []
+    for group in degenerate_groups(unpaired, eig_up, tol):
+        if len(group) < 2:
+            continue
+        spread = np.ptp(eig_dn[[b - 1 for b in group]])
+        if spread > tol:
+            raise ValueError(
+                f"bands {group} are degenerate in the up channel but spread {spread * 1e3:.2f} meV in the down channel"
+            )
+        span = np.linalg.svd(pair_overlap(wavecar, group), compute_uv=False)
+        if span.min() < min_span:
+            raise ValueError(
+                f"bands {group}: the up and down channels do not span the same level "
+                f"(overlap singular values {np.round(span, 3).tolist()} < {min_span})"
+            )
+        results.append(align_down_pair(wavecar, group))
+    return results
+
+
+def main(argv: list[str] | None = None) -> int:
+    """``python -m spinlabs.vasp.wavecar align DIR``: align DIR/WAVECAR (see :func:`align_unpaired`)."""
+    import argparse
+
+    ap = argparse.ArgumentParser(prog="python -m spinlabs.vasp.wavecar")
+    ap.add_argument("command", choices=["align"])
+    ap.add_argument("run_dir", type=Path)
+    args = ap.parse_args(argv)
+    try:
+        results = align_unpaired(args.run_dir)
+    except (ValueError, OSError) as error:
+        print(f"WAVECAR alignment failed: {error}")
+        return 1
+    if not results:
+        print("WAVECAR: no degenerate unpaired level, nothing to align")
+    for r in results:
+        line = f"aligned down bands {list(r.bands)} to up: "
+        if len(r.bands) == 2:
+            line += f"rotation {r.angle():.1f} -> {r.angle('after'):.2f} deg, "
+        line += f"|<up_i|down_i>| {np.round(np.diag(r.before), 3).tolist()} -> {np.round(np.diag(r.after), 3).tolist()}"
+        print(line)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
