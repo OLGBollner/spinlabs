@@ -234,6 +234,80 @@ trap 'release_lock; exit 143' TERM
 trap 'release_lock; exit 130' INT
 # ---- end lock ----
 
+# ---- job state ----
+# A job past its time limit stops accepting steps -- srun fails at once with "Unable to create step
+# ... Job/step already completing or completed" -- but its batch shell is not always signalled: on
+# Dardel (job 27178920, 2026-11-03) a task past its 45 min limit got no TERM, ran on for 4 min and
+# stamped 58 runs it never started as attempted. So before each run, and when srun fails, the task
+# asks Slurm whether the job still runs, and stops if not. No answer (no squeue, not in a SLURM job)
+# counts as running, as before.
+STOP=no
+STOP_WHY=""
+JOB_STATE=""
+job_ending() {
+  [ -n "${SLURM_JOB_ID:-}" ] || return 1
+  JOB_STATE=$(squeue -h -j "$SLURM_JOB_ID" -o %T 2>/dev/null | head -n 1)
+  if [ -n "$JOB_STATE" ] && [ "$JOB_STATE" != "RUNNING" ]; then
+    STOP_WHY="job ${SLURM_JOB_ID} is $JOB_STATE (past its time limit or cancelled)"
+    return 0
+  fi
+  return 1
+}
+
+# Nor is a run started that the time limit would cut off: the job has less time left than the
+# longest run this task has done (RUN_SECONDS, measured; a job script may set it as a first
+# estimate, else the task's first run always starts). squeue gives the time left as [D-]HH:MM:SS,
+# MM:SS or SS; UNLIMITED, NOT_SET or INVALID mean no limit to keep to.
+RUN_SECONDS=${RUN_SECONDS:-}
+TIME_LEFT=""
+time_left() {
+  TIME_LEFT=""
+  [ -n "${SLURM_JOB_ID:-}" ] || return 0
+  TIME_LEFT=$(squeue -h -j "$SLURM_JOB_ID" -o %L 2>/dev/null | head -n 1 | awk -F'[-:]' '
+    /^[0-9][0-9:-]*$/ {
+      s = 0; first = 1
+      if (index($0, "-")) { s = $1 * 86400; first = 2 }
+      m = 1
+      for (k = NF; k >= first; k--) { s += $k * m; m *= 60 }
+      print s
+    }')
+}
+too_little_time() {
+  [ -n "$RUN_SECONDS" ] || return 1
+  time_left
+  if [ -n "$TIME_LEFT" ] && [ "$TIME_LEFT" -lt "$RUN_SECONDS" ]; then
+    STOP_WHY="${TIME_LEFT} s left in job ${SLURM_JOB_ID:-}, a run takes up to ${RUN_SECONDS} s"
+    return 0
+  fi
+  return 1
+}
+
+# job_end_stop LABEL: after a failed srun, from inside a run directory: 0 when the job is ending
+# (srun was refused or cut off, not a VASP failure). The run keeps the .attempted it had before, so
+# it is not counted as failed by this submission, and the task starts nothing more (STOP).
+job_end_stop() {
+  job_ending || return 1
+  if [ -n "${PREV_ATTEMPT:-}" ]; then
+    printf '%s\n' "$PREV_ATTEMPT" > "$HEAD_DIR/$TARGET_DIR/.attempted"
+  elif [ "$ORDER" != "ground_state" ]; then
+    rm -f "$HEAD_DIR/$TARGET_DIR/.attempted"
+  fi
+  echo "$ID: $1 not run -- the job is $JOB_STATE"
+  STOP=yes
+  return 0
+}
+
+# note_run_seconds: the longest run so far (from RUN_START) is what a next run is expected to need
+# (too_little_time); a run the job's end cut short says nothing about that.
+note_run_seconds() {
+  [ "$STOP" = yes ] && return 0
+  run_seconds=$(( $(date +%s) - RUN_START ))
+  if [ -z "$RUN_SECONDS" ] || [ "$run_seconds" -gt "$RUN_SECONDS" ]; then
+    RUN_SECONDS=$run_seconds
+  fi
+}
+# ---- end job state ----
+
 # The submission this task belongs to: a run directory's .attempted names the last one that
 # started it. A failed run is retried by the next submission, not by the other tasks of this one.
 ARRAY_TAG=${SLURM_ARRAY_JOB_ID:-${SLURM_JOB_ID:-local-$$}}
@@ -268,8 +342,16 @@ decont_scf() {
     echo "$ID: SCF done for $1"
   else
     status=$?
+    if job_end_stop "$1 (SCF)"; then
+      return 1
+    fi
     echo "$ID: VASP exited with $status in the SCF of $1"
     VASP_FAILED=$((VASP_FAILED + 1))
+    if [ "${RESUME:-no}" = yes ]; then
+      # A restart from the run's own density that crashes must not be repeated.
+      rm -f CHGCAR
+      echo "$ID: $1 crashed after restarting from its own CHGCAR -- dropped; the next attempt starts from the input CHGCAR"
+    fi
     return 1
   fi
   if [ ! -f WAVECAR ]; then
@@ -309,6 +391,16 @@ decont_sublevels() {
       echo "$ID: $1: sublevel $s done earlier"
       continue
     fi
+    if [ "$STOP" = yes ]; then
+      left=$((left + 1))
+      continue
+    fi
+    if job_ending; then  # past the time limit (or cancelled): no step would start
+      echo "$ID: $1: sublevel $s not run -- the job is $JOB_STATE"
+      STOP=yes
+      left=$((left + 1))
+      continue
+    fi
     mkdir -p "$s"
     rm -f "$s/OUTCAR" "$s/OSZICAR" "$s/WAVECAR"
     cp POSCAR KPOINTS POTCAR "$s"/
@@ -322,6 +414,11 @@ decont_sublevels() {
       echo "$ID: $1: sublevel $s finished"
     else
       status=$?
+      if job_end_stop "$1, sublevel $s"; then
+        left=$((left + 1))
+        cd "$HEAD_DIR/$TARGET_DIR"
+        continue
+      fi
       echo "$ID: VASP exited with $status for $1, sublevel $s"
       VASP_FAILED=$((VASP_FAILED + 1))
     fi
@@ -342,6 +439,8 @@ decont_sublevels() {
       rm -f CHGCAR CHG
       echo "$ID: Done! $1 (all sublevels: $SUBLEVELS; WAVECAR kept)"
     fi
+  elif [ "$STOP" = yes ]; then
+    echo "$ID: $1: $left sublevel(s) left -- the job ended; the next submission runs them from the WAVECAR"
   else
     echo "$ID: $1: $left sublevel(s) without a ZFS block -- the next submission reruns them from the WAVECAR"
   fi
@@ -362,6 +461,11 @@ run_one() {
     echo "$ID: skipping $label -- already attempted by another task of this array"
     return 0
   fi
+  # Past the time limit (or cancelled) no step would start; with too little time left it would be cut off.
+  if job_ending || too_little_time; then
+    STOP=yes
+    return 0
+  fi
   acquire_lock "$TARGET_DIR" || return 0
   # Another job may have finished this directory before the lock was ours.
   if is_done "$TARGET_DIR"; then
@@ -374,28 +478,48 @@ run_one() {
     release_lock
     return 0
   fi
+  PREV_ATTEMPT=$(cat "$TARGET_DIR/.attempted" 2>/dev/null || true)
   printf '%s\n' "$ARRAY_TAG" > "$TARGET_DIR/.attempted"
   rm -f "$TARGET_DIR"/CHECK "$TARGET_DIR"/.done  # from an earlier attempt
   if [ "$DECONT" = 1 ] && scf_reusable "$TARGET_DIR"; then
     cd "$TARGET_DIR"
     echo "$ID: starting job for $label"
     echo "$ID: $label: SCF finished earlier -- ZFS of the sublevels left from its WAVECAR"
+    RUN_START=$(date +%s)
     if decont_align "$label"; then
       decont_sublevels "$label"
     fi
+    note_run_seconds
     cd "$HEAD_DIR"
     release_lock
     return 0
   fi
   rm -f "$TARGET_DIR"/.scf_done "$TARGET_DIR"/.wavecar_aligned
+  # The INCAR reads a CHGCAR (ICHARG = 1). An earlier attempt that left a complete one of its own
+  # restarts from it; else the ground-state one from input/ goes in. VASP writes CHGCAR at the end
+  # of the SCF, so a run cut off mid-SCF leaves none, or part of one (spinlabs.vasp.restart checks).
+  RESUME=no
+  OWN_CHGCAR=""
+  if [ -s "$TARGET_DIR/CHGCAR" ]; then
+    if OWN_CHGCAR=$(python -m spinlabs.vasp.restart "$TARGET_DIR/CHGCAR" 2>&1); then
+      RESUME=yes
+    fi
+  fi
   # Files only: a decontamination tree's input/ also holds the sublevels/ folder.
   for f in "$INPUT_DIR"/*; do
-    if [ -f "$f" ]; then
-      cp "$f" "$TARGET_DIR"/
+    if [ ! -f "$f" ] || { [ "$RESUME" = yes ] && [ "${f##*/}" = CHGCAR ]; }; then
+      continue
     fi
+    cp "$f" "$TARGET_DIR"/
   done
   cd "$TARGET_DIR"
   echo "$ID: starting job for $label"
+  if [ "$RESUME" = yes ]; then
+    echo "$ID: $label restarts from its own CHGCAR"
+  elif [ -n "$OWN_CHGCAR" ]; then
+    echo "$ID: $label: its own CHGCAR is not usable ($OWN_CHGCAR) -- starting from the input CHGCAR"
+  fi
+  RUN_START=$(date +%s)
   if [ $# -gt 0 ]; then
     # In the if-condition a failing script does not trip set -e, so the job still
     # reports the failure and the script's output before exiting.
@@ -425,6 +549,7 @@ run_one() {
     if decont_scf "$label" && decont_align "$label"; then
       decont_sublevels "$label"
     fi
+    note_run_seconds
     cd "$HEAD_DIR"
     release_lock
     return 0
@@ -433,14 +558,36 @@ run_one() {
   # leave its other directories unattempted; the task exits nonzero at the end instead.
   if srun $binary; then
     echo "$ID: Done! $label"
+    # The longest run so far is what a next run is expected to need (too_little_time).
+    run_seconds=$(( $(date +%s) - RUN_START ))
+    if [ -z "$RUN_SECONDS" ] || [ "$run_seconds" -gt "$RUN_SECONDS" ]; then
+      RUN_SECONDS=$run_seconds
+    fi
   else
     status=$?
+    if job_ending; then
+      # srun was refused (or cut off) because the job is ending, not because VASP failed: the run
+      # keeps the .attempted it had before, so it is not counted as a failure of this submission.
+      # A CHGCAR it may have written is judged on the next attempt.
+      if [ -n "$PREV_ATTEMPT" ]; then printf '%s\n' "$PREV_ATTEMPT" > .attempted; else rm -f .attempted; fi
+      echo "$ID: $label not run -- the job is $JOB_STATE"
+      cd "$HEAD_DIR"
+      release_lock
+      STOP=yes
+      return 0
+    fi
     echo "$ID: VASP exited with $status for $label"
     VASP_FAILED=$((VASP_FAILED + 1))
+    if [ "$RESUME" = yes ]; then
+      # A restart from the run's own density that crashes must not be repeated: the next attempt
+      # starts from the ground-state CHGCAR again.
+      rm -f CHGCAR
+      echo "$ID: $label crashed after restarting from its own CHGCAR -- dropped; the next attempt starts from the input CHGCAR"
+    fi
   fi
   # The one read of this OUTCAR's ZFS block: only a complete run gets .done and loses its
-  # restart files. VASP can exit 0 without writing a ZFS block; such a directory gets no .done,
-  # so it is retried and needs CHGCAR/CHG to resume. (A cancelled job never reaches this line.)
+  # restart files. VASP can exit 0 without writing a ZFS block; such a directory gets no .done and
+  # is retried, from its own CHGCAR if complete. (A job that ends meanwhile returns above.)
   if [ -f OUTCAR ] && grep -qzP "$ZFS_REGEX_PATTERN" OUTCAR; then
     : > .done
     echo "$ID: removing excess VASP results (WAVECAR, CHGCAR, CHG)"
@@ -450,7 +597,7 @@ run_one() {
     python "$SCRIPTS/check_run.py" "$HEAD_DIR/$TARGET_DIR" --phonons "$PHONON_PATH" --write-check \
       | sed "s/^/$ID: /" || true
   else
-    echo "$ID: $label did not finish -- keeping CHGCAR/CHG so it can resume"
+    echo "$ID: $label did not finish -- the next attempt restarts from its CHGCAR if VASP left a complete one"
   fi
   cd "$HEAD_DIR"
   release_lock
@@ -471,10 +618,14 @@ if [ "$ORDER" = "ground_state" ]; then
     echo "$ID: ground state: SCF finished earlier -- ZFS of the sublevels left from its WAVECAR"
   else
     rm -f .scf_done .wavecar_aligned
-    decont_scf "ground state" || exit 1
+    if ! decont_scf "ground state"; then
+      [ "$STOP" = yes ] && exit 0  # the job ended: the next submission starts the SCF again
+      exit 1
+    fi
   fi
   decont_align "ground state" || exit 1
   decont_sublevels "ground state"
+  [ "$STOP" = yes ] && exit 0  # the job ended: the next submission runs the sublevels left
   [ -f .done ] && [ "$VASP_FAILED" -eq 0 ] || exit 1
   exit 0
 fi
@@ -489,6 +640,7 @@ VASP_FAILED=0
 # still have theirs left. A run another task of this array has already attempted (.attempted)
 # is skipped in both passes, so one that failed is not retried by every task.
 visit() {
+  [ "$STOP" = yes ] && return 0  # the job is ending: start nothing more
   mine=no
   [ $((ITEM % NJOBS)) -eq "$ID" ] && mine=yes
   ITEM=$((ITEM + 1))
@@ -528,10 +680,13 @@ walk() {
 
 PASS=own
 walk
-if [ "$NJOBS" -gt 1 ]; then
+if [ "$NJOBS" -gt 1 ] && [ "$STOP" != yes ]; then
   echo "$ID: own share done -- taking free runs of the other tasks"
   PASS=rest
   walk
+fi
+if [ "$STOP" = yes ]; then
+  echo "$ID: stopped: $STOP_WHY -- the next submission picks up the runs left"
 fi
 
 if [ "$VASP_FAILED" -gt 0 ]; then

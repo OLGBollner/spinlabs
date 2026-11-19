@@ -39,7 +39,13 @@ from that snapshot.
   first runs its own share (run index mod array size), then takes the other tasks' runs that
   are still free, so no task idles while others have work left; a run directory's `.lock`
   keeps two tasks out of it, and its `.attempted` (the array job id) stops the other tasks of
-  the same submission from retrying a run that failed.
+  the same submission from retrying a run that failed. A task stops, starting nothing more, when
+  squeue says its job no longer runs (past its time limit the batch shell is not always signalled,
+  while every srun is refused) or has less time left than the longest run the task has done so
+  far (`RUN_SECONDS` in the submitting shell sets a first estimate, e.g.
+  `RUN_SECONDS=150 sh run_perturbation_first_order.sh`). An unfinished run restarts from its own
+  CHGCAR when VASP left a complete one (`python -m spinlabs.vasp.restart CHGCAR`), else from
+  the input's; a restart from its own density that crashes drops it for the next attempt.
 - `create_perturbation_tree.py`: build ready-to-go trees (`first_order`/`second_order` x
   `all_bands`/`defect_band_approx` x steps) from `<defect>/ZFS_hyp` and `<defect>/ZFS_occup`,
   plus the convergence folders `convergence_test_all/` and `convergence_test_occup/`.
