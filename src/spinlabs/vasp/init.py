@@ -68,14 +68,12 @@ def init_tree(defect: str, inputs: str | Path, parent: str | Path = ".", force: 
     section(LOGGER, f"New defect {out} from {inputs}")
     relax = out / RELAX_DIR
     relax.mkdir(parents=True)
-    phonons = []
-    for path in sorted(inputs.iterdir()):
-        if not path.is_file():
-            continue
-        if _is_phonon_file(path.name):
+    phonons: list[Path] = []
+    for name, path in sorted(found.items()):
+        if _is_phonon_file(name):
             phonons.append(path)
-            continue
-        shutil.copy2(path, relax / path.name)
+        elif name in REQUIRED_INPUTS or name in SEED_FILES or name == "POSCAR":
+            shutil.copy2(path, relax / name)
     if not (relax / "POSCAR").is_file():
         shutil.copy2(structure, relax / "POSCAR")
     LOGGER.info(f"{relax}: {', '.join(sorted(p.name for p in relax.iterdir()))}")

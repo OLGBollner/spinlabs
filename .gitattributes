@@ -6,3 +6,4 @@ scripts/derivatives/*.npz filter=lfs diff=lfs merge=lfs -text
 NV_64/phonon_data.npz -filter -diff -merge -text
 ClV_128/phonon_data.npz -filter -diff -merge -text
 NV_512/phonon_data_subset.npz -filter -diff -merge -text
+graphify-out/graph.json merge=graphify
