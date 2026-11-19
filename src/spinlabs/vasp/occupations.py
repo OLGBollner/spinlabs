@@ -29,6 +29,7 @@ REMOVE_TAGS = (
     "LDAPMINUS",
     "NBANDS",
     "KPAR",
+    "ISYM",
 )  # never kept verbatim; rebuilt below
 
 
@@ -100,8 +101,6 @@ def patch_incar(
         tag = stripped.split("=")[0].strip().upper() if "=" in stripped else ""
         if tag in REMOVE_TAGS:
             continue  # dropped, re-added below
-        if tag == "ISYM" and parse_tag(text, "ISYM") == "2":
-            line = re.sub(r"ISYM\s*=\s*2", "ISYM = 3", line)  # 2 -> 3
         if tag == "ICHARG" and parse_tag(text, "ICHARG") == "2":
             line = re.sub(r"ICHARG\s*=\s*2", "ICHARG = 1", line)  # 2 -> 1
         body_lines.append(line)
@@ -110,6 +109,7 @@ def patch_incar(
 ### ZFS stage (added by spinlabs.vasp)
 NSW = 0                  # single point: no ionic relaxation
 IBRION = -1              # no ionic degrees of freedom
+ISYM = 0                 # symmetry off, as in the perturbation runs differenced against this ground state
 LDMATRIX = .TRUE.
 NUPDOWN = {int(n_up - n_dn)}
 NBANDS = {nbands}
@@ -177,7 +177,7 @@ def prepare_relax_to_zfs(relax: Path, zfs: Path) -> list[str]:
         )
 
     incar_text = (relax / "INCAR").read_text()
-    for tag in ("NUPDOWN", "NELECT", "ISPIN", "NBANDS", "ISYM", "NSW", "IBRION"):
+    for tag in ("NUPDOWN", "NELECT", "ISPIN", "NBANDS", "NSW", "IBRION"):
         occ = all_tag_occurrences(incar_text, tag)
         if len(occ) > 1:
             fail(f"INCAR defines {tag} {len(occ)} times: {occ} (last one wins in VASP -- fix before running)")
