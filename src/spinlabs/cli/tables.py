@@ -5,6 +5,7 @@ from itertools import product
 import sys
 from pathlib import Path
 
+from spinlabs.methods import CLI_CHOICES, normalize_calc_method
 from spinlabs.cli import add_verbosity_args
 from spinlabs.logging_utils import get_logger
 from spinlabs.registry import ensure_db, find_packaged, more_complete, package_info, parse_orders, stored_orders
@@ -47,7 +48,7 @@ def build_table_parser(subparsers: argparse._SubParsersAction) -> None:  # noqa:
     )
     defects.add_argument(
         "inputs", nargs="*", type=Path,
-        help="Defect folders (searched for packaged npz and ZFS_hyp/ZFS_occup OUTCARs) or packaged ZFS npz "
+        help="Defect folders (searched for packaged npz and ZFS_AO/ZFS_UO (or legacy ZFS_hyp/ZFS_occup) OUTCARs) or packaged ZFS npz "
         "files to read D from (default: every packaged ZFS file in the registry)",
     )
     _add_run_filter_args(defects)
@@ -64,8 +65,8 @@ def _add_run_filter_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--method",
         nargs="+",
-        choices=["all", "approx", "decont"],
-        help="Only 'all' (all_bands), 'approx' (defect_band_approx) and/or 'decont' (full_decont) runs",
+        choices=CLI_CHOICES,
+        help="Only all/AO (all orbitals), unpaired/UO (unpaired orbitals) and/or decont (full decontamination) runs",
     )
     parser.add_argument(
         "--order", nargs="+", type=int, choices=[1, 2, 12], help="Only runs containing these perturbation orders"
@@ -82,7 +83,7 @@ def _add_output_args(parser: argparse.ArgumentParser) -> None:
     add_verbosity_args(parser)
 
 
-_METHODS = {"all": "all_bands", "approx": "defect_band_approx", "decont": "full_decont"}
+_METHODS = {name: normalize_calc_method(name) for name in CLI_CHOICES}  # --method value -> calc_method
 
 
 def _filters(args: argparse.Namespace) -> list[tuple[str, object]]:

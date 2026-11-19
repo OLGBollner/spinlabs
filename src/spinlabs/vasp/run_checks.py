@@ -21,8 +21,7 @@ from spinlabs.vasp.settings import scf_problem, scf_status
 from spinlabs.zfs_response import response_point_group, verify_zfs_response
 
 # Run folders sit at <defect>/<order>/pert_<x>/<basis>/runs/<modes>; the basis's
-# ground-state ZFS run is <defect>/<source>/ (as trees.BASIS_SOURCE).
-BASIS_SOURCE = {"all_bands": "ZFS_hyp", "defect_band_approx": "ZFS_occup", "full_decont": "ZFS_full"}
+# ground-state ZFS run of each method is spinlabs.methods.ground_state_dir.
 PERTURBATION_TOL = 0.01  # |scale - 1| and residual allowed for a correct displacement
 
 # Expected symmetry operations VASP may find (upper bounds), C3v parent:
@@ -161,20 +160,23 @@ def reference_outcar(run_dir: Path) -> Path | None:
     """The basis's ground-state OUTCAR for a run folder in a perturbation tree, if it exists.
 
     Tree runs sit at <defect>/<order>/pert_<x>/<basis>/runs/<modes>, convergence runs at
-    <defect>/convergence_test_<all|occup>/runs/<mode>_pert_<p>.
+    <defect>/convergence_test_<method>/runs/<mode>_pert_<p>; new and legacy folder names alike.
     """
-    from spinlabs.vasp.trees import CONVERGENCE_FOLDER
+    from spinlabs.methods import METHODS, ground_state_dir, method_of_folder
 
     run_dir = Path(run_dir).resolve()
     basis = run_dir.parent.parent
-    convergence = {folder: BASIS_SOURCE[b] for b, folder in CONVERGENCE_FOLDER.items()}
-    if basis.name in convergence:
-        outcar = basis.parent / convergence[basis.name] / "OUTCAR"
-        return outcar if outcar.is_file() else None
-    source = BASIS_SOURCE.get(basis.name)
-    if source is None or len(basis.parents) < 3:
+    method = method_of_folder(basis.name)
+    if method is None:
         return None
-    outcar = basis.parents[2] / source / "OUTCAR"
+    m = METHODS[method]
+    if basis.name in (m.convergence, *m.legacy_convergence):
+        defect = basis.parent
+    elif len(basis.parents) >= 3:
+        defect = basis.parents[2]
+    else:
+        return None
+    outcar = ground_state_dir(defect, method) / "OUTCAR"
     return outcar if outcar.is_file() else None
 
 

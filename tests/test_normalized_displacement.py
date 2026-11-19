@@ -174,10 +174,10 @@ def test_new_tree_is_normalized_and_gets_convergence_folders(tmp_path):
     failures = build_perturbation_tree(defect, [STEP], defect / "data" / "phonon_data.npz", displacement="normalized",
                                        conv_modes=[2, 7], vasp_binary=tmp_path / "vasp_std")
     assert failures == []
-    tree = defect / "first_order" / f"pert_{STEP}" / "all_bands"
+    tree = defect / "first_order" / f"pert_{STEP}" / "AO"
     assert _config(tree / "run_perturbation_first_order.sh", "DISPLACEMENT") == "normalized"
     assert tree_displacement(tree) == "normalized"
-    for folder in ("convergence_test_all", "convergence_test_occup"):
+    for folder in ("convergence_test_AO", "convergence_test_UO"):
         script = defect / folder / "run_convergence.sh"
         assert (defect / folder / "input" / "INCAR").is_file()
         assert _config(script, "MODES") == '"2 7"'
@@ -221,7 +221,7 @@ def test_convergence_added_to_an_existing_tree_matches_its_displacement(tmp_path
     phonon = defect / "data" / "phonon_data.npz"
     assert build_convergence_tree(defect, phonon, [1], [-STEP, STEP], displacement="unweighted",
                                   vasp_binary=defect_vasp_binary(defect)) == []
-    assert _config(defect / "convergence_test_all" / "run_convergence.sh", "DISPLACEMENT") == "unweighted"
+    assert _config(defect / "convergence_test_AO" / "run_convergence.sh", "DISPLACEMENT") == "unweighted"
     with pytest.raises(ValueError, match=r"modes \[42\]"):
         build_convergence_tree(defect, phonon, [42], [STEP], displacement="normalized", force=True)
 

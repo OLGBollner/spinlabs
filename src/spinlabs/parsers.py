@@ -601,14 +601,13 @@ def parse_zfs_simulation_dataset(
     if not sim_path.is_dir():
         raise FileNotFoundError(f"Simulation folder not found: {sim_path}")
 
-    if calc_method in ("all", "all_bands"):
-        calc_method, default_zfs = ("all_bands", "ZFS_hyp")
-    elif calc_method in ("approx", "defect_band_approx"):
-        calc_method, default_zfs = ("defect_band_approx", "ZFS_occup")
-    else:
-        raise ValueError(f"{calc_method} is not a valid zfs calculation method.")
+    from spinlabs.methods import basis_dir, ground_state_dir, is_ground_state_dir, spin_corrected
 
-    final_zfs_folder = zfs_folder or default_zfs
+    canonical = normalize_calc_method(calc_method)
+    if canonical not in ("AO", "UO"):
+        raise ValueError(f"{calc_method} is not a valid zfs calculation method (AO or UO; full_decont: "
+                         "parse_decont_dataset).")
+    calc_method = canonical
 
     if "pert" not in sim_path.name:
         raise ValueError("Perturbation scale not found in folder name (expected e.g. 'pert_0.01').")
@@ -618,18 +617,22 @@ def parse_zfs_simulation_dataset(
     cell_size = cell_size or cell_size_inferred
     pert_scale = pert_scale if pert_scale is not None else float(sim_path.name.split("_")[1])
 
-    # Unperturbed relaxed ground state
-    relaxed_outcar = sim_path.parent.parent / final_zfs_folder / "OUTCAR"
+    # Unperturbed relaxed ground state: the method's ZFS_AO / ZFS_UO (or the legacy ZFS_hyp / ZFS_occup)
+    defect_folder = sim_path.parent.parent
+    # an explicit folder wins unless it is just a ground-state name (new or legacy), which resolves to the one there
+    zfs_dir = (defect_folder / zfs_folder if zfs_folder and not is_ground_state_dir(zfs_folder)
+               else ground_state_dir(defect_folder, calc_method))
+    relaxed_outcar = zfs_dir / "OUTCAR"
     ground_state_zfs = parse_outcar_zfs(relaxed_outcar)
     if ground_state_zfs is None:
         raise ValueError(f"Relaxed ZFS tensor not found in: {relaxed_outcar}")
 
-    search_path = sim_path / calc_method
+    search_path = basis_dir(sim_path, calc_method)  # the tree: AO/ or UO/ (or all_bands/, defect_band_approx/)
     # The runs' input/INCAR fixes the spin (S = NUPDOWN / 2), which sets the
     # defect-band correction factor; the ground-state ZFS run is the fallback.
     spin, spin_source = defect_spin(search_path / "input", relaxed_outcar.parent)
     if spin is None:
-        if calc_method == "defect_band_approx":
+        if spin_corrected(calc_method):
             LOGGER.warning(
                 f"{sim_path}: no NUPDOWN in {search_path / 'input' / 'INCAR'} or {relaxed_outcar.parent}; "
                 "spin correction assumes S = 1 (x3/2)"
@@ -665,13 +668,13 @@ def parse_zfs_simulation_dataset(
     )
     # Apply the spin correction here so every consumer of parsed sim-folder
     # data sees corrected tensors, matching RawZFSData.load for npz files.
-    if normalize_calc_method(data.calc_method) == "defect_band_approx":
+    if spin_corrected(data.calc_method):
         data._apply_spin_correction()
     return data
 
 
-DECONT_BASIS = "full_decont"  # trees.DECONT_BASIS
-DECONT_GROUND_STATE = "ZFS_full"  # trees.DECONT_GROUND_STATE
+DECONT_BASIS = "full_decont"  # spinlabs.methods: METHODS["full_decont"].basis
+DECONT_GROUND_STATE = "ZFS_full"  # METHODS["full_decont"].ground_state
 
 
 def decont_sublevels(tree: str | Path) -> list[str]:

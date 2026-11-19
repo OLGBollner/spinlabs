@@ -246,7 +246,7 @@ def test_a_set_is_queried_and_loaded_as_one_decontaminated_dataset(tmp_path):
     from spinlabs.cli.listing import package_table
     from spinlabs.cli.run import _infer_method_from_file
 
-    assert _infer_method_from_file(folder) == "decont"
+    assert _infer_method_from_file(folder) == "full_decont"
     assert "full_decont" in package_table(conn)
 
 
@@ -260,7 +260,7 @@ def test_the_d_table_shows_the_decontaminated_column_only_with_data(tmp_path):
     gs = (OFFSET["ms_1"] - (OFFSET["ms_0_3"] + OFFSET["ms_0_4"]) / 2) / 2
     assert rows[0]["d_mhz"] == pytest.approx(1.5 * gs)
     tex = render_defect_table(merge_rows(rows, []), include_t1=False)
-    assert r"$D_\text{FD}$" in tex and r"$D_\text{AE}$" in tex
+    assert r"$D_\text{FD}$" in tex and r"$D_\text{AO}$" in tex
     plain = render_defect_table(merge_rows([{**rows[0], "column": "contaminated"}], []), include_t1=False)
     assert "FD" not in plain
 

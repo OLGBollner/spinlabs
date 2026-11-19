@@ -10,6 +10,7 @@ import numpy as np
 from scipy import constants as Cn
 
 from spinlabs.constants import CONSTANTS
+from spinlabs.methods import spin_corrected
 from spinlabs.serialization import FieldSpec, SchemaError, load_npz, save_npz, _fields_from_npz, warn_unknown_keys
 
 from spinlabs.logging_utils import get_logger
@@ -996,8 +997,9 @@ def _decode_2d_array(value: Any, data: Any) -> Optional[np.ndarray]:
 
 
 def _decode_calc_method(value: str, data: Any) -> Optional[str]:
-    """Legacy files may store the string "None" or "" for an absent method."""
-    return None if value in ("None", "") else value
+    """The canonical method name (legacy all_bands / defect_band_approx read as AO / UO); legacy files
+    may store the string "None" or "" for an absent method."""
+    return normalize_calc_method(value)
 
 
 def _encode_first_order(d: dict) -> dict:
@@ -1054,7 +1056,7 @@ def _decode_order_dict(value: Any, data: Any) -> dict:
     return out
 
 
-# Scaling applied to defect_band_approx (ZFS_occup) tensors to correct the
+# Scaling applied to UO (unpaired orbitals, ZFS_UO) tensors to correct the
 # defect-band approximation. The factor depends on the defect's spin S, which the
 # parser reads from NUPDOWN (S = NUPDOWN / 2) in the runs' input/INCAR. The parser
 # applies it at intake and stores spin_correction_applied=True; legacy npz files
@@ -1159,16 +1161,11 @@ def _scale_correction_fields(fields: dict, scale: float = SPIN_CORRECTION_SCALE)
 
 
 def normalize_calc_method(m: Optional[str]) -> Optional[str]:
-    """Normalizes calc_method aliases ('approx' -> 'defect_band_approx', etc.)."""
-    if not m or m in ("None", ""):
-        return None
-    if m in ("all", "all_bands"):
-        return "all_bands"
-    if m in ("approx", "defect_band_approx"):
-        return "defect_band_approx"
-    if m in ("decont", "full_decont"):
-        return "full_decont"
-    return str(m)
+    """The canonical calc_method (AO, UO, full_decont) of any of its names, legacy ones included
+    (all_bands -> AO, defect_band_approx -> UO, ...; spinlabs.methods)."""
+    from spinlabs.methods import normalize_calc_method as normalize
+
+    return normalize(m)
 
 
 def _merge_vasp_settings(a: Optional[dict], b: Optional[dict]) -> Optional[dict]:
@@ -1225,6 +1222,8 @@ class RawZFSData:
     spin_sublevel: Optional[str] = None
 
     def __post_init__(self):
+        # the canonical method (AO, UO, full_decont), whatever name it was given (legacy all_bands, ...)
+        self.calc_method = normalize_calc_method(self.calc_method)
         if self.first_order_minus and self.second_order:
             raise ValueError(
                 "Cannot mix central and forward differences: the data has both -Q first-order runs "
@@ -1589,7 +1588,7 @@ class RawZFSData:
         """
         Loads RawZFSData from one or more .npz files.
         Maintains backward compatibility with legacy keys (zfs_tensors, zfs_tensors_2d, zfs_relaxed).
-        If apply_corrections is True (default), defect_band_approx tensors are scaled by the
+        If apply_corrections is True (default), UO tensors are scaled by the
         factor of their spin (spin_correction_scale) exactly once on load; files already
         carrying the correction are skipped.
 
@@ -1623,7 +1622,7 @@ class RawZFSData:
                 fields["spin_correction_applied"] = True
                 return fields, False
             fields["spin_correction_applied"] = False
-            if not apply_corrections or normalize_calc_method(fields.get("calc_method")) != "defect_band_approx":
+            if not apply_corrections or not spin_corrected(fields.get("calc_method")):
                 return fields, False
             scaled = _scale_correction_fields(
                 {
@@ -1695,7 +1694,7 @@ class RawZFSData:
         for p, (fields, scaled_now) in zip(paths, scaled_pairs):
             if apply_corrections and scaled_now:
                 scale = spin_correction_scale(fields.get("spin"))
-                LOGGER.info(f"applied spin correction (defect_band_approx, x{scale:.4g}): {p}")
+                LOGGER.info(f"applied spin correction (UO, x{scale:.4g}): {p}")
         return obj.to_unit("J")
 
     @classmethod
@@ -1765,17 +1764,17 @@ class RawZFSData:
         )
 
     def _apply_spin_correction(self) -> None:
-        """Scales defect_band_approx tensors by the factor of ``self.spin`` exactly once.
+        """Scales UO tensors by the factor of ``self.spin`` exactly once.
 
         npz files written before the correction moved into the loader/parser
         store unscaled tensors and carry spin_correction_applied=False; they
         are scaled here. Files written after carry the flag=True and are
-        skipped (the parser applies the correction at intake). all_bands
+        skipped (the parser applies the correction at intake). AO
         data is never scaled.
         """
         if self.spin_correction_applied:
             return
-        if normalize_calc_method(self.calc_method) != "defect_band_approx":
+        if not spin_corrected(self.calc_method):
             return
         scaled = _scale_correction_fields(
             {
@@ -1791,7 +1790,7 @@ class RawZFSData:
         self.second_order = scaled["second_order"]
         self.first_order_minus = scaled["first_order_minus"]
         self.spin_correction_applied = True
-        LOGGER.info(f"applied spin correction (defect_band_approx, S = {self.spin}, x{scale:.4g})")
+        LOGGER.info(f"applied spin correction (UO, S = {self.spin}, x{scale:.4g})")
 
 
 @dataclass

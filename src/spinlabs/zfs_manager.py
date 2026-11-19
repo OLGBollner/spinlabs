@@ -7,6 +7,7 @@ import numpy as np
 
 from spinlabs.constants import CONSTANTS
 from spinlabs.symmetry import twin_of, _build_groups_from_labels
+from spinlabs.methods import spin_corrected
 from spinlabs.models import ZFSTensor, PhononSpectrum, PerturbationEntry, RawZFSData, SpinPhononCouplingData, normalize_calc_method
 from spinlabs.utils import MathUtils
 from spinlabs.zfs_response import (
@@ -112,7 +113,7 @@ class ZFSManager:
         self.defect: Optional[str] = raw_data.defect if raw_data else None
         self.cell_size: Optional[int] = raw_data.cell_size if raw_data else None
         self.pert_scale: Optional[float] = raw_data.pert_scale if raw_data else None
-        self.calc_method: Optional[str] = (
+        self.calc_method: Optional[str] = normalize_calc_method(
             raw_data.calc_method or raw_data.metadata.get("calc_method") if raw_data else None
         )
         # How the runs were displaced (spinlabs.models.DISPLACEMENTS); sets each mode's amplitude q.
@@ -197,7 +198,7 @@ class ZFSManager:
         self.defect = raw.defect
         self.cell_size = raw.cell_size
         self.pert_scale = raw.pert_scale
-        self.calc_method = raw.metadata.get("calc_method", "calc")
+        self.calc_method = normalize_calc_method(raw.metadata.get("calc_method")) or "calc"
 
         if raw.ground_state_zfs is not None:
             D_xx, D_yy, D_zz, R = raw.ground_state_zfs.principal_components()
@@ -977,7 +978,7 @@ class ZFSManager:
                 calc_method=self.calc_method,
                 # Tensors stored on the manager were ingested via parse/load,
                 # which apply the 3/2 correction for approx data at intake.
-                spin_correction_applied=normalize_calc_method(self.calc_method) == "defect_band_approx",
+                spin_correction_applied=spin_corrected(self.calc_method),
                 mass_weighted=self.mass_weighted,
                 displacement=self.displacement,
                 order=kwargs.get("order", 1 if first is not None else 2),

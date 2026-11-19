@@ -23,7 +23,7 @@ from spinlabs.registry import SUBLEVEL_KINDS, ensure_db, register_file
 from spinlabs.pack_convergence import ConvergenceScan, save_convergence, scan_convergence
 from spinlabs.decont import high_spin
 from spinlabs.parsers import decont_sublevels, parse_decont_dataset, parse_zfs_simulation_dataset, split_defect_folder_name
-from spinlabs.vasp.run_checks import BASIS_SOURCE
+from spinlabs.methods import CLI_CHOICES, METHODS, basis_dir, ground_state_dir, method_from_path
 from spinlabs.vasp.settings import (
     compare_settings,
     outcar_settings,
@@ -72,7 +72,8 @@ def build_package_parser(parser: argparse.ArgumentParser) -> None:
         metavar="OUTCAR",
         help=(
             "With --conv: ground-state OUTCAR; its ZFS tensor is stored as 'd0' (the Q=0 point) in the npz. "
-            "Flag without a path: auto-discover <defect-folder>/ZFS_hyp/OUTCAR (all) or ZFS_occup/OUTCAR (occup). "
+            "Flag without a path: auto-discover the method's <defect-folder>/ZFS_AO/OUTCAR or ZFS_UO/OUTCAR "
+            "(or the legacy ZFS_hyp / ZFS_occup). "
             "Ignored for a full-decontamination folder: each sublevel's d0 is always "
             "<defect-folder>/ZFS_full/<sublevel>/OUTCAR."
         ),
@@ -101,10 +102,10 @@ def build_package_parser(parser: argparse.ArgumentParser) -> None:
         "--method",
         type=str,
         nargs="+",
-        choices=["all", "approx", "decont"],
+        choices=CLI_CHOICES,
         default=None,
         metavar="METHOD",
-        help="ZFS calculation method(s) to package: all, approx and/or decont (full spin decontamination: one "
+        help="ZFS calculation method(s) to package: all/AO, unpaired/UO and/or decont (full spin decontamination: one "
         "file per spin sublevel in one folder, each with its ground state from <defect-folder>/ZFS_full/<sublevel>; "
         "only runs with a ZFS tensor in every sublevel). Default: every method the defect has trees for.",
     )
@@ -140,16 +141,16 @@ def build_package_parser(parser: argparse.ArgumentParser) -> None:
 
 
 _ORDER_DIRS = {"first": "first_order", "second": "second_order"}
-_METHOD_BASIS = {"all": "all_bands", "approx": "defect_band_approx", "decont": "full_decont"}
-
-
 def _methods_for(defect_folder: Path, requested: list[str] | None) -> list[str]:
-    """The methods to package: the requested ones, else every one the defect has a tree for (all and
-    approx when it has none, so the scan says what is missing)."""
+    """The methods to package: the requested ones, else every one the defect has a tree for (its basis
+    folder under the new or a legacy name; AO and UO when it has none, so the scan says what is missing)."""
     if requested:
         return requested
-    found = [m for m, basis in _METHOD_BASIS.items() if any(defect_folder.glob(f"*_order/pert_*/{basis}"))]
-    return found or ["all", "approx"]
+    found = [
+        key for key, m in METHODS.items()
+        if any(defect_folder.glob(f"*_order/pert_*/{name}") for name in (m.basis, *m.legacy_basis))
+    ]
+    return found or ["AO", "UO"]
 _ORDER_NUM = {"first": 1, "second": 2}
 _GS_AUTO = Path("__auto__")  # --ground-state given without a path: auto-discover
 
@@ -321,7 +322,7 @@ def _scan_raw(args: argparse.Namespace, defect_folder: Path, methods: list[str])
                     sim_folder=datasets[o][pert_scale], order=_ORDER_NUM[o], calc_method=method, verbose=True
                 )
                 raw = data if raw is None else raw.combine(data)
-                _note_tree(datasets[o][pert_scale] / calc_method, _ORDER_DIRS[o], trees, weighting)
+                _note_tree(basis_dir(datasets[o][pert_scale], calc_method), _ORDER_DIRS[o], trees, weighting)
             if central and raw is not None:
                 minus_dir = _minus_folder(pert_scale)
                 if minus_dir is None:
@@ -332,7 +333,7 @@ def _scan_raw(args: argparse.Namespace, defect_folder: Path, methods: list[str])
                     continue
                 minus = parse_zfs_simulation_dataset(sim_folder=minus_dir, order=1, calc_method=method, verbose=True)
                 raw = raw.with_minus(minus)
-                _note_tree(minus_dir / calc_method, "first_order_minus", trees, weighting)
+                _note_tree(basis_dir(minus_dir, calc_method), "first_order_minus", trees, weighting)
             if raw is None or not (raw.first_order or raw.second_order):
                 LOGGER.warning(f"{defect_folder.name} {calc_method} pert {pert_scale:g}: no ZFS data parsed; skipped")
                 continue
@@ -417,8 +418,9 @@ def _scan_decont(
 
 
 def _ground_state_settings(defect_folder: Path, calc_method: str) -> dict[str, str] | None:
-    """VASP settings of the ground-state ZFS run (<defect>/ZFS_hyp or ZFS_occup), or None if absent."""
-    return _run_folder_settings(defect_folder / BASIS_SOURCE[calc_method])
+    """VASP settings of the method's ground-state ZFS run (<defect>/ZFS_AO, ZFS_UO, ZFS_full, or a legacy
+    name), or None if absent."""
+    return _run_folder_settings(ground_state_dir(defect_folder, calc_method))
 
 
 def _run_folder_settings(folder: Path) -> dict[str, str] | None:
@@ -744,34 +746,28 @@ def _register_conv(conn, npz_path: Path, data) -> bool:
 
 
 def _conv_method(suffix: str) -> str | None:
-    """'all' or 'approx' from a convergence folder suffix, None when it says neither.
+    """The method (AO, UO, full_decont) a convergence folder suffix names, None when it names none.
 
-    test_all / test_occup, or AE (all electrons) / UE (unpaired electrons) as a token,
-    e.g. AE_mass_weighted.
+    test_AO / test_UO / test_decont, the legacy test_all / test_occup, or AE (all electrons) / UE
+    (unpaired electrons) as a token, e.g. AE_mass_weighted.
     """
     tokens = {t.lower() for t in re.split(r"[_.\-]", suffix)}
-    if "decont" in suffix:
-        return "decont"
-    if "all" in suffix or "ae" in tokens:
-        return "all"
-    if "occup" in suffix or "ue" in tokens:
-        return "approx"
-    return None
+    if "ae" in tokens:
+        return "AO"
+    if "ue" in tokens:
+        return "UO"
+    return method_from_path(f"test_{suffix}" if not suffix.startswith("test") else suffix)
 
 
 def _auto_ground_state(defect_folder: Path, method: str | None) -> Path | None:
-    """Flag-only --ground-state: pick ZFS_hyp (all) or ZFS_occup (occup) OUTCAR."""
-    if method == "all":
-        zfs_folder = "ZFS_hyp"
-    elif method in ("occup", "approx"):
-        zfs_folder = "ZFS_occup"
-    else:
+    """Flag-only --ground-state: the method's ground-state OUTCAR (ZFS_AO / ZFS_UO or a legacy name)."""
+    if method not in ("AO", "UO"):
         LOGGER.warning(
-            f"{defect_folder.name}: convergence folder name says neither 'all'/'AE' nor 'occup'/'UE'; "
-            "d0 not stored (pass --ground-state OUTCAR)"
+            f"{defect_folder.name}: convergence folder name says neither AO ('AO'/'all'/'AE') nor UO "
+            "('UO'/'occup'/'UE'); d0 not stored (pass --ground-state OUTCAR)"
         )
         return None
-    candidate = defect_folder / zfs_folder / "OUTCAR"
+    candidate = ground_state_dir(defect_folder, method) / "OUTCAR"
     if candidate.exists():
         LOGGER.debug(f"ground state: {candidate}")
         return candidate
@@ -824,7 +820,7 @@ class _ConvScanned(NamedTuple):
     defect: str
     cell: int
     suffix: str  # folder name without 'convergence', e.g. 'test_all'; names the output file
-    method: str | None  # 'all' or 'approx' from the suffix, None when it says neither
+    method: str | None  # the method the suffix names (AO, UO, full_decont), None when it names none
     calc_method: str | None
     ground_state: Path | None  # OUTCAR stored as d0
     scan: ConvergenceScan
@@ -849,7 +845,7 @@ def _scan_conv(args: argparse.Namespace, defect_folder: Path, root: Path) -> lis
             )
         return _scan_conv_decont(defect_folder, root, suffix, sublevels)
     method = _conv_method(suffix)
-    calc_method = normalize_calc_method(method) if method else None
+    calc_method = method
     defect, cell = split_defect_folder_name(defect_folder.name)
     try:
         scan = scan_convergence(root)
@@ -860,10 +856,10 @@ def _scan_conv(args: argparse.Namespace, defect_folder: Path, root: Path) -> lis
     ground_state = args.ground_state
     if ground_state == _GS_AUTO:
         ground_state = _auto_ground_state(defect_folder, method)
-    # Settings are checked against the stored d0's run, else the method's ZFS_hyp/ZFS_occup.
+    # Settings are checked against the stored d0's run, else the method's ground-state folder.
     if ground_state is not None:
         ground = _run_folder_settings(Path(ground_state).parent)
-    elif calc_method in BASIS_SOURCE:
+    elif calc_method is not None:
         ground = _ground_state_settings(defect_folder, calc_method)
     else:
         ground = None
@@ -902,7 +898,7 @@ def _scan_conv_decont(defect_folder: Path, root: Path, suffix: str, sublevels: l
         ground = outcar if outcar.is_file() else None
         if ground is None:
             LOGGER.warning(f"{defect_folder.name}: no {outcar}; d0 of sublevel {lv} not stored")
-        out.append(_ConvScanned(defect, cell, suffix, "decont", "full_decont", ground, scan, settings, lv))
+        out.append(_ConvScanned(defect, cell, suffix, "full_decont", "full_decont", ground, scan, settings, lv))
     LOGGER.info(f"{root.name}: sublevels {', '.join(sublevels)}; {int(incomplete.sum())} grid point(s) not complete")
     return out
 

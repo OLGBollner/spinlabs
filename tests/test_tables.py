@@ -147,7 +147,7 @@ def test_defect_table_appends_t1_per_cell_with_superscripts():
     assert r"\cmidrule(lr){6-7} \cmidrule(lr){8-9}" in tex
     assert r"& Pumped & Other & Pumped & Other \\" in tex
     assert r"optically pumped initial state ($m_s=0$ for $S=1$)" in tex
-    assert r"\begin{table*}" in tex and r"$T_{1,\text{UE}}$" in tex
+    assert r"\begin{table*}" in tex and r"$T_{1,\text{UO}}$" in tex
 
 
 def test_defect_table_without_t1_is_d_only():
@@ -159,7 +159,7 @@ def test_defect_table_without_t1_is_d_only():
 
 
 def test_defect_table_layout_matches_the_paper():
-    """Caption first, UE before AE, DiV shown as VV, label tab:zfs_d, a single-column table."""
+    """Caption first, UO before AO, DiV shown as VV, label tab:zfs_d, a single-column table."""
     from spinlabs.tables import merge_rows, render_defect_table
 
     rows = [_d("DiV", "128", "corrected", 1502.7), _d("DiV", "128", "contaminated", 1775.9),
@@ -169,7 +169,7 @@ def test_defect_table_layout_matches_the_paper():
     assert lines[1] == (r"  \caption{Zero-field splitting parameter $D$ of the treated point defects. "
                         r"The superscripts refer to different defect supercells: (a) cell size 128; (b) cell size 512.}")
     assert lines[2] == r"  \centering"
-    assert lines[5] == r"    Defect & Configuration & $D_\text{experiment}$ & $D_\text{UE}$ & $D_\text{AE}$ \\"
+    assert lines[5] == r"    Defect & Configuration & $D_\text{experiment}$ & $D_\text{UO}$ & $D_\text{AO}$ \\"
     assert r"    VV & kk & 1305~\cite{falk_polytype_2013} & $1500^{(a)}$ & $1780^{(a)}$ \\" in lines
     assert r"    NV & --- & 2870~\cite{loubser_electron_1978} & $2950^{(b)}$ & --- \\" in lines
     assert lines[-2:] == [r"  \label{tab:zfs_d}", r"\end{table}"]

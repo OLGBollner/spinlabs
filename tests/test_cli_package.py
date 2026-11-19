@@ -81,11 +81,11 @@ def test_default_combines_orders_into_one_file(tmp_path, monkeypatch):
     with _patch(lambda **kw: _raw(order=kw["order"])):
         _run(_make_args(tmp_path))
     files = list((tmp_path / "data").rglob("*.npz"))
-    run_dir = tmp_path / "data" / "NV_512" / "pert_0.025" / "all_bands" / date.today().strftime("%Y%m%d")
-    assert files == [run_dir / "NV_512_raw_zfs_data_all_bands_12d.npz"]
+    run_dir = tmp_path / "data" / "NV_512" / "pert_0.025" / "AO" / date.today().strftime("%Y%m%d")
+    assert files == [run_dir / "NV_512_raw_zfs_data_AO_12d.npz"]
     conn = sqlite3.connect(db)
     row = conn.execute("SELECT defect, cell_size, calc_method, pert_order, pert_scale FROM files").fetchone()
-    assert row == ("NV", 512, "all_bands", "[1, 2]", 0.025)
+    assert row == ("NV", 512, "AO", "[1, 2]", 0.025)
 
 
 def test_single_order_saves_separate_file(tmp_path):
@@ -93,8 +93,8 @@ def test_single_order_saves_separate_file(tmp_path):
     with _patch():
         _run(_make_args(tmp_path, orders="first"))
     files = list((tmp_path / "data").rglob("*.npz"))
-    run_dir = tmp_path / "data" / "NV_512" / "pert_0.025" / "all_bands" / date.today().strftime("%Y%m%d")
-    assert files == [run_dir / "NV_512_raw_zfs_data_all_bands_1d.npz"]
+    run_dir = tmp_path / "data" / "NV_512" / "pert_0.025" / "AO" / date.today().strftime("%Y%m%d")
+    assert files == [run_dir / "NV_512_raw_zfs_data_AO_1d.npz"]
 
 
 def test_pert_filter(tmp_path):
@@ -164,7 +164,7 @@ def test_scan_lists_without_prompting(tmp_path, monkeypatch, capsys):
     with _patch(lambda **kw: _raw(order=kw["order"])):
         _run(_make_args(tmp_path, yes=False, scan=True))
     out = capsys.readouterr().out
-    assert "NV_512" in out and "all_bands" in out and "0.025" in out
+    assert "NV_512" in out and "AO" in out and "0.025" in out
     assert not (tmp_path / "data").exists()
 
 
@@ -214,7 +214,7 @@ def test_conv_ground_state_flag_auto_all(tmp_path, caplog, monkeypatch):
     assert "ground state:" in caplog.text
     conn = sqlite3.connect(db)
     row = conn.execute("SELECT defect, cell_size, calc_method FROM files").fetchone()
-    assert row == ("NV", 512, "all_bands")
+    assert row == ("NV", 512, "AO")
 
 
 def test_conv_ground_state_flag_auto_occup(tmp_path):
@@ -279,12 +279,12 @@ def test_ae_ue_folders_find_their_ground_state_and_q0_runs_are_no_steps(tmp_path
     _run_conv(args=_conv_args(tmp_path, Path("__auto__")), defect_folder=tmp_path / "NV_512")
     out = capsys.readouterr().out
     rows = {line.split()[1]: line.split() for line in out.splitlines() if line.startswith("NV_512")}
-    assert rows["AE_mass_weighted"][2] == "all_bands" and rows["UE_mass_weighted"][2] == "defect_band_approx"
+    assert rows["AE_mass_weighted"][2] == "AO" and rows["UE_mass_weighted"][2] == "UO"
     assert rows["AE_mass_weighted"][-3:] == ["±0.025", "±0.05", "13/13"]  # 3 modes x 4 steps + one Q = 0 run
     assert "no run folder" not in out
     assert str(tmp_path / "NV_512" / "ZFS_hyp" / "OUTCAR") in out and str(tmp_path / "NV_512" / "ZFS_occup" / "OUTCAR") in out
     ue = next((tmp_path / "data").rglob("NV_512_*_conv_UE_mass_weighted.npz"))
-    assert ue.parent.parent.name == "defect_band_approx"
+    assert ue.parent.parent.name == "UO"
 
 
 def test_conv_scan_prints_summary_and_saves_nothing(tmp_path, capsys):
@@ -293,7 +293,7 @@ def test_conv_scan_prints_summary_and_saves_nothing(tmp_path, capsys):
     out = capsys.readouterr().out
     assert "Available convergence data:" in out
     row = next(line for line in out.splitlines() if line.startswith("NV_512"))
-    assert row.split() == ["NV_512", "test_all", "all_bands", "5", "7", "±0.025", "±0.05", "7/8"]
+    assert row.split() == ["NV_512", "test_all", "AO", "5", "7", "±0.025", "±0.05", "7/8"]
     assert "1 run(s) without a ZFS tensor: 7_pert_0.05" in out
     assert str(tmp_path / "NV_512" / "ZFS_hyp" / "OUTCAR") in out
     assert "NV_512 test_all: step * u/|u|" in out and "[trees' job scripts]" in out
@@ -347,13 +347,13 @@ def test_multiple_folders_and_methods(tmp_path, monkeypatch):
     with _patch(lambda **kw: _raw(order=kw["order"], calc_method=kw["calc_method"])):
         _run(args)
     day = date.today().strftime("%Y%m%d")
-    assert (tmp_path / "data" / "NV_512" / "pert_0.025" / "all_bands" / day / "NV_512_raw_zfs_data_all_bands_12d.npz").exists()
-    assert (tmp_path / "data" / "NV_512" / "pert_0.025" / "defect_band_approx" / day / "NV_512_raw_zfs_data_defect_band_approx_12d.npz").exists()
-    assert (tmp_path / "data" / "ClV_128" / "pert_0.025" / "all_bands" / day / "NV_512_raw_zfs_data_all_bands_1d.npz").exists()
+    assert (tmp_path / "data" / "NV_512" / "pert_0.025" / "AO" / day / "NV_512_raw_zfs_data_AO_12d.npz").exists()
+    assert (tmp_path / "data" / "NV_512" / "pert_0.025" / "UO" / day / "NV_512_raw_zfs_data_UO_12d.npz").exists()
+    assert (tmp_path / "data" / "ClV_128" / "pert_0.025" / "AO" / day / "NV_512_raw_zfs_data_AO_1d.npz").exists()
     conn = sqlite3.connect(db)
     rows = conn.execute("SELECT defect, cell_size, calc_method, pert_order, pert_scale FROM files ORDER BY id").fetchall()
     assert len(rows) == 4
-    assert rows[2] == ("ClV", 128, "all_bands", "[1]", 0.025)
+    assert rows[2] == ("ClV", 128, "AO", "[1]", 0.025)
 
 
 def test_missing_pert_warns_and_skips(tmp_path, caplog):
@@ -424,7 +424,7 @@ def test_register_only(tmp_path, caplog):
     assert len(rows) == 1
     path, kind, defect, cell, method, order, pert = rows[0]
     assert kind == "packaged_zfs"
-    assert (defect, cell, method, order, pert) == ("NV", 512, "all_bands", "[1, 2]", 0.1)
+    assert (defect, cell, method, order, pert) == ("NV", 512, "AO", "[1, 2]", 0.1)
     assert path.endswith("NV_512_raw_zfs_data_all_bands_12d.npz")
 
 
@@ -573,8 +573,8 @@ def test_register_only_registers_convergence_files(tmp_path, monkeypatch):
 
     _register_only(tmp_path / "data")
     rows = sqlite3.connect(db).execute("SELECT kind, defect, cell_size, calc_method FROM files ORDER BY defect")
-    assert rows.fetchall() == [("convergence", "NV", 512, "all_bands"), ("convergence", "V_Si", 128,
-                                                                         "defect_band_approx")]
+    assert rows.fetchall() == [("convergence", "NV", 512, "AO"), ("convergence", "V_Si", 128,
+                                                                         "UO")]
     conn = sqlite3.connect(db)
     assert find_convergence(conn, defects=["NV"]) == [packed.resolve()]
 
@@ -624,4 +624,4 @@ def test_scan_flags_entries_with_the_wrong_zfs_shape(tmp_path, monkeypatch, caps
         _run(args)
     out = capsys.readouterr().out
     assert "D-tensor shape check" in out
-    assert "NV_512 all_bands pert 0.025: 1 suspicious run folder(s): 1" in out
+    assert "NV_512 AO pert 0.025: 1 suspicious run folder(s): 1" in out

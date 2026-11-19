@@ -493,6 +493,23 @@ def find_sublevel_sets(
     return [dict(sorted(e["files"].items())) for e in ordered]
 
 
+def method_names(name: str) -> list[str]:
+    """Every calc_method value a method has been stored under (spinlabs.methods.aliases); an unknown name as is."""
+    from spinlabs.methods import aliases
+
+    try:
+        return list(aliases(name))
+    except ValueError:
+        return [name]
+
+
+def _canonical(name):
+    """The canonical method of a stored calc_method (legacy all_bands -> AO, ...)."""
+    from spinlabs.methods import normalize_calc_method
+
+    return normalize_calc_method(name) if isinstance(name, str) else name
+
+
 def package_info(conn: sqlite3.Connection, path: str | Path) -> dict | None:
     """Registry row of a package file, or of a full-decontamination set given by its folder.
 
@@ -573,9 +590,10 @@ def find_packaged(
     if cell_size is not None:
         sql += " AND cell_size = ?"
         params.append(int(cell_size))
-    if calc_method is not None:
-        sql += " AND calc_method = ?"
-        params.append(calc_method)
+    if calc_method is not None:  # every name the method has been stored under (AO also finds all_bands rows)
+        names = method_names(calc_method)
+        sql += f" AND calc_method IN ({', '.join('?' * len(names))})"
+        params.extend(names)
     if pert_scale is not None:
         sql += " AND pert_scale = ?"
         params.append(pert_scale)
@@ -600,7 +618,7 @@ def find_packaged(
             # Rows are oldest first; a later package of the same configuration replaces it
             # unless it has fewer orders.
             orders = stored_orders(stored)
-            key = tuple(config)
+            key = (config[0], config[1], _canonical(config[2]), config[3])  # an all_bands and an AO package compete
             if more_complete(orders, newest[key][0] if key in newest else None):
                 newest.pop(key, None)
                 newest[key] = (orders, Path(p_))
@@ -651,6 +669,9 @@ def find_runs(
                 f"error: unknown run filter '{field}'; valid fields: "
                 + ", ".join(sorted(columns | {"timestamp"}))
             )
+        if column == "method":  # every name the method has been stored under (AO also finds all_bands runs)
+            by_column.setdefault(column, []).extend(method_names(value))
+            continue
         by_column.setdefault(column, []).append(value)
 
     def clause(column: str, value: object) -> tuple[str, list[object]]:
@@ -722,8 +743,12 @@ def find_runs(
         # moves a configuration to the end on each newer run, so the result
         # stays ordered by each configuration's newest run.
         newest: dict[tuple, tuple] = {}
+        method_at = group_columns.index("method") if "method" in group_columns else None
         for row in rows:
-            key, orders = row[2:], stored_orders(row[1])
+            key, orders = list(row[2:]), stored_orders(row[1])
+            if method_at is not None:
+                key[method_at] = _canonical(key[method_at])
+            key = tuple(key)
             if more_complete(orders, stored_orders(newest[key][1]) if key in newest else None):
                 newest.pop(key, None)
                 newest[key] = row
@@ -764,8 +789,9 @@ def find_convergence(
     sql = ("SELECT path, defect, cell_size, calc_method, kind FROM files"
            " WHERE kind IN ('convergence', 'convergence_sublevel')")
     params: list[object] = []
+    stored = [name for m in calc_methods for name in method_names(m)]
     for column, values in (("defect", list(defects)), ("cell_size", [int(c) for c in cell_sizes]),
-                           ("calc_method", list(calc_methods))):
+                           ("calc_method", stored)):
         if values:
             sql += f" AND {column} IN ({', '.join('?' * len(values))})"
             params.extend(values)
@@ -777,11 +803,12 @@ def find_convergence(
         path = Path(p)
         if not path.exists():
             continue
+        config = (config[0], config[1], _canonical(config[2]))
         if kind == "convergence":
-            rows.append((path, path.stem, tuple(config)))
+            rows.append((path, path.stem, config))
         elif path.parent not in folders:
             folders.add(path.parent)
-            rows.append((path.parent, re.sub(r"_ms_[\d.]+(_\d+)?$", "", path.stem), tuple(config)))
+            rows.append((path.parent, re.sub(r"_ms_[\d.]+(_\d+)?$", "", path.stem), config))
     if not latest:
         return [path for path, _, _ in rows]
     # Newest by the packaging date in the name; registration order says little, since

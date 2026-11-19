@@ -11,6 +11,7 @@ import argparse
 
 import numpy as np
 
+from spinlabs.methods import CLI_CHOICES
 from spinlabs.cli import add_verbosity_args
 from spinlabs.cli.production import add_coupling_args, coupling_options
 from spinlabs.constants import CONSTANTS
@@ -37,7 +38,7 @@ def add_input_args(parser: argparse.ArgumentParser) -> argparse._ArgumentGroup:
     opt.add_argument("-ph", "--phonon-file", metavar="FILE", help="phonopy.yaml or phonon_data.npz")
     opt.add_argument(
         "--method",
-        choices=["all", "approx", "decont"],
+        choices=CLI_CHOICES,
         help="Calculation method; inferred from the input name when omitted (as for run)",
     )
     opt.add_argument(

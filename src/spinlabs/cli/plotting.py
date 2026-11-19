@@ -6,6 +6,7 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 
 from spinlabs.cli import add_verbosity_args
+from spinlabs.methods import CLI_CHOICES, METHODS, normalize_calc_method
 from spinlabs.convergence import SNR_TARGET, TRUNC_TOL, plot_pert_convergence, read_conv_metadata
 from spinlabs.convergence_summary import WEAK_FRACTION, plot_convergence_summary
 from spinlabs.plotter import plot_run_coupling, plot_run_rates, plot_t1
@@ -15,7 +16,8 @@ from spinlabs.logging_utils import get_logger, section
 
 LOGGER = get_logger(__name__)
 
-_METHODS = {"all": "all_bands", "approx": "defect_band_approx", "decont": "full_decont"}  # --method -> calc_method
+# --method values are spinlabs.methods.CLI_CHOICES (all/AO, unpaired/UO, decont); queries match every name a
+# method has been stored under (registry: calc_method IN aliases).
 
 
 def _add_output_args(parser: argparse.ArgumentParser) -> None:
@@ -123,7 +125,7 @@ def _run_convergence(args: argparse.Namespace) -> None:
             ensure_db(),
             defects=args.defect or [],
             cell_sizes=args.cell_size or [],
-            calc_methods=[_METHODS[m] for m in args.method or []],
+            calc_methods=[normalize_calc_method(m) for m in args.method or []],
             latest=args.latest,
         )
         if not files:
@@ -164,8 +166,8 @@ def _plot_convergence_summaries(args: argparse.Namespace, files: list[Path]) -> 
         meta = read_conv_metadata(npz)
         name = "_".join(str(meta[k]) for k in ("defect", "cell") if meta.get(k) is not None) or npz.stem
         name = f"{name}_{_conv_displacement(meta)}"
-        order = (list(_METHODS).index(meta["method"]) if meta.get("method") in _METHODS else len(_METHODS),
-                 str(meta.get("method_key") or ""))
+        method = normalize_calc_method(meta.get("method"))
+        order = (list(METHODS).index(method) if method in METHODS else len(METHODS), str(meta.get("method_key") or ""))
         groups.setdefault(name, []).append((order, npz))
     if len(groups) > 1 and args.output:
         raise SystemExit(
@@ -325,8 +327,8 @@ def _add_query_args(parser: argparse.ArgumentParser, runs: bool = True) -> None:
     parser.add_argument(
         "--method",
         nargs="+",
-        choices=["all", "approx", "decont"],
-        help="Filter by calculation method(s): 'all' for all_bands, 'approx' for defect_band_approx, "
+        choices=CLI_CHOICES,
+        help="Filter by calculation method(s): all/AO (all orbitals), unpaired/UO (unpaired orbitals), "
         "'decont' for the full spin decontamination",
     )
     if not runs:
@@ -367,7 +369,7 @@ def _query_filters(args: argparse.Namespace) -> list[tuple[str, str]]:
     out = []
     out += [("defect", d) for d in args.defect or []]
     out += [("cell", c) for c in args.cell_size or []]
-    out += [("method", _METHODS[m]) for m in args.method or []]
+    out += [("method", normalize_calc_method(m)) for m in args.method or []]
     if args.order is not None:
         out.append(("order", parse_orders(args.order)))
     out += [("pert", p) for p in args.pert_scale or []]

@@ -4,6 +4,7 @@ import argparse
 from itertools import product
 from pathlib import Path
 
+from spinlabs.methods import CLI_CHOICES, method_from_path
 from spinlabs.cli import add_verbosity_args
 from spinlabs.cli.coupling import build_coupling_parser
 from spinlabs.cli.production import (
@@ -47,9 +48,9 @@ def build_run_parser(parser: argparse.ArgumentParser) -> None:
     opt.add_argument(
         "--method",
         nargs="+",
-        choices=["all", "approx", "decont"],
-        help="Calculation method: 'all' for all_bands (ZFS_hyp), 'approx' for defect_band_approx (ZFS_occup), "
-        "'decont' for the full spin decontamination (a set of per-sublevel packages, ZFS_full). "
+        choices=CLI_CHOICES,
+        help="Calculation method: all/AO (all orbitals, ZFS_AO), unpaired/UO (unpaired orbitals, ZFS_UO), "
+        "decont (the full spin decontamination, a set of per-sublevel packages, ZFS_full). "
         "Inferred from the input name when omitted. With --query, several may be given",
     )
     opt.add_argument(
@@ -139,26 +140,31 @@ def build_run_parser(parser: argparse.ArgumentParser) -> None:
     )
 
 
-_METHOD_MAP = {
-    "all": ("all_bands", "ZFS_hyp"),
-    "approx": ("defect_band_approx", "ZFS_occup"),
-    "decont": ("full_decont", "ZFS_full"),
-}
+class _MethodMap(dict):
+    """--method value (any name of a method, spinlabs.methods) -> (calc_method, ground-state folder).
+
+    The ground-state folder is None: the parser takes the method's folder that exists (ZFS_AO / ZFS_UO /
+    ZFS_full, or the legacy ZFS_hyp / ZFS_occup)."""
+
+    def __missing__(self, name):
+        return (normalize_calc_method(name), None)
+
+
+_METHOD_MAP = _MethodMap()
 
 
 def _infer_method_from_file(path: Path) -> str:
-    """Infer 'all', 'approx' or 'decont' from a packaged file name or set folder (falls back to 'all')."""
+    """The method (AO, UO, full_decont) of a packaged file name or set folder (falls back to AO)."""
     path = Path(path)
-    if path.is_dir() or "full_decont" in str(path).lower():  # a set of per-sublevel packages
-        return "decont"
-    name = path.name.lower()
-    return "approx" if ("approx" in name or "zfs_occup" in name) else "all"
+    if path.is_dir():  # a set of per-sublevel packages
+        return "full_decont"
+    return method_from_path(path.name) or method_from_path(path) or "AO"
 
 
 def _infer_method(args: argparse.Namespace) -> str:
-    """Return 'all', 'approx' or 'decont', inferring from input file/folder names when --method is omitted."""
+    """The method (AO, UO, full_decont), inferred from input file/folder names when --method is omitted."""
     if args.method:
-        return args.method[0]
+        return normalize_calc_method(args.method[0])
     names = " ".join(
         str(p)
         for p in (
@@ -170,22 +176,14 @@ def _infer_method(args: argparse.Namespace) -> str:
         )
         if p
     ).lower()
-    found = [
-        method
-        for method, hit in (
-            ("all", "all_bands" in names or "zfs_hyp" in names),
-            ("approx", "defect_band_approx" in names or "approx" in names or "zfs_occup" in names),
-            ("decont", "full_decont" in names or "zfs_full" in names),
-        )
-        if hit
-    ]
+    found = {method_from_path(name) for name in names.split()} - {None}
     if len(found) != 1:
         raise SystemExit(
-            "could not infer --method from input names; pass --method all, approx or decont"
+            "could not infer --method from input names; pass --method all, unpaired or decont"
             if not found
-            else f"input names match {' and '.join(found)}; pass --method explicitly"
+            else f"input names match {' and '.join(sorted(found))}; pass --method explicitly"
         )
-    return found[0]
+    return found.pop()
 
 
 def _validate(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None:

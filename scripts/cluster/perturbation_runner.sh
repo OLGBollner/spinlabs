@@ -1,7 +1,7 @@
 #!/bin/sh
 # perturbation_runner.sh -- the loop behind run_perturbation_{first,second}_order.sh and run_convergence.sh.
 #
-# The per-tree wrappers start it inside a SLURM job, from the tree's folder (all_bands, ...,
+# The per-tree wrappers start it inside a SLURM job, from the tree's folder (AO, UO, full_decont,
 # or convergence_test_<method>):
 #     sh "$SPINLABS_CODE/scripts/cluster/perturbation_runner.sh" first_order|second_order|convergence
 # with the tree's config in the environment: DEFECT, binary, PHONON_PATH, PERT (first and second
@@ -21,10 +21,10 @@
 # (a symlink) with ALGO=None. The run directory is done once every sublevel has its ZFS block;
 # its WAVECAR is kept.
 #
-# ground_state: the unperturbed ground state of such a defect, <defect>/ZFS_full (next to ZFS_hyp/),
-# submitted on its own with ZFS_full/run_ground_state.sh. It runs in that folder as made by
-# create_perturbation_tree.py: the SCF from its INCAR/POSCAR/CHGCAR, then the ALGO=None ZFS in every
-# ms_*/ subfolder (its INCAR already there) from ../WAVECAR.
+# ground_state: a defect's unperturbed ground state, submitted on its own with run_ground_state.sh in
+# its folder (spinlabs init zfs). ZFS_full (the full spin decontamination): the SCF from its
+# INCAR/POSCAR/CHGCAR, then the ALGO=None ZFS in every ms_*/ subfolder (its INCAR already there) from
+# ../WAVECAR. ZFS_AO / ZFS_UO (no ms_*/): one self-consistent ZFS run of the INCAR.
 
 ORDER=${1:-}
 case $ORDER in
@@ -51,17 +51,17 @@ SUBLEVELS=""
 if [ "$ORDER" = "ground_state" ]; then
   # This folder holds the SCF input and one ms_*/INCAR per spin sublevel.
   for name in INCAR POSCAR KPOINTS POTCAR; do
-    [ -f "$name" ] || fail "$name missing in $HEAD_DIR (run this from <defect>/ZFS_full)"
+    [ -f "$name" ] || fail "$name missing in $HEAD_DIR (run this from the ground-state folder, e.g. <defect>/ZFS_AO or ZFS_full)"
   done
   for d in ms_*/; do
     [ -f "${d}INCAR" ] || continue
     SUBLEVELS="$SUBLEVELS${SUBLEVELS:+ }${d%/}"
   done
-  [ -n "$SUBLEVELS" ] || fail "no spin sublevel folders (ms_*/INCAR) in $HEAD_DIR"
-  DECONT=1
+  # No ms_* sublevels (ZFS_AO, ZFS_UO): one plain self-consistent ZFS run of this folder's INCAR.
+  if [ -n "$SUBLEVELS" ]; then DECONT=1; else DECONT=0; fi
   SUBLEVEL_INCARS=""  # each ms_*/INCAR is already in place
 else
-  [ -d "$INPUT_DIR" ] || fail "input dir '$INPUT_DIR' missing (run this from the all_bands folder)"
+  [ -d "$INPUT_DIR" ] || fail "input dir '$INPUT_DIR' missing (run this from the tree basis folder: AO, UO, ...)"
   case ${DEFECT:-} in ''|*'<defect>'*) fail "DEFECT unset or still placeholder: '${DEFECT:-}'" ;; esac
   case ${PHONON_PATH:-} in ''|*'<path_to_phonon_data.npz>'*) fail "PHONON_PATH unset or still placeholder: '${PHONON_PATH:-}'" ;; esac
   if [ "$ORDER" = "convergence" ]; then
@@ -139,7 +139,7 @@ if [ "$ORDER" = "second_order" ] && [ "$PAIR_MODE" = "all" ]; then
   [ -n "$PAIRS" ] || fail "get_n_modes --pairs returned no pairs for $PHONON_PATH"
 fi
 if [ "$ORDER" = "ground_state" ]; then
-  echo "Preflight OK: ground state in $HEAD_DIR, sublevels $SUBLEVELS, binary=$binary"
+  echo "Preflight OK: ground state in $HEAD_DIR, ${SUBLEVELS:+sublevels $SUBLEVELS}${SUBLEVELS:-one ZFS run}, binary=$binary"
 else
 echo "Preflight OK: $ORDER, $(echo $MODES | wc -w) modes${PAIR_MODE:+, pair_mode=$PAIR_MODE}${PAIRS:+, $(echo "$PAIRS" | wc -l) pairs by frequency gap}${STEPS:+, steps $STEPS}, binary=$binary"
 case $DISPLACEMENT in
@@ -614,6 +614,30 @@ if [ "$ORDER" = "ground_state" ]; then
   fi
   rm -f CHECK
   echo "$ID: starting job for ground state"
+  if [ "$DECONT" = 0 ]; then
+    # ZFS_AO / ZFS_UO: the INCAR is the self-consistent ZFS run itself (no WAVECAR, alignment or sublevels)
+    if job_ending; then
+      echo "$ID: ground state not run -- the job is $JOB_STATE"
+      exit 0
+    fi
+    if srun $binary; then
+      echo "$ID: ground state VASP finished"
+    else
+      status=$?
+      if job_end_stop "ground state"; then
+        exit 0
+      fi
+      echo "$ID: VASP exited with $status for the ground state"
+      exit 1
+    fi
+    if [ -f OUTCAR ] && grep -qzP "$ZFS_REGEX_PATTERN" OUTCAR; then
+      : > .done
+      echo "$ID: Done! ground state (one ZFS run)"
+      exit 0
+    fi
+    echo "$ID: ground state: no ZFS block in OUTCAR"
+    exit 1
+  fi
   if scf_reusable .; then
     echo "$ID: ground state: SCF finished earlier -- ZFS of the sublevels left from its WAVECAR"
   else

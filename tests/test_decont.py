@@ -183,6 +183,6 @@ def test_default_tree_is_unchanged_by_the_decont_option(tmp_path):
     defect = _defect(tmp_path)
     build_perturbation_tree(defect, [0.025], defect / "data" / "phonon_data.npz", displacement="normalized",
                             conv_modes=None, array_jobs=1, vasp_binary=Path("/bin/true"))
-    inp = defect / "first_order" / "pert_0.025" / "all_bands" / "input"
+    inp = defect / "first_order" / "pert_0.025" / "AO" / "input"
     assert not (inp / "sublevels").exists()
     assert _tag((inp / "INCAR").read_text(), "LDMATRIX") == ".TRUE."

@@ -10,6 +10,7 @@ from pathlib import Path
 
 import numpy as np
 
+from spinlabs.models import normalize_calc_method
 from spinlabs.logging_utils import get_logger
 from spinlabs.registry import find_runs, more_complete
 from spinlabs.relaxation_dynamics import INIT_STATES, find_t1_files
@@ -19,9 +20,9 @@ LOGGER = get_logger(__name__)
 # Significant figures of every number in the tables.
 SIG_FIGS = 3
 _INIT_STATE_HEADERS = {"ms_1": "$m_s=+1$", "ms_0": "$m_s=0$", "ms_-1": "$m_s=-1$"}
-_METHOD_SUFFIX = {"all_bands": "", "defect_band_approx": " (spin corrected)", "full_decont": " (full decontamination)"}
-# all_bands before the spin-corrected row of the same defect.
-_METHOD_RANK = {"all_bands": 0, "defect_band_approx": 1, "full_decont": 2}
+_METHOD_SUFFIX = {"AO": "", "UO": " (spin corrected)", "full_decont": " (full decontamination)"}
+# AO before the spin-corrected UO row of the same defect (keys: spinlabs.methods canonical names).
+_METHOD_RANK = {"AO": 0, "UO": 1, "full_decont": 2}
 _PERT_RE = re.compile(r"(?<![A-Za-z])pert_([0-9.]+)")
 
 
@@ -39,7 +40,8 @@ class T1Row:
     @property
     def label(self) -> str:
         head = f"{self.defect} {self.cell}" if self.cell is not None else self.defect
-        return head + _METHOD_SUFFIX.get(self.method, f" ({self.method.replace('_', ' ')})")
+        method = normalize_calc_method(self.method) or ""
+        return head + _METHOD_SUFFIX.get(method, f" ({method.replace('_', ' ')})")
 
     def sort_key(self) -> tuple:
         # Largest supercell first within a defect, as in the reference table.
@@ -47,7 +49,7 @@ class T1Row:
             self.defect,
             -(self.cell or 0),
             self.pert if self.pert is not None else float("inf"),
-            _METHOD_RANK.get(self.method, 99),
+            _METHOD_RANK.get(normalize_calc_method(self.method), 99),
             self.method,
         )
 
@@ -254,15 +256,15 @@ def format_t1_table(
 
 # calc_method -> table column for D and T1.
 METHOD_COLUMN = {
-    "all_bands": "contaminated",  # ZFS_hyp: all-electron bands, no charge correction applied
-    "defect_band_approx": "corrected",  # ZFS_occup: defect-band approximation, charge-corrected
+    "AO": "contaminated",  # ZFS_AO: all orbitals, no correction applied
+    "UO": "corrected",  # ZFS_UO: unpaired orbitals (defect-band approximation), spin-corrected
     "full_decont": "decontaminated",  # ZFS_full: full spin decontamination (spin sublevels)
 }
 COLUMNS = ("corrected", "contaminated")  # always in the defect table
 OPTIONAL_COLUMNS = ("decontaminated",)  # in the defect table when some defect has a value for it
-# The paper's names of the methods: unpaired electrons (defect-band approximation), all electrons, and the
+# The paper's names of the methods: unpaired orbitals (defect-band approximation), all orbitals, and the
 # full spin decontamination
-COLUMN_NAMES = {"corrected": "UE", "contaminated": "AE", "decontaminated": "FD"}
+COLUMN_NAMES = {"corrected": "UO", "contaminated": "AO", "decontaminated": "FD"}
 
 # What the defect table fills in by hand per defect: the name it shows, the configuration (lattice sites),
 # and the measured D (MHz, as printed) with its BibTeX key. Defects missing here show their own name and ---.
@@ -317,16 +319,13 @@ def infer_defect(folder: Path) -> str:
 
 
 def _method_column(npz_path: Path, calc_method: str | None = None) -> str | None:
-    """Table column from the stored calc_method, else from the filename."""
-    from spinlabs.models import normalize_calc_method
+    """Table column from the stored calc_method, else from the file name (new or legacy method names)."""
+    from spinlabs.methods import method_from_path
 
     stored = normalize_calc_method(calc_method)
     if stored in METHOD_COLUMN:
         return METHOD_COLUMN[stored]
-    for fragment, column in METHOD_COLUMN.items():
-        if fragment in npz_path.name:
-            return column
-    return None
+    return METHOD_COLUMN.get(method_from_path(npz_path.name))
 
 
 def _is_sublevel_file(path: Path) -> bool:
@@ -343,7 +342,7 @@ def collect_d_rows(paths: list[Path]) -> list[dict]:
 
     ``paths`` are packaged ZFS npz files and/or folders, which are searched
     for packaged npz files (``*_raw_zfs_data_*.npz``) and relaxed-structure
-    ground states (``ZFS_hyp/OUTCAR``, ``ZFS_occup/OUTCAR``). The per-sublevel files of
+    ground states (``ZFS_AO/OUTCAR``, ``ZFS_UO/OUTCAR`` or their legacy names). The per-sublevel files of
     a full-decontamination set count as one source, the decontaminated set.
     """
     from spinlabs.models import RawZFSData
@@ -399,10 +398,10 @@ def run_packages(conn, t1_rows: list["T1Row"]) -> list[Path]:
 def collect_outcar_rows(folder: Path) -> list[dict]:
     """Read ground-state ZFS straight from relaxed-structure folders.
 
-    ``folder`` is either the defect folder itself (containing ZFS_hyp/ and
-    ZFS_occup/) or a parent folder containing defect folders; ZFS_* dirs are
-    found recursively. ZFS_hyp/OUTCAR is the contaminated (all-electron bands)
-    ground state, ZFS_occup/OUTCAR the corrected one (defect-band approx),
+    ``folder`` is either the defect folder itself (containing ZFS_AO/ and
+    ZFS_UO/, or the legacy ZFS_hyp/ and ZFS_occup/) or a parent folder containing defect folders;
+    ZFS_* dirs are found recursively. ZFS_AO/OUTCAR is the contaminated (all orbitals)
+    ground state, ZFS_UO/OUTCAR the corrected one (unpaired orbitals),
     which gets the same spin-correction scaling as RawZFSData.load applies
     to packaged approx data (its factor from the run's NUPDOWN).
     """
@@ -410,9 +409,12 @@ def collect_outcar_rows(folder: Path) -> list[dict]:
     from spinlabs.parsers import defect_spin, parse_outcar_zfs
 
     rows: list[dict] = []
-    for zfs_dir in sorted(folder.rglob("ZFS_hyp")) + sorted(folder.rglob("ZFS_occup")):
+    from spinlabs.methods import METHODS, method_of_folder
+
+    names = [n for key in ("AO", "UO") for n in (METHODS[key].ground_state, *METHODS[key].legacy_ground_state)]
+    for zfs_dir in [d for name in names for d in sorted(folder.rglob(name))]:
         defect_root = zfs_dir.parent
-        corrected = zfs_dir.name == "ZFS_occup"
+        corrected = method_of_folder(zfs_dir.name) == "UO"
         outcar = zfs_dir / "OUTCAR"
         if not outcar.is_file():
             continue
@@ -425,12 +427,12 @@ def collect_outcar_rows(folder: Path) -> list[dict]:
             LOGGER.warning(f"no ZFS block in {outcar}; left out")
             continue
         if corrected:
-            # The spin (S = NUPDOWN / 2) of the ZFS_occup run sets the correction factor.
+            # The spin (S = NUPDOWN / 2) of the ZFS_UO run sets the correction factor.
             spin, _ = defect_spin(zfs_dir)
             if spin is None:
                 LOGGER.warning(f"no NUPDOWN in {zfs_dir}/INCAR or OUTCAR; spin correction assumes S = 1 (x3/2)")
             scale = spin_correction_scale(spin)
-            LOGGER.debug(f"applied spin correction (defect_band_approx, S = {spin}, x{scale:.4g}): {outcar}")
+            LOGGER.debug(f"applied spin correction (UO, S = {spin}, x{scale:.4g}): {outcar}")
             zfs = apply_spin_correction(zfs, scale)
         rows.append({
             "defect": infer_defect(defect_root),
@@ -496,7 +498,7 @@ def merge_rows(d_rows: list[dict], t1_rows: list[T1Row] = ()) -> list[dict]:
                 f"vs {row['d_mhz']:.3f} MHz ({row['source']}); keeping the first"
             )
     for t1_row in t1_rows:
-        column = METHOD_COLUMN.get(t1_row.method)
+        column = METHOD_COLUMN.get(normalize_calc_method(t1_row.method))
         if column is None:
             continue
         cell = str(t1_row.cell) if t1_row.cell is not None else ""
@@ -575,7 +577,7 @@ def render_defect_table(
     are comma-separated with a superscript letter per cell, explained in the
     caption. Rows are grouped under base-crystal headers (4H-SiC, Diamond); the
     configuration and the measured D with its citation come from DEFECT_INFO.
-    The methods are named UE (defect_band_approx) and AE (all_bands). The T1
+    The methods are named UO (unpaired orbitals) and AO (all orbitals), FD for the full decontamination. The T1
     columns are spin-independent: :data:`T1_STATE_ROLES` names each spin's
     pumped and other states, and the caption spells them out.
     Requires ``booktabs`` and ``siunitx``.

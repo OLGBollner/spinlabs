@@ -19,7 +19,7 @@ from spinlabs.logging_utils import (
 )
 
 from spinlabs.constants import CONSTANTS
-from spinlabs.models import PhononSpectrum, RawZFSData, SpinPhononCouplingData
+from spinlabs.models import PhononSpectrum, RawZFSData, SpinPhononCouplingData, normalize_calc_method
 from spinlabs.registry import ensure_db, find_phonon, finish_run, parse_orders, register_file, register_run
 from spinlabs.parsers import (
     parse_phonon_data,
@@ -75,7 +75,7 @@ def get_unique_run_dir(
     output_root: str | Path = "runs",
     defect: str = "defect",
     cell_size: str | int = "",
-    calc_method: str = "all_bands",
+    calc_method: str = "AO",
     order: int = 1,
     pert_scale: float | None = None,
     run_name: str | None = None,
@@ -104,7 +104,7 @@ def get_unique_run_dir(
     now_str = datetime.now().strftime("%Y%m%d_%H%M%S")
     leaf = (
         base / f"{defect}_{cell_size}" / _pert_dir_name(pert_scale)
-        / calc_method / now_str
+        / (normalize_calc_method(calc_method) or "unknown") / now_str
     )
     if not leaf.exists():
         leaf.mkdir(parents=True, exist_ok=True)
@@ -202,7 +202,7 @@ def load_raw_inputs(
     raw_zfs_file_1d: str | Path | None = None,
     raw_zfs_file_2d: str | Path | None = None,
     phonon_file: str | Path | None = None,
-    calc_method: str = "all_bands",
+    calc_method: str = "AO",
     zfs_folder: str | None = None,
     order: int | None = None,
     pert_scale: float | None = None,
@@ -439,7 +439,7 @@ def run_full_pipeline(
     coupling_file: str | Path | None = None,
     phonon_file: str | Path | None = None,
     two_phonon_file: str | Path | None = None,
-    calc_method: str = "all_bands",
+    calc_method: str = "AO",
     zfs_folder: str | None = None,
     order: list[int] | int | None = None,
     pert_scale: float | None = None,
@@ -530,7 +530,7 @@ def _execute_pipeline(
     coupling_file: str | Path | None = None,
     phonon_file: str | Path | None = None,
     two_phonon_file: str | Path | None = None,
-    calc_method: str = "all_bands",
+    calc_method: str = "AO",
     zfs_folder: str | None = None,
     order: int | None = None,
     pert_scale: float | None = None,
@@ -588,8 +588,8 @@ def _execute_pipeline(
         # A single explicitly requested order pins the parsing/branch scalar.
         order = user_orders[0]
 
-    if zfs_folder is None:
-        zfs_folder = "ZFS_hyp" if calc_method == "all_bands" else "ZFS_occup"
+    # zfs_folder None: the parser takes the method's ground-state folder (ZFS_AO / ZFS_UO, or a legacy name)
+    calc_method = normalize_calc_method(calc_method) or calc_method
 
     raw_data: RawZFSData | None = None
     spectrum: PhononSpectrum | None = None
@@ -639,10 +639,9 @@ def _execute_pipeline(
             if raw_data.calc_method not in (None, "None", ""):
                 calc_method = raw_data.calc_method
             elif raw_zfs_file:
-                for cm in ("all_bands", "defect_band_approx", "approx"):
-                    if cm in str(raw_zfs_file):
-                        calc_method = "all_bands" if cm == "all_bands" else "defect_band_approx"
-                        break
+                from spinlabs.methods import method_from_path
+
+                calc_method = method_from_path(raw_zfs_file) or calc_method
 
         # Orders actually present in the input data; ``dims`` is the single
         # source of truth for what the data contains, ``order`` keeps the

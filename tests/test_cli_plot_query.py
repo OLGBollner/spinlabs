@@ -296,7 +296,7 @@ def test_plot_query_multi_valued_filters_become_repeated_fields():
         ["plot", "rates", "--query", "--defect", "NV", "ClV", "--pert-scale", "0.1", "0.025", "--method", "all"]
     )
     assert _query_filters(args) == [
-        ("defect", "NV"), ("defect", "ClV"), ("method", "all_bands"), ("pert", 0.1), ("pert", 0.025),
+        ("defect", "NV"), ("defect", "ClV"), ("method", "AO"), ("pert", 0.1), ("pert", 0.025),
     ]
 
 
@@ -384,7 +384,7 @@ def test_plot_convergence_query_filters(conv_files, monkeypatch):
     f = conv_files
     assert _plot_conv(monkeypatch, ["--query", "--defect", "NV", "--method", "all"]) == [f["old"], f["new"], f["mw"]]
     assert _plot_conv(monkeypatch, ["--query", "--cell-size", "128"]) == [f["div"]]
-    assert _plot_conv(monkeypatch, ["--query", "--method", "approx"]) == [f["occup"]]
+    assert _plot_conv(monkeypatch, ["--query", "--method", "unpaired"]) == [f["occup"]]
 
 
 def test_plot_convergence_latest_keeps_each_folder(conv_files, monkeypatch):

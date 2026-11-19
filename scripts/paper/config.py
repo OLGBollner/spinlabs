@@ -43,9 +43,11 @@ QUOTE_T_RATIO = (100.0, 300.0, 500.0)  # K, T1(fill)/T1(computed) quoted
 CAMBRIA = dict(A1=0.0700e3, B1=0.910e3, Delta1=62.5, A2=0.169e3, B2=2.94e3, Delta2=139.0, A3=0.0, B3=0.0)
 
 # ------------------------------------------------------------------ systems and packages
-SCHEMES = {"AO": "all_bands", "UO": "defect_band_approx"}  # all orbitals / unpaired orbitals
+SCHEMES = {"AO": "AO", "UO": "UO"}  # all orbitals / unpaired orbitals (spinlabs.methods calc_method)
 
 
+# The packages below were written before the rename: their folders and names still say all_bands /
+# defect_band_approx (read as AO / UO). New packages are named AO / UO.
 def _pkg(system, step, method, date, suffix="12d"):
     return f"{system}/pert_{step:g}/{method}/{date}/{system}_raw_zfs_data_{method}_{suffix}.npz"
 

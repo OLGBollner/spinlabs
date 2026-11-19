@@ -67,8 +67,10 @@ LOGGER = get_logger(__name__)
 
 # One categorical slot per mode, in pack order; more modes than slots are not plotted
 COLORS = ["#2a78d6", "#eb6834", "#1baf7a", "#eda100", "#e87ba4", "#008300"]
-METHODS = {"all": "all bands", "approx": "defect band approx", "decont": "full decont"}  # pack metadata 'method' -> column title
-STANDARD_KEYS = {"test_all", "test_occup", "test_decont"}  # folder suffixes the column title need not repeat
+# pack metadata 'method' (any spelling, spinlabs.methods) -> column title
+METHODS = {"AO": "AO", "UO": "UO", "full_decont": "full decont"}
+# folder suffixes the column title need not repeat (new and legacy convergence folder names)
+STANDARD_KEYS = {"test_AO", "test_UO", "test_decont", "test_all", "test_occup"}
 FAINT = 0.4  # alpha of an unresolved coefficient's lines and points
 BAND_WIDTH, BAND_ALPHA = 10, 0.25  # a mode's safe |Q| band along its fit line
 COMMON_COLOR = "#e5f4e4"  # the |Q| column safe for every mode
@@ -151,11 +153,14 @@ def analyse(path, modes=None, noise=None, target=SNR_TARGET, tol=TRUNC_TOL, cent
 
 
 def column_title(path) -> str:
-    """'NV_512 all bands', plus the folder suffix when it is not the standard test_all/test_occup."""
+    """'NV_512 AO', plus the folder suffix when it is not a standard one (test_AO, test_UO, test_decont or the
+    legacy test_all / test_occup)."""
+    from spinlabs.methods import normalize_calc_method
+
     meta = load_convergence(path).metadata
     name = "_".join(str(meta[k]) for k in ("defect", "cell") if meta.get(k) is not None) or Path(path).stem
     key = meta.get("method_key")
-    title = f"{name} {METHODS.get(meta.get('method'), key or '')}".strip()
+    title = f"{name} {METHODS.get(normalize_calc_method(meta.get('method')), key or '')}".strip()
     return f"{title} [{key}]" if key and key not in STANDARD_KEYS else title
 
 

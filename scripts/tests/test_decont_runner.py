@@ -265,3 +265,37 @@ def test_the_ground_state_job_ends_cleanly_and_resumes(tmp_path):
     assert _run_ground_state(tmp_path, folder.parent, job="301").returncode == 0
     assert (ground / ".done").is_file()
     assert sorted((tmp_path / "srun.log").read_text().split("\n")[:-1]) == ["zfs ms_0_4", "zfs ms_1"]
+
+
+def _plain_ground_state(tmp_path: Path, srun: str, job: str = "400", **extra_env):
+    """ZFS_AO as spinlabs init zfs makes it (no ms_* sublevels), run in the runner's ground_state mode
+    with ``srun`` as the fake VASP."""
+    defect = _defect(tmp_path)
+    zfs = defect / "ZFS_AO"
+    zfs.mkdir(exist_ok=True)
+    for name in ("POSCAR", "KPOINTS", "POTCAR"):
+        (zfs / name).write_text(f"{name}\n")
+    (zfs / "INCAR").write_text(INCAR + "NSW = 0\nIBRION = -1\n")
+    bin_dir = _fake_slurm(tmp_path)
+    (bin_dir / "srun").write_text(f"#!/bin/sh\nbasename \"$(pwd)\" >> \"$SRUN_LOG\"\n{srun}\n")
+    env = {**ENV, "PATH": f"{bin_dir}:{ENV['PATH']}", "SPINLABS_CODE": str(REPO), "DEFECT": defect.name,
+           "binary": "/bin/true", "SLURM_JOB_ID": job, "SRUN_LOG": str(tmp_path / "srun.log"), **extra_env}
+    r = subprocess.run(["sh", str(SCRIPTS / "perturbation_runner.sh"), "ground_state"], cwd=zfs, env=env,
+                       capture_output=True, text=True)
+    return zfs, r
+
+
+def test_a_ground_state_without_sublevels_is_one_plain_zfs_run(tmp_path):
+    zfs, r = _plain_ground_state(tmp_path, f"printf '%s' '{ZFS}' > OUTCAR")
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "Done! ground state (one ZFS run)" in r.stdout
+    assert (zfs / ".done").is_file()
+    assert (tmp_path / "srun.log").read_text().split() == ["ZFS_AO"]  # one VASP run, in the folder itself
+    assert not any((zfs / name).exists() for name in (".scf_done", ".wavecar_aligned"))  # no decont steps
+    assert "align" not in r.stdout
+
+
+def test_a_plain_ground_state_without_a_zfs_block_fails(tmp_path):
+    zfs, r = _plain_ground_state(tmp_path, "echo 'no block' > OUTCAR")
+    assert r.returncode == 1 and "no ZFS block" in r.stdout
+    assert not (zfs / ".done").exists()

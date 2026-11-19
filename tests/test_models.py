@@ -243,7 +243,7 @@ class TestSpinPhononCouplingData:
         assert combined.defect == "NV"
         assert combined.cell_size == 512
         assert combined.pert_scale == pytest.approx(0.1)
-        assert combined.calc_method == "all_bands"
+        assert combined.calc_method == "AO"
         assert combined.order == 2
         assert 0 in combined.first_order
         assert (0, 0) in combined.second_order

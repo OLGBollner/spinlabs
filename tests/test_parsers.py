@@ -227,7 +227,7 @@ class TestParsers:
         assert raw_data.defect == "NV"
         assert raw_data.cell_size == 512
         assert raw_data.pert_scale == pytest.approx(0.1)
-        assert raw_data.calc_method == "defect_band_approx"
+        assert raw_data.calc_method == "UO"
         assert raw_data.order == 1
         assert raw_data.ground_state_zfs is not None
         assert raw_data.spin_correction_applied is True
@@ -263,7 +263,7 @@ class TestParsers:
         assert raw_data.defect == "NV"
         assert raw_data.cell_size == 512
         assert raw_data.pert_scale == pytest.approx(0.1)
-        assert raw_data.calc_method == "all_bands"
+        assert raw_data.calc_method == "AO"
         assert raw_data.order == 2
         assert (411, 411) in raw_data.second_order
         assert (411, 412) in raw_data.second_order
@@ -365,7 +365,7 @@ class TestSpinCorrectionOnLoad:
         assert loaded.ground_state_zfs.matrix[0, 0] == pytest.approx(-1500.0e6 * h)
         entry = loaded.first_order[1060]
         assert entry["tensor"][2, 2] == pytest.approx(2970.0e6 * h)
-        assert "applied spin correction (defect_band_approx, x1.5)" in caplog.text
+        assert "applied spin correction (UO, x1.5)" in caplog.text
 
         # Saving the corrected object persists the flag; re-loading must not rescale
         out2 = tmp_path / "resaved.npz"

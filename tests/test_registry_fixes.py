@@ -128,7 +128,7 @@ def test_run_query_normalizes_method(tmp_path, monkeypatch):
         output_root=str(tmp_path / "runs"),
     )
     run_mod._run_query(args)
-    assert captured["calc_method"] == "all_bands"
+    assert captured["calc_method"] == "AO"
 
 
 def _make_raw_zfs(tmp_path, second=True, name="NV_512_raw_zfs_data_all_bands_12d.npz"):
@@ -406,3 +406,22 @@ def test_find_runs_repeated_field_ors_values(tmp_path):
     assert names([("defect", "NV"), ("defect", "ClV")]) == ["ClV_0.1", "NV_0.025", "NV_0.1"]
     assert names([("defect", "NV"), ("defect", "DiV"), ("pert", 0.025)]) == ["DiV_0.025", "NV_0.025"]
     assert names([("pert", 0.1), ("pert", 0.025), ("defect", "ClV")]) == ["ClV_0.1"]
+
+
+def test_old_method_names_answer_queries_for_the_new_ones(tmp_path):
+    """Rows registered under all_bands / defect_band_approx are found by AO / UO (any spelling), and an
+    old and a new package of one configuration compete under ``latest``."""
+    conn = ensure_db()
+    old_ao = tmp_path / "NV_512_raw_zfs_data_all_bands_12d.npz"
+    old_uo = tmp_path / "NV_512_raw_zfs_data_defect_band_approx_12d.npz"
+    new_ao = tmp_path / "NV_512_raw_zfs_data_AO_12d.npz"
+    _register(conn, old_ao, orders=[1, 2], method="all_bands")
+    _register(conn, old_uo, orders=[1, 2], method="defect_band_approx")
+    _register(conn, new_ao, orders=[1, 2], method="AO")
+
+    for name in ("AO", "all", "all_bands"):
+        assert {p.name for p in find_packaged(conn, calc_method=name)} == {old_ao.name, new_ao.name}
+    for name in ("UO", "unpaired", "defect_band_approx"):
+        assert {p.name for p in find_packaged(conn, calc_method=name)} == {old_uo.name}
+    latest = {p.name for p in find_packaged(conn, latest=True)}
+    assert latest == {new_ao.name, old_uo.name}  # the newer AO package replaces the all_bands one

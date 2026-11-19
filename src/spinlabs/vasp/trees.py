@@ -14,10 +14,10 @@ from spinlabs.vasp.modes import mode_numbers
 from spinlabs.symmetry import classify_and_pair, filter_degenerate_partners, symmetrize_degenerate_groups
 
 from spinlabs.logging_utils import get_logger, section
+from spinlabs.methods import METHODS, basis_dir, convergence_dir, defect_folder_of, ground_state_dir
 
 LOGGER = get_logger(__name__)
 
-RUN_STAGES = ("relaxation_data", "ZFS_hyp", "ZFS_occup")
 
 FIRST_ORDER_SCRIPT = "run_perturbation_first_order.sh"
 SECOND_ORDER_SCRIPT = "run_perturbation_second_order.sh"
@@ -25,25 +25,17 @@ CONVERGENCE_SCRIPT = "run_convergence.sh"
 COPIED_FILES = ("INCAR", "POSCAR", "KPOINTS", "POTCAR", "CHGCAR")
 REQUIRED_FILES = COPIED_FILES[:4]  # CHGCAR optional
 
-# basis -> source ZFS folder (relative to the defect/output folder)
-BASIS_SOURCE = {
-    "all_bands": "ZFS_hyp",
-    "defect_band_approx": "ZFS_occup",
-}
-# basis -> step-size convergence folder of the defect (`spinlabs package --conv` finds convergence*,
-# and tells the methods apart by "all"/"occup" in the name)
-CONVERGENCE_FOLDER = {
-    "all_bands": "convergence_test_all",
-    "defect_band_approx": "convergence_test_occup",
-}
-# full spin decontamination (Biktagirov): one tree basis, from the all-electron ZFS_hyp run
-DECONT_BASIS = "full_decont"
-DECONT_SOURCE = {DECONT_BASIS: "ZFS_hyp"}
-DECONT_CONVERGENCE_FOLDER = {DECONT_BASIS: "convergence_test_decont"}
+# The methods a defect's trees are built for (spinlabs.methods): the AO and UO trees take their input
+# from ZFS_AO and ZFS_UO, the full-decontamination trees from ZFS_AO. Folder names come from the
+# method table; an existing folder under a legacy name (ZFS_hyp, all_bands/, convergence_test_all,
+# ...) is used where it is, never duplicated under the new one.
+TREE_METHODS = ("AO", "UO")
+# full spin decontamination (Biktagirov): one tree basis, from the all-orbital ZFS_AO run
+DECONT_BASIS = METHODS["full_decont"].basis
 SUBLEVELS_DIR = "sublevels"  # input/sublevels/<name>/INCAR: the ALGO=None ZFS run of each spin sublevel
 # <defect>/ZFS_full: the unperturbed ground state through the same steps, once per defect, submitted
 # on its own (build_decont_ground_state); spinlabs package reads the ground-state tensors there
-DECONT_GROUND_STATE = "ZFS_full"
+DECONT_GROUND_STATE = METHODS["full_decont"].ground_state
 SUBLEVEL_TIME_FRACTION = 0.1  # time of one ALGO=None sublevel run, as a fraction of the reference ZFS run
 
 _DISPLACEMENT_LINE = re.compile(r"^\s*DISPLACEMENT\s*=\s*(\S+)", re.M)
@@ -238,11 +230,10 @@ def decont_sublevel_incar(incar: str, level) -> str:
 
 
 def decont_ground_state(tree: Path) -> Path | None:
-    """The ground state ZFS_full of the defect a tree belongs to: next to the first parent's ZFS_hyp/."""
-    for parent in Path(tree).resolve().parents:
-        if (parent / "ZFS_hyp").is_dir():
-            return parent / DECONT_GROUND_STATE
-    return None
+    """The ground state ZFS_full of the defect a tree belongs to: next to the ground-state folders
+    (ZFS_AO, ZFS_UO, or their legacy names) of the first parent that has them."""
+    defect = defect_folder_of(tree)
+    return defect / DECONT_GROUND_STATE if defect is not None else None
 
 
 def guarded_incar(incar: str, where: Path) -> str:
@@ -285,7 +276,7 @@ def build_decont_ground_state(
 ) -> list[str]:
     """Fill <out>/ZFS_full, the ground state of the full spin decontamination, ready to submit on its own.
 
-    From ZFS_hyp: INCAR (the SCF, guarded like the trees' input and restart-ready), POSCAR, KPOINTS,
+    From ZFS_AO (or the legacy ZFS_hyp): INCAR (the SCF, guarded like the trees' input and restart-ready), POSCAR, KPOINTS,
     POTCAR, CHGCAR; one ms_*/INCAR per spin sublevel (ALGO=None from ../WAVECAR); and
     run_ground_state.sh (one job: the runner's ground_state mode). Its time limit is the reference
     ZFS run's wall time with the sublevels' share (SUBLEVEL_TIME_FRACTION), capped at ``max_hours``.
@@ -308,21 +299,33 @@ def build_decont_ground_state(
     except ValueError as error:
         LOGGER.error(f"{dst}: cannot set up the spin sublevels: {error}")
         return [f"{dst}: cannot set up the spin sublevels: {error}"]
+    per_sim = read_outcar_time(src)
+    seconds = per_sim * (1 + SUBLEVEL_TIME_FRACTION * len(levels)) if per_sim is not None else None
+    write_ground_state_script(dst, out.name, "ground_state", seconds, vasp_binary=vasp_binary, max_hours=max_hours)
+    LOGGER.info(f"ground state {dst}: SCF + sublevels {', '.join(levels)}; submit with: sh {GROUND_STATE_SCRIPT}")
+    return []
+
+
+def write_ground_state_script(
+    dst: Path, defect: str, job: str, seconds: float | None, *, vasp_binary: Path | None = None,
+    max_hours: float | None = None,
+) -> Path:
+    """run_ground_state.sh in ``dst`` (the runner's ground_state mode: ZFS_full with its sublevels, or one
+    plain ZFS run in ZFS_AO / ZFS_UO): -J <defect>_<job>, -t from ``seconds`` x 1.5 (one job: margin for
+    a slow node), capped at ``max_hours``."""
     text = (TEMPLATES / GROUND_STATE_SCRIPT).read_text()
-    text = replace_tag(text, "DEFECT", out.name)
+    text = replace_tag(text, "DEFECT", defect)
     if vasp_binary:
         text = replace_tag(text, "BINARY", str(vasp_binary))
     text = replace_tag(text, "SPINLABS_REPO", str(repo_root()))
-    text = replace_sbatch(text, "-J", f"{out.name}_ground_state")
-    per_sim = read_outcar_time(src)
-    if per_sim is not None:
-        seconds = per_sim * (1 + SUBLEVEL_TIME_FRACTION * len(levels)) * 1.5  # one job: margin for a slow node
+    text = replace_sbatch(text, "-J", f"{defect}_{job}")
+    if seconds is not None:
+        seconds *= 1.5
         if max_hours is not None:
             seconds = min(seconds, max_hours * 3600)
         text = replace_sbatch(text, "-t", sbatch_time(seconds))
     (dst / GROUND_STATE_SCRIPT).write_text(text)
-    LOGGER.info(f"ground state {dst}: SCF + sublevels {', '.join(levels)}; submit with: sh {GROUND_STATE_SCRIPT}")
-    return []
+    return dst / GROUND_STATE_SCRIPT
 
 
 # job-script templates copied into every tree (package data, next to this module)
@@ -412,44 +415,6 @@ def n_tasks_for(order: str, pair_mode: str | None, n_modes: int) -> int:
     if pair_mode == "all":
         return n_modes * (n_modes + 1) // 2
     return n_modes  # diag
-
-
-# --------------------------------------------------------------------------- #
-# ZFS tree
-# --------------------------------------------------------------------------- #
-def build_zfs_tree(inp: Path, run_dirs: list[str] | tuple[str, ...] = RUN_STAGES, out: Path | None = None) -> Path:
-    """Create the VASP directory tree for a point-defect calculation.
-
-    `inp` holds data/ (POSCAR or structure.vasp) and template/relax/
-    (INCAR, KPOINTS, POTCAR, run_vasp, ...).  The output tree gets a copy
-    of data/ plus one directory per run stage, each seeded from
-    template/relax and given the pristine POSCAR.  Refuses to overwrite
-    an existing output directory.  Returns the output path.
-    """
-    inp = inp.resolve()
-    data_src = inp / "data"
-    relax_src = inp / "template" / "relax"
-    if not data_src.is_dir() or not relax_src.is_dir():
-        raise FileNotFoundError(f"{inp} must contain 'data/' and 'template/relax/'.")
-
-    poscar = data_src / "POSCAR"
-    struct_file = poscar if poscar.is_file() else data_src / "structure.vasp"
-    if not struct_file.is_file():
-        raise FileNotFoundError(f"no POSCAR or structure.vasp in {data_src}.")
-
-    out = out if out is not None else Path(inp.name)
-    if out.exists():
-        raise FileExistsError(f"output directory {out} already exists, refusing to overwrite")
-
-    section(LOGGER, f"Create ZFS tree {out} from {inp}")
-    shutil.copytree(data_src, out / "data")
-
-    for stage in run_dirs:
-        dst = out / stage
-        shutil.copytree(relax_src, dst)
-        shutil.copy2(struct_file, dst / "POSCAR")
-        LOGGER.info(f"created {dst} (template/relax + POSCAR)")
-    return out
 
 
 # --------------------------------------------------------------------------- #
@@ -598,7 +563,7 @@ def build_perturbation_tree(
     """Build ready-to-go perturbed ZFS run folders under a defect directory.
 
     `out` is the defect folder (its basename is the defect name); it must
-    already contain ZFS_hyp/ and ZFS_occup/ with INCAR, POSCAR, KPOINTS and
+    already contain ZFS_AO/ and ZFS_UO/ (or the legacy ZFS_hyp/, ZFS_occup/) with INCAR, POSCAR, KPOINTS and
     POTCAR.  `phonon` should be the raw phonon npz (default
     <out>/data/phonon_data.npz) -- the tree always runs from a symmetrised
     file in <out>/data, created by resolve_sym_phonon if missing.
@@ -609,7 +574,7 @@ def build_perturbation_tree(
     With `central`, every step p instead gets first_order/ trees at +p and -p and no second_order/
     tree: the analysis takes central differences from them (``spinlabs package --central``).
     With `decont` the trees (and convergence folder) run the full spin decontamination instead,
-    one basis ``full_decont`` from ZFS_hyp (see prepare_basis).
+    one basis ``full_decont`` from ZFS_AO (see prepare_basis).
     Returns the list of failure messages (empty on success).
     """
     if not pert:
@@ -632,7 +597,7 @@ def build_perturbation_tree(
     LOGGER.info(f"phonon data: {phonon}")
     for order, p in jobs:
         for basis, src in sources.items():
-            dst = out / order / f"pert_{p}" / basis
+            dst = basis_dir(out / order / f"pert_{p}", basis)  # an existing legacy-named tree is kept
             if not _make_room(dst, force):
                 continue
             script_name = FIRST_ORDER_SCRIPT if order == "first_order" else SECOND_ORDER_SCRIPT
@@ -675,19 +640,17 @@ def build_perturbation_tree(
 
 
 def zfs_sources(out: Path, decont: bool = False) -> dict[str, Path]:
-    """basis -> the defect's ground-state ZFS folder (ZFS_hyp, ZFS_occup); both must hold the VASP input.
-
-    With ``decont`` only ZFS_hyp, the source of the full_decont basis.
+    """method -> the defect's ground-state ZFS folder its trees take their input from: AO -> ZFS_AO and
+    UO -> ZFS_UO (or their legacy names ZFS_hyp, ZFS_occup); with ``decont`` only full_decont -> ZFS_AO.
+    Each must hold the VASP input.
     """
     sources: dict[str, Path] = {}
-    for basis, folder in (DECONT_SOURCE if decont else BASIS_SOURCE).items():
-        src = out / folder
+    wanted = {DECONT_BASIS: "AO"} if decont else {m: m for m in TREE_METHODS}
+    for basis, source in wanted.items():
+        src = ground_state_dir(out, source)
         if not src.is_dir():
-            raise FileNotFoundError(
-                f"missing {src} -- "
-                + ("ZFS_hyp" if decont else "both ZFS_hyp and ZFS_occup")
-                + " must exist before creating perturbation folders"
-            )
+            needed = " and ".join(METHODS[m].ground_state for m in set(wanted.values()))
+            raise FileNotFoundError(f"missing {src} -- {needed} must exist before creating perturbation folders")
         for name in REQUIRED_FILES:
             if not (src / name).is_file():
                 raise FileNotFoundError(f"missing {name} in {src}")
@@ -768,9 +731,9 @@ def build_convergence_tree(
     decont: bool = False,
     ground_state: bool = True,
 ) -> list[str]:
-    """Step-size convergence folders of a defect: <out>/convergence_test_<all|occup>/.
+    """Step-size convergence folders of a defect: <out>/convergence_test_<AO|UO>/ (or the legacy test_all/occup).
 
-    Each holds input/ (from ZFS_hyp, ZFS_occup) and run_convergence.sh, which runs every
+    Each holds input/ (from ZFS_AO, ZFS_UO) and run_convergence.sh, which runs every
     1-based mode in `modes` at -p and +p for every step size p in `steps` (a sign there is
     ignored) into runs/<mode>_pert_<step>/,
     displaced by `displacement`, through the shared perturbation runner. Works on a new
@@ -789,11 +752,10 @@ def build_convergence_tree(
     failures: list[str] = []
     n_modes = n_modes_from_phonon(phonon)
     section(LOGGER, f"Convergence folders {out.name}: modes {modes}, steps {steps}, {displacement} displacements")
-    folders = DECONT_CONVERGENCE_FOLDER if decont else CONVERGENCE_FOLDER
     if decont and ground_state:
         failures.extend(build_decont_ground_state(out, vasp_binary=vasp_binary, max_hours=max_hours, force=force))
     for basis, src in zfs_sources(out, decont=decont).items():
-        dst = out / folders[basis]
+        dst = convergence_dir(out, basis)  # an existing legacy-named folder is kept
         if not _make_room(dst, force):
             continue
         failures.extend(

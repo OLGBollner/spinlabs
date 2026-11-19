@@ -6,10 +6,10 @@
 #SBATCH -t 2:30:00
 #SBATCH -p main
 
-# Ground state of the full spin decontamination: in this folder (<defect>/ZFS_full), the SCF of the
-# unperturbed structure that writes the WAVECAR, then the ALGO=None ZFS of every spin sublevel in its
-# ms_*/ subfolder from ../WAVECAR. One job, no array; submit it on its own (spinlabs package reads
-# the ground-state tensors from ms_*/OUTCAR). A rerun skips what is done.
+# A defect's unperturbed ground-state ZFS run, in this folder. In <defect>/ZFS_AO or ZFS_UO: one
+# self-consistent ZFS run of the INCAR. In <defect>/ZFS_full (the full spin decontamination): the SCF
+# that writes the WAVECAR, then the ALGO=None ZFS of every spin sublevel in its ms_*/ subfolder from
+# ../WAVECAR. One job, no array; submit it on its own. A rerun skips what is done.
 #
 # This file holds only what belongs to one tree: the SLURM header and the config below.
 # The loop itself (scripts/cluster/perturbation_runner.sh), the structure scripts and the
@@ -18,8 +18,8 @@
 # not plain sbatch: that snapshots SPINLABS_REPO at its current commit into
 # .spinlabs-code/<commit>/ here and submits this file with it, so every task of the
 # submission runs that one version even if the repo is pulled while the job runs.
-# create_perturbation_tree.py --full-decont places this file in <defect>/ZFS_full/ with the run's input
-# and fills the config (or set it by hand / export the variables before submitting).
+# spinlabs init zfs (and create_perturbation_tree.py --full-decont for ZFS_full) places this file next
+# to the run's input and fills the config (or set it by hand / export the variables before submitting).
 
 # ---- config (override via environment, e.g. BINARY=/path/vasp_std sh run_ground_state.sh) ----
 DEFECT=${DEFECT:-<defect>}

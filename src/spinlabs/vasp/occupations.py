@@ -11,7 +11,7 @@ from spinlabs.logging_utils import get_logger, section
 
 LOGGER = get_logger(__name__)
 
-GAMMA_KPOINTS = """Gamma point only (rewritten by relax_to_zfs)
+GAMMA_KPOINTS = """Gamma point only (written by spinlabs init zfs)
 0
 Gamma
 1 1 1
@@ -49,7 +49,7 @@ def occupied_bands_from_eigenval(eigenval: Path) -> tuple[int, int, int, set[int
     Returns (n_up, n_down, nbands, unpaired_up, unpaired_dn).  Occupied means
     occ > 0.5 in the respective spin column.  Assumes Gamma-only (one k-point)
     or takes the first k-point.  Unpaired bands are occupied in one spin
-    channel only (the defect states used by the defect_band_approx runs).
+    channel only (the defect states the UO runs keep).
     """
     lines = eigenval.read_text().splitlines()
     header = lines[5].split()
@@ -93,8 +93,20 @@ def patch_incar(
     nbands: int,
     unpaired_up: set[int] | None = None,
     unpaired_dn: set[int] | None = None,
+    unpaired_only: bool = False,
 ) -> str:
-    """Turn a relaxation INCAR into a single-point ZFS INCAR."""
+    """Turn a relaxation INCAR into a single-point ZFS INCAR: the self-consistent ZFS run (ALGO as in the
+    relaxation, never None), no ionic steps, LDMATRIX on.
+
+    The occupations (DOCCUP/DOCCDO) are the EIGENVAL ones, the AO scheme. With ``unpaired_only`` (the UO
+    scheme) they are 0 everywhere except the unpaired orbitals (``unpaired_up``/``unpaired_dn``, which
+    must be given); NUPDOWN is the same either way. ISMEAR and FERWE/FERDO stay as in the relaxation.
+    """
+    from spinlabs.vasp.trees import forbid_algo_none
+
+    text, algo_note = forbid_algo_none(text)
+    if algo_note:
+        LOGGER.warning(algo_note)
     body_lines = []
     for line in text.splitlines():
         stripped = line.strip()
@@ -105,6 +117,14 @@ def patch_incar(
             line = re.sub(r"ICHARG\s*=\s*2", "ICHARG = 1", line)  # 2 -> 1
         body_lines.append(line)
 
+    if unpaired_only:
+        if unpaired_up is None or unpaired_dn is None:
+            raise ValueError("the UO occupations need the unpaired bands (unpaired_up, unpaired_dn)")
+        doccup = format_occupations([1.0 if b in unpaired_up else 0.0 for b in range(1, nbands + 1)])
+        doccdo = format_occupations([1.0 if b in unpaired_dn else 0.0 for b in range(1, nbands + 1)])
+    else:
+        doccup = f"{n_up}*1.0 {nbands - n_up}*0.0"
+        doccdo = f"{n_dn}*1.0 {nbands - n_dn}*0.0"
     additions = f"""
 ### ZFS stage (added by spinlabs.vasp)
 NSW = 0                  # single point: no ionic relaxation
@@ -113,8 +133,8 @@ ISYM = 0                 # symmetry off, as in the perturbation runs differenced
 LDMATRIX = .TRUE.
 NUPDOWN = {int(n_up - n_dn)}
 NBANDS = {nbands}
-DOCCUP = {n_up}*1.0 {nbands - n_up}*0.0
-DOCCDO = {n_dn}*1.0 {nbands - n_dn}*0.0
+DOCCUP = {doccup}
+DOCCDO = {doccdo}
 """
     if unpaired_up is not None and unpaired_dn is not None:
         # machine-readable record of the defect bands, derived here where the
@@ -126,8 +146,10 @@ DOCCDO = {n_dn}*1.0 {nbands - n_dn}*0.0
     return "\n".join(body_lines).rstrip() + "\n" + additions
 
 
-def prepare_relax_to_zfs(relax: Path, zfs: Path) -> list[str]:
+def prepare_relax_to_zfs(relax: Path, zfs: Path, unpaired_only: bool = False) -> list[str]:
     """Prepare one ZFS run directory from a finished relaxation directory.
+
+    ``unpaired_only``: the UO scheme's occupations, only the unpaired orbitals (see patch_incar).
 
     Copies CONTCAR -> POSCAR, CHGCAR, POTCAR and (Gamma-only) KPOINTS,
     derives DOCCUP/DOCCDO from the EIGENVAL and patches the INCAR.  Nothing
@@ -201,10 +223,11 @@ def prepare_relax_to_zfs(relax: Path, zfs: Path) -> list[str]:
     if nupdown and int(float(nupdown)) != n_up - n_dn:
         fail(f"NUPDOWN = {nupdown} inconsistent with occupied difference {n_up} - {n_dn} = {n_up - n_dn}")
 
-    (zfs / "INCAR").write_text(patch_incar(incar_text, n_up, n_dn, nbands, unp_up, unp_dn))
+    incar = patch_incar(incar_text, n_up, n_dn, nbands, unp_up, unp_dn, unpaired_only=unpaired_only)
+    (zfs / "INCAR").write_text(incar)
     LOGGER.info(
-        f"wrote INCAR with NUPDOWN={n_up - n_dn}, "
-        f"DOCCUP={n_up}*1.0 {nbands - n_up}*0.0, DOCCDO={n_dn}*1.0 {nbands - n_dn}*0.0"
+        f"wrote INCAR with NUPDOWN={n_up - n_dn}, DOCCUP={parse_tag(incar, 'DOCCUP')}, "
+        f"DOCCDO={parse_tag(incar, 'DOCCDO')}" + (" (unpaired orbitals only)" if unpaired_only else "")
     )
 
     if failures:

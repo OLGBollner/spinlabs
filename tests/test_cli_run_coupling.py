@@ -58,7 +58,7 @@ def test_coupling_stage_prints_both_orders_and_saves_nothing(tmp_path, capsys, m
     cli.main(["run", "coupling", "--raw-zfs-file", str(raw_file), "--top", "2", "--mode", "1", "-q"])
 
     out = capsys.readouterr().out
-    assert "NV_64  all_bands  pert 0.1" in out
+    assert "NV_64  AO  pert 0.1" in out
     assert "4 first order, 4 second order (4 diagonal, 0 off-diagonal)" in out
     assert "First order (MHz/q):" in out and "Second order (MHz/q^2):" in out
     assert "      1  A1    10.00" in out  # --mode 1 is listed (1-based)

@@ -4,6 +4,7 @@ High-level functions build ready-to-run simulation folders; thin scripts in
 scripts/cluster/ wrap them with argparse CLIs.
 """
 
+from spinlabs.vasp.init import init_tree, init_zfs
 from spinlabs.vasp.occupations import prepare_relax_to_zfs
 from spinlabs.vasp.structures import (
     apply_combined_perturbation,
@@ -16,7 +17,6 @@ from spinlabs.vasp.structures import (
 )
 from spinlabs.vasp.trees import (
     build_perturbation_tree,
-    build_zfs_tree,
     default_phonon,
     n_modes_from_phonon,
     n_tasks_for,
@@ -31,8 +31,9 @@ __all__ = [
     "compare_displacement",
     "compare_displacement_cli",
     "build_perturbation_tree",
-    "build_zfs_tree",
     "default_phonon",
+    "init_tree",
+    "init_zfs",
     "load_phonon_data",
     "load_poscar",
     "n_modes_from_phonon",

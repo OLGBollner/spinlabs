@@ -173,7 +173,7 @@ def test_central_tree_builds_first_order_at_plus_and_minus_p_only(tmp_path):
     assert failures == []
     assert sorted(p.name for p in (defect / "first_order").iterdir()) == ["pert_-0.05", "pert_0.05"]
     assert not (defect / "second_order").exists()
-    script = (defect / "first_order" / "pert_-0.05" / "all_bands" / "run_perturbation_first_order.sh").read_text()
+    script = (defect / "first_order" / "pert_-0.05" / "AO" / "run_perturbation_first_order.sh").read_text()
     assert re.search(r"^PERT=-0\.05$", script, re.M)
     with pytest.raises(ValueError, match="positive steps"):
         build_perturbation_tree(out=defect, pert=[-0.05], displacement="normalized", conv_modes=None,
@@ -216,7 +216,7 @@ def test_package_central_pairs_each_step_with_its_minus_tree(tmp_path, monkeypat
     assert parsed == ["first_order/pert_-0.05", "first_order/pert_0.05"]  # no second order, -0.05 not on its own
     assert "second-order trees are not packaged" in caplog.text
     day = date.today().strftime("%Y%m%d")
-    saved = tmp_path / "data" / "NV_512" / "pert_0.05" / "all_bands" / day / "NV_512_raw_zfs_data_all_bands_central.npz"
+    saved = tmp_path / "data" / "NV_512" / "pert_0.05" / "AO" / day / "NV_512_raw_zfs_data_AO_central.npz"
     assert [p for p in (tmp_path / "data").rglob("*.npz")] == [saved]
     raw = RawZFSData.load(saved).to_unit("MHz")
     assert raw.is_central and np.allclose(raw.first_order_minus[0]["tensor"], _response(-1.0))

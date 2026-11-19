@@ -101,7 +101,7 @@ def test_package_scan_prints_and_stores_the_settings(tmp_path, monkeypatch, caps
         _run(args)
     out = capsys.readouterr().out
     assert "VASP settings (ground state vs the runs differenced against it):" in out
-    assert "ClV_576 all_bands pert 0.025: 2 difference(s); ISYM 0 (ground state 3)" in out
+    assert "ClV_576 AO pert 0.025: 2 difference(s); ISYM 0 (ground state 3)" in out
     assert "!! first_order: ISYM = 0 in the runs but 3 in the ground state" in out
     saved = sorted((tmp_path / "data").rglob("*.npz"))
     stored = RawZFSData.load([p for p in saved if "raw_zfs" in p.name][0]).vasp_settings
