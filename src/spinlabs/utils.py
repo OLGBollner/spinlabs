@@ -1,3 +1,4 @@
+import os
 from pathlib import Path
 
 import numpy as np
@@ -10,6 +11,13 @@ def resolve_path(path) -> Path:
     followed). Every path a command takes or writes into a file goes through this first, so nothing depends
     on where the command was run or where the written file is used later."""
     return Path(path).expanduser().resolve()
+
+
+def relative_to_cwd(path) -> str:
+    """``path`` relative to the current directory (``..`` where needed): the part of a resolved path the user
+    typed. Name matching (e.g. inferring the method from folder names) looks at this, not at the absolute path,
+    whose parent folders (a home or pytest folder) could match by accident."""
+    return os.path.relpath(resolve_path(path))
 
 
 class MathUtils:

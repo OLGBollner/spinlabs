@@ -20,6 +20,7 @@ from spinlabs.pipeline import DEFAULT_SIGMA_MEV, PRODUCTION_T_END, PRODUCTION_T_
 from spinlabs.registry import ensure_db, parse_orders
 
 from spinlabs.logging_utils import get_logger, section
+from spinlabs.utils import relative_to_cwd, resolve_path
 
 LOGGER = get_logger(__name__)
 
@@ -28,11 +29,11 @@ def build_run_parser(parser: argparse.ArgumentParser) -> None:
     """Configure ``parser`` as the ``run`` subcommand."""
 
     inputs = parser.add_argument_group("input mode (exactly one)")
-    inputs.add_argument("--sim-folder", nargs="+", metavar="DIR", help="Path to VASP simulation folder(s)")
-    inputs.add_argument("--raw-zfs-file", nargs="+", metavar="FILE", help="Path to raw ZFS .npz dataset file(s)")
-    inputs.add_argument("--raw-zfs-file-1d", metavar="FILE", help="Raw ZFS 1st-order .npz (combined 1d+2d mode)")
-    inputs.add_argument("--raw-zfs-file-2d", metavar="FILE", help="Raw ZFS 2nd-order .npz (combined 1d+2d mode)")
-    inputs.add_argument("--coupling-file", metavar="FILE", help="Path to pre-computed spin-phonon coupling .npz")
+    inputs.add_argument("--sim-folder", type=resolve_path, nargs="+", metavar="DIR", help="Path to VASP simulation folder(s)")
+    inputs.add_argument("--raw-zfs-file", type=resolve_path, nargs="+", metavar="FILE", help="Path to raw ZFS .npz dataset file(s)")
+    inputs.add_argument("--raw-zfs-file-1d", type=resolve_path, metavar="FILE", help="Raw ZFS 1st-order .npz (combined 1d+2d mode)")
+    inputs.add_argument("--raw-zfs-file-2d", type=resolve_path, metavar="FILE", help="Raw ZFS 2nd-order .npz (combined 1d+2d mode)")
+    inputs.add_argument("--coupling-file", type=resolve_path, metavar="FILE", help="Path to pre-computed spin-phonon coupling .npz")
     inputs.add_argument(
         "--query",
         action="store_true",
@@ -43,8 +44,8 @@ def build_run_parser(parser: argparse.ArgumentParser) -> None:
     )
 
     opt = parser.add_argument_group("options")
-    opt.add_argument("-ph", "--phonon-file", metavar="FILE", help="phonopy.yaml or phonon_data.npz")
-    opt.add_argument("--two-phonon", metavar="FILE", help="Two-phonon Raman .npz file (optional)")
+    opt.add_argument("-ph", "--phonon-file", type=resolve_path, metavar="FILE", help="phonopy.yaml or phonon_data.npz")
+    opt.add_argument("--two-phonon", type=resolve_path, metavar="FILE", help="Two-phonon Raman .npz file (optional)")
     opt.add_argument(
         "--method",
         nargs="+",
@@ -91,7 +92,7 @@ def build_run_parser(parser: argparse.ArgumentParser) -> None:
         opt, "Initial spin state(s) to solve the relaxation dynamics for; all share one run directory"
     )
     opt.add_argument(
-        "-o", "--output-root", default="runs", help="Root folder for output run directories (default: runs)"
+        "-o", "--output-root", type=resolve_path, default="runs", help="Root folder for output run directories (default: runs)"
     )
     opt.add_argument(
         "--run-name",
@@ -158,7 +159,7 @@ def _infer_method_from_file(path: Path) -> str:
     path = Path(path)
     if path.is_dir():  # a set of per-sublevel packages
         return "full_decont"
-    return method_from_path(path.name) or method_from_path(path) or "AO"
+    return method_from_path(path.name) or method_from_path(relative_to_cwd(path)) or "AO"
 
 
 def _infer_method(args: argparse.Namespace) -> str:
@@ -166,7 +167,7 @@ def _infer_method(args: argparse.Namespace) -> str:
     if args.method:
         return normalize_calc_method(args.method[0])
     names = " ".join(
-        str(p)
+        relative_to_cwd(p)  # the typed part: the absolute path's parents could name a method by accident
         for p in (
             *(args.sim_folder or []),
             *(args.raw_zfs_file or []),

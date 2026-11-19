@@ -37,6 +37,7 @@ from spinlabs.vasp.trees import DECONT_GROUND_STATE, default_phonon
 from spinlabs.vasp.verify import unfinished_runs
 
 from spinlabs.logging_utils import get_logger
+from spinlabs.utils import resolve_path
 
 LOGGER = get_logger(__name__)
 
@@ -44,14 +45,14 @@ LOGGER = get_logger(__name__)
 def build_package_parser(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--defect-folder",
-        type=Path,
+        type=resolve_path,
         nargs="+",
         metavar="FOLDER",
         help="Root folder(s) for one defect each, e.g. ../NV_512 ../ClV_128. With --conv: exactly one folder containing runs/.",
     )
     parser.add_argument(
         "--register-only",
-        type=Path,
+        type=resolve_path,
         metavar="DATA_PATH",
         default=None,
         help="Don't package anything: scan DATA_PATH for packaged .npz files and add them to the registry.",
@@ -65,7 +66,7 @@ def build_package_parser(parser: argparse.ArgumentParser) -> None:
     )
     parser.add_argument(
         "--ground-state",
-        type=Path,
+        type=resolve_path,
         nargs="?",
         const=_GS_AUTO,
         default=None,
@@ -118,8 +119,8 @@ def build_package_parser(parser: argparse.ArgumentParser) -> None:
     )
     parser.add_argument(
         "--output-root",
-        type=Path,
-        default=Path("data"),
+        type=resolve_path,
+        default="data",
         help="Root folder for packaged data (default: ./data).",
     )
 

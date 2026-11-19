@@ -21,6 +21,7 @@ from spinlabs.cli import add_verbosity_args
 from spinlabs.cli.coupling import add_input_args, load_manager
 from spinlabs.cli.production import add_init_state_arg, add_rate_args, rate_options, resolve_init_states
 from spinlabs.logging_utils import get_logger, section
+from spinlabs.utils import resolve_path
 
 LOGGER = get_logger(__name__)
 
@@ -48,10 +49,10 @@ def build_sigma_scan_parser(parser: argparse.ArgumentParser) -> None:
         help="Temperatures to report T1 at (default: 300)",
     )
     add_init_state_arg(opt, "Initial spin state(s)")
-    opt.add_argument("--plot", type=Path, metavar="FILE", help="Also save a T1-vs-sigma figure to FILE")
+    opt.add_argument("--plot", type=resolve_path, metavar="FILE", help="Also save a T1-vs-sigma figure to FILE")
     opt.add_argument(
         "--plot-temperature",
-        type=Path,
+        type=resolve_path,
         metavar="FILE",
         help="Also save a T1-vs-temperature figure to FILE: one line per sigma, coloured by sigma",
     )

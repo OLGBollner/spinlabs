@@ -17,6 +17,7 @@ from spinlabs.cli.production import add_coupling_args, coupling_options
 from spinlabs.constants import CONSTANTS
 from spinlabs.logging_utils import get_logger, section
 from spinlabs.registry import parse_orders
+from spinlabs.utils import relative_to_cwd, resolve_path
 
 LOGGER = get_logger(__name__)
 
@@ -29,13 +30,13 @@ def add_input_args(parser: argparse.ArgumentParser) -> argparse._ArgumentGroup:
     The coupling options and their defaults are those of ``spinlabs run`` (spinlabs.cli.production).
     """
     inputs = parser.add_argument_group("input mode (exactly one)")
-    inputs.add_argument("--sim-folder", nargs="+", metavar="DIR", help="Path to VASP simulation folder(s)")
-    inputs.add_argument("--raw-zfs-file", metavar="FILE", help="Path to a raw ZFS .npz dataset file")
-    inputs.add_argument("--raw-zfs-file-1d", metavar="FILE", help="Raw ZFS 1st-order .npz (combined 1d+2d mode)")
-    inputs.add_argument("--raw-zfs-file-2d", metavar="FILE", help="Raw ZFS 2nd-order .npz (combined 1d+2d mode)")
+    inputs.add_argument("--sim-folder", type=resolve_path, nargs="+", metavar="DIR", help="Path to VASP simulation folder(s)")
+    inputs.add_argument("--raw-zfs-file", type=resolve_path, metavar="FILE", help="Path to a raw ZFS .npz dataset file")
+    inputs.add_argument("--raw-zfs-file-1d", type=resolve_path, metavar="FILE", help="Raw ZFS 1st-order .npz (combined 1d+2d mode)")
+    inputs.add_argument("--raw-zfs-file-2d", type=resolve_path, metavar="FILE", help="Raw ZFS 2nd-order .npz (combined 1d+2d mode)")
 
     opt = parser.add_argument_group("options")
-    opt.add_argument("-ph", "--phonon-file", metavar="FILE", help="phonopy.yaml or phonon_data.npz")
+    opt.add_argument("-ph", "--phonon-file", type=resolve_path, metavar="FILE", help="phonopy.yaml or phonon_data.npz")
     opt.add_argument(
         "--method",
         choices=CLI_CHOICES,
@@ -116,7 +117,8 @@ def load_manager(args: argparse.Namespace, command: str):
     if len(orders) == 1:
         order_hint = orders[0]
     else:
-        order_hint = 2 if any(k in str(sim_folder).lower() for k in ("second_order", "2d", "2nd")) else 1
+        typed = " ".join(relative_to_cwd(p) for p in (args.sim_folder or [])).lower()  # not the absolute parents
+        order_hint = 2 if any(k in typed for k in ("second_order", "2d", "2nd")) else 1
 
     section(LOGGER, "Load input data")
     raw_data, spectrum, ph_path = load_raw_inputs(

@@ -12,22 +12,23 @@ import argparse
 from pathlib import Path
 
 from spinlabs.cli import add_verbosity_args
+from spinlabs.utils import resolve_path
 
 PHONON_SUFFIXES = {".yaml", ".yml", ".npz"}
 
 
 def build_symmetrize_parser(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument("phonon", type=Path, help="phonon file: phonopy .yaml/.yml or .npz")
+    parser.add_argument("phonon", type=resolve_path, help="phonon file: phonopy .yaml/.yml or .npz")
     parser.add_argument(
         "-o",
         "--out",
-        type=Path,
+        type=resolve_path,
         default=None,
         help="output .npz (default: <phonon stem>_sym<n>.npz next to the input, n = kept mode count)",
     )
     parser.add_argument(
         "--poscar",
-        type=Path,
+        type=resolve_path,
         default=None,
         help="structure for a phonopy yaml without one (default: POSCAR next to the yaml)",
     )

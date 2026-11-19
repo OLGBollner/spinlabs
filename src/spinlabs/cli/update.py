@@ -1,15 +1,15 @@
 """CLI command ``spinlabs update``: set INCAR tags consistently across a defect's runs (spinlabs.vasp.incar_update)."""
 
 import argparse
-from pathlib import Path
 
 from spinlabs.cli import add_verbosity_args
+from spinlabs.utils import resolve_path
 
 
 def build_update_parser(parser: argparse.ArgumentParser) -> None:
     from spinlabs.vasp.incar_update import ALLOWED_TAGS
 
-    parser.add_argument("path", type=Path, help="defect folder (or any folder, or one INCAR); every INCAR under it")
+    parser.add_argument("path", type=resolve_path, help="defect folder (or any folder, or one INCAR); every INCAR under it")
     parser.add_argument(
         "--set",
         nargs="+",

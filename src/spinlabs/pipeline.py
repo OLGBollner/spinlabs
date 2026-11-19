@@ -640,8 +640,10 @@ def _execute_pipeline(
                 calc_method = raw_data.calc_method
             elif raw_zfs_file:
                 from spinlabs.methods import method_from_path
+                from spinlabs.utils import relative_to_cwd
 
-                calc_method = method_from_path(raw_zfs_file) or calc_method
+                paths = raw_zfs_file if isinstance(raw_zfs_file, (list, tuple)) else [raw_zfs_file]
+                calc_method = method_from_path(" ".join(relative_to_cwd(p) for p in paths)) or calc_method
 
         # Orders actually present in the input data; ``dims`` is the single
         # source of truth for what the data contains, ``order`` keeps the

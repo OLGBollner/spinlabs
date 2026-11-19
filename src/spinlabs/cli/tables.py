@@ -17,6 +17,7 @@ from spinlabs.tables import (
     render_defect_table,
     run_packages,
 )
+from spinlabs.utils import resolve_path
 
 LOGGER = get_logger(__name__)
 
@@ -47,7 +48,7 @@ def build_table_parser(subparsers: argparse._SubParsersAction) -> None:  # noqa:
         "and get a superscript letter explained in the caption.",
     )
     defects.add_argument(
-        "inputs", nargs="*", type=Path,
+        "inputs", nargs="*", type=resolve_path,
         help="Defect folders (searched for packaged npz and ZFS_AO/ZFS_UO (or legacy ZFS_hyp/ZFS_occup) OUTCARs) or packaged ZFS npz "
         "files to read D from (default: every packaged ZFS file in the registry)",
     )
@@ -76,10 +77,10 @@ def _add_run_filter_args(parser: argparse.ArgumentParser) -> None:
 
 def _add_output_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
-        "-r", "--output-root", default="runs",
+        "-r", "--output-root", type=resolve_path, default="runs",
         help="Root folder holding run directories (default: runs); used to resolve runs stored from another host",
     )
-    parser.add_argument("-o", "--output", type=Path, help="Write the table to this .tex file (default: print to stdout)")
+    parser.add_argument("-o", "--output", type=resolve_path, help="Write the table to this .tex file (default: print to stdout)")
     add_verbosity_args(parser)
 
 
