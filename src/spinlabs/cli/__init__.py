@@ -26,6 +26,7 @@ def build_parser() -> argparse.ArgumentParser:
     from spinlabs.cli.package import build_package_parser
     from spinlabs.cli.plotting import build_plot_parser
     from spinlabs.cli.run import build_run_parser
+    from spinlabs.cli.symmetrize import build_symmetrize_parser
     from spinlabs.cli.tables import build_table_parser
     from spinlabs.cli.update import build_update_parser
 
@@ -50,6 +51,13 @@ def build_parser() -> argparse.ArgumentParser:
     build_init_parser(init_parser.add_subparsers(dest="command", required=True))
 
     build_update_parser(subparsers.add_parser("update", help="Set INCAR tags consistently across every run under a folder"))
+
+    build_symmetrize_parser(
+        subparsers.add_parser(
+            "symmetrize",
+            help="Symmetrize a phonon file (.yaml/.npz) and keep one mode per degenerate set",
+        )
+    )
 
     return parser
 
