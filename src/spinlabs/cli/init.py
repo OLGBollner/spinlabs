@@ -15,8 +15,8 @@ def build_init_parser(subparsers) -> None:
     tree.add_argument("defect", help="defect folder name, e.g. NV_64 (defect name and cell size)")
     tree.add_argument(
         "inputs", type=Path,
-        help="folder with POSCAR (or structure.vasp), INCAR, KPOINTS, POTCAR and any job script; its data/ and "
-        "phonopy/phonon files go to data/",
+        help="folder with POSCAR (or structure.vasp), INCAR, KPOINTS and POTCAR, searched recursively; its data/ "
+        "and phonopy/phonon files go to data/",
     )
     tree.add_argument("-o", "--output", type=Path, default=Path("."), help="where to create <defect>/ (default: .)")
     tree.add_argument("--force", action="store_true", help="replace an existing <defect>/")

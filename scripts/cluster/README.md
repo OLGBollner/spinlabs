@@ -3,7 +3,7 @@
 ## A new defect
 
 ```bash
-spinlabs init tree NV_64 <inputs>     # NV_64/relax/ (POSCAR, INCAR, KPOINTS, POTCAR, job script),
+spinlabs init tree NV_64 <inputs>     # NV_64/relax/ (POSCAR, INCAR, KPOINTS, POTCAR; add the job script),
                                       # NV_64/data/ (<inputs>/data/ + phonopy/phonon files), ZFS_AO/, ZFS_UO/
 # ... run the relaxation in NV_64/relax ...
 spinlabs init zfs NV_64/relax --method all        # ZFS_AO: the ZFS run with the EIGENVAL occupations

@@ -1,10 +1,12 @@
 """Set up a new defect: its folder tree (``spinlabs init tree``) and its ground-state ZFS runs (``init zfs``).
 
-``init_tree`` makes ``<defect>/`` from a folder of inputs:
+``init_tree`` makes ``<defect>/`` from a folder of inputs, searched recursively (the shallowest file of
+each name wins):
 
     <defect>/
-        relax/     the inputs (POSCAR, INCAR, KPOINTS, POTCAR, job scripts, ...): the relaxation
-        data/      <inputs>/data/ and any phonopy / phonon file of the inputs
+        relax/     POSCAR (or structure.vasp as POSCAR), INCAR, KPOINTS, POTCAR: the relaxation's inputs
+                   (no job script: add the relaxation's own)
+        data/      <inputs>/data/ and any phonopy / phonon file found
         ZFS_AO/    seeded with the relaxation's inputs; filled by init_zfs once the relaxation ran
         ZFS_UO/    the same
 

@@ -40,13 +40,29 @@ def _relaxed(defect: Path):
 
 def test_tree_puts_the_inputs_in_relax_and_the_phonons_in_data(tmp_path):
     out = init_tree("NV_8", _inputs(tmp_path), parent=tmp_path)
-    assert sorted(p.name for p in (out / "relax").iterdir()) == ["INCAR", "KPOINTS", "POSCAR", "POTCAR", "run_vasp.sh"]
+    assert sorted(p.name for p in (out / "relax").iterdir()) == ["INCAR", "KPOINTS", "POSCAR", "POTCAR"]
     assert sorted(p.name for p in (out / "data").iterdir()) == ["notes.txt", "phonopy.yaml"]
     for zfs in ("ZFS_AO", "ZFS_UO"):
         assert sorted(p.name for p in (out / zfs).iterdir()) == ["INCAR", "KPOINTS", "POSCAR", "POTCAR"]
     with pytest.raises(FileExistsError):
         init_tree("NV_8", tmp_path / "inputs", parent=tmp_path)
     init_tree("NV_8", tmp_path / "inputs", parent=tmp_path, force=True)
+
+
+def test_tree_finds_the_inputs_in_subfolders_the_shallowest_first(tmp_path):
+    inp = tmp_path / "inputs"
+    (inp / "vasp" / "old").mkdir(parents=True)
+    (inp / "phonons").mkdir()
+    for name in ("INCAR", "KPOINTS", "POTCAR"):
+        (inp / "vasp" / name).write_text(f"{name}\n")
+        (inp / "vasp" / "old" / name).write_text("old\n")
+    (inp / "vasp" / "structure.vasp").write_text("structure\n")
+    (inp / "phonons" / "phonopy.yaml").write_text("phonons\n")
+    out = init_tree("NV_8", inp, parent=tmp_path)
+    assert sorted(p.name for p in (out / "relax").iterdir()) == ["INCAR", "KPOINTS", "POSCAR", "POTCAR"]
+    assert (out / "relax" / "INCAR").read_text() == "INCAR\n"  # not the deeper old/INCAR
+    assert (out / "relax" / "POSCAR").read_text() == "structure\n"
+    assert (out / "data" / "phonopy.yaml").is_file()
 
 
 def test_tree_needs_the_vasp_inputs(tmp_path):
