@@ -1,6 +1,15 @@
+from pathlib import Path
+
 import numpy as np
 from scipy import constants as Cn
 from typing import Tuple
+
+
+def resolve_path(path) -> Path:
+    """``path`` as an absolute path: ``~`` expanded, then resolved against the current directory (symlinks
+    followed). Every path a command takes or writes into a file goes through this first, so nothing depends
+    on where the command was run or where the written file is used later."""
+    return Path(path).expanduser().resolve()
 
 
 class MathUtils:

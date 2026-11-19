@@ -14,6 +14,7 @@ from spinlabs.vasp.modes import mode_numbers
 from spinlabs.symmetry import classify_and_pair, filter_degenerate_partners, symmetrize_degenerate_groups
 
 from spinlabs.logging_utils import get_logger, section
+from spinlabs.utils import resolve_path
 from spinlabs.methods import METHODS, basis_dir, convergence_dir, defect_folder_of, ground_state_dir
 
 LOGGER = get_logger(__name__)
@@ -316,7 +317,7 @@ def write_ground_state_script(
     text = (TEMPLATES / GROUND_STATE_SCRIPT).read_text()
     text = replace_tag(text, "DEFECT", defect)
     if vasp_binary:
-        text = replace_tag(text, "BINARY", str(vasp_binary))
+        text = replace_tag(text, "BINARY", str(resolve_path(vasp_binary)))
     text = replace_tag(text, "SPINLABS_REPO", str(repo_root()))
     text = replace_sbatch(text, "-J", f"{defect}_{job}")
     if seconds is not None:
@@ -516,7 +517,7 @@ def prepare_basis(
     else:
         text = replace_tag(text, "PERT", str(pert))
     if vasp_binary:
-        text = replace_tag(text, "BINARY", str(vasp_binary))
+        text = replace_tag(text, "BINARY", str(resolve_path(vasp_binary)))
     if pair_mode:
         text = replace_tag(text, "PAIR_MODE", pair_mode)
     text = replace_tag(text, "DISPLACEMENT", displacement)

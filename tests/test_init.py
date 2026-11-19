@@ -87,7 +87,7 @@ def test_zfs_ao_and_uo_are_one_self_consistent_zfs_run_each(tmp_path):
     for zfs, job in (("ZFS_AO", "NV_8_ground_state_AO"), ("ZFS_UO", "NV_8_ground_state_UO")):
         assert (out / zfs / "POSCAR").read_text() == "CONTCAR\n" and (out / zfs / "CHGCAR").is_file()
         script = (out / zfs / "run_ground_state.sh").read_text()
-        assert f"#SBATCH -J {job}" in script and re.search(r"^binary=/bin/true$", script, re.M)
+        assert f"#SBATCH -J {job}" in script and _tag(script, "binary") == str(Path("/bin/true").resolve())  # resolved: /bin may link to /usr/bin
 
 
 def test_zfs_decont_builds_zfs_full_from_the_relaxation(tmp_path):
@@ -122,3 +122,32 @@ def test_cli(tmp_path, capsys):
     assert (tmp_path / "NV_8" / "ZFS_UO" / "run_ground_state.sh").is_file()
     with pytest.raises(SystemExit):
         main(["init", "zfs", str(tmp_path / "NV_8" / "relax"), "--method", "approx"])
+
+
+def test_cli_resolves_relative_and_home_paths(tmp_path, monkeypatch, capsys):
+    """Paths given relative to the working directory or with ~ end up absolute, in the tree and in the job scripts."""
+    home = tmp_path / "home"
+    (home / "bin").mkdir(parents=True)
+    monkeypatch.setenv("HOME", str(home))
+    _inputs(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    main(["init", "tree", "NV_8", "inputs", "-o", "."])
+    assert f"created {tmp_path / 'NV_8'};" in capsys.readouterr().out
+    _relaxed(tmp_path / "NV_8")
+    monkeypatch.chdir(tmp_path / "NV_8")
+    main(["init", "zfs", "./relax/", "--method", "all", "--vasp-binary", "../bin/vasp_std"])
+    main(["init", "zfs", "relax", "--method", "decont", "--vasp-binary", "~/bin/vasp_std"])
+    assert _tag((tmp_path / "NV_8" / "ZFS_AO" / "run_ground_state.sh").read_text(), "binary") == str(
+        tmp_path / "bin" / "vasp_std")
+    assert _tag((tmp_path / "NV_8" / "ZFS_full" / "run_ground_state.sh").read_text(), "binary") == str(
+        home / "bin" / "vasp_std")
+
+
+def test_init_zfs_resolves_a_relative_binary(tmp_path, monkeypatch):
+    init_tree("NV_8", _inputs(tmp_path), parent=tmp_path)
+    relax = _relaxed(tmp_path / "NV_8")
+    monkeypatch.chdir(tmp_path)
+    assert init_zfs("NV_8/relax", "UO", vasp_binary="bin/vasp_std") == []
+    assert relax.is_dir()
+    assert _tag((tmp_path / "NV_8" / "ZFS_UO" / "run_ground_state.sh").read_text(), "binary") == str(
+        tmp_path / "bin" / "vasp_std")

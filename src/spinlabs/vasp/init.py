@@ -24,6 +24,7 @@ from pathlib import Path
 
 from spinlabs.logging_utils import get_logger, section
 from spinlabs.methods import METHODS, RELAX_DIR, ground_state_dir, normalize_calc_method
+from spinlabs.utils import resolve_path
 
 LOGGER = get_logger(__name__)
 
@@ -44,7 +45,7 @@ def init_tree(defect: str, inputs: str | Path, parent: str | Path = ".", force: 
     FileNotFoundError when an input is missing, FileExistsError when the folder exists and not ``force``
     (``force`` replaces it). Returns the defect folder.
     """
-    inputs = Path(inputs).resolve()
+    inputs = resolve_path(inputs)
     if not inputs.is_dir():
         raise FileNotFoundError(f"input folder not found: {inputs}")
 
@@ -60,7 +61,7 @@ def init_tree(defect: str, inputs: str | Path, parent: str | Path = ".", force: 
     if missing:
         raise FileNotFoundError(f"missing in {inputs}: {', '.join(missing)}")
 
-    out = Path(parent) / defect
+    out = resolve_path(parent) / defect
     if out.exists():
         if not force:
             raise FileExistsError(f"{out} already exists (--force replaces it)")
@@ -121,7 +122,7 @@ def init_zfs(
         guarded_incar, read_outcar_time, write_decont_inputs, write_ground_state_script, SUBLEVEL_TIME_FRACTION,
     )
 
-    relax = Path(relax).resolve()
+    relax = resolve_path(relax)
     key = normalize_calc_method(method)
     if key not in METHODS:
         raise ValueError(f"unknown method {method!r}")
@@ -146,7 +147,7 @@ def init_zfs(
         LOGGER.info(f"{dst}: SCF + spin sublevels {', '.join(levels)}")
     write_ground_state_script(
         dst, defect.name, "ground_state" if key == "full_decont" else f"ground_state_{key}", seconds,
-        vasp_binary=Path(vasp_binary) if vasp_binary else None, max_hours=max_hours,
+        vasp_binary=resolve_path(vasp_binary) if vasp_binary else None, max_hours=max_hours,
     )
     LOGGER.info(f"{dst} ready: submit with: cd {dst} && sh run_ground_state.sh")
     return []
