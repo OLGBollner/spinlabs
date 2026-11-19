@@ -25,6 +25,7 @@ def build_parser() -> argparse.ArgumentParser:
     from spinlabs.cli.package import build_package_parser
     from spinlabs.cli.plotting import build_plot_parser
     from spinlabs.cli.run import build_run_parser
+    from spinlabs.cli.symmetrize import build_symmetrize_parser
     from spinlabs.cli.tables import build_table_parser
 
     parser = argparse.ArgumentParser(prog="spinlabs", description="SpinLabs command line tools")
@@ -43,6 +44,13 @@ def build_parser() -> argparse.ArgumentParser:
     )
 
     build_package_parser(subparsers.add_parser("package", help="Package (or with --scan, only parse) raw ZFS simulation data into a single .npz"))
+
+    build_symmetrize_parser(
+        subparsers.add_parser(
+            "symmetrize",
+            help="Symmetrize a phonon file (.yaml/.npz) and keep one mode per degenerate set",
+        )
+    )
 
     return parser
 
