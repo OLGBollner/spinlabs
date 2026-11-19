@@ -45,12 +45,19 @@ def init_tree(defect: str, inputs: str | Path, parent: str | Path = ".", force: 
     inputs = Path(inputs).resolve()
     if not inputs.is_dir():
         raise FileNotFoundError(f"input folder not found: {inputs}")
-    structure = inputs / "POSCAR" if (inputs / "POSCAR").is_file() else inputs / "structure.vasp"
-    missing = [name for name in REQUIRED_INPUTS if not (inputs / name).is_file()]
-    if not structure.is_file():
+
+    found: dict[str, Path] = {}
+    for p in sorted(inputs.rglob("*"), key=lambda p: len(p.parts)):  # shallowest wins on duplicates
+        if p.is_file():
+            found.setdefault(p.name, p)
+
+    missing = [name for name in REQUIRED_INPUTS if name not in found]
+    structure = found.get("POSCAR") or found.get("structure.vasp")
+    if structure is None:
         missing.insert(0, "POSCAR (or structure.vasp)")
     if missing:
         raise FileNotFoundError(f"missing in {inputs}: {', '.join(missing)}")
+
     out = Path(parent) / defect
     if out.exists():
         if not force:
