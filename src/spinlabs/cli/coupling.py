@@ -1,7 +1,7 @@
 """``spinlabs run coupling``: the ZFSManager stage alone, for debugging.
 
 Loads the inputs exactly as ``spinlabs run`` does, with its coupling settings
-(production defaults: inconsistent pairs excluded, off-diagonal fill on),
+(production defaults: inconsistent pairs excluded, off-diagonal fill and mirror projection on),
 computes the first- and (when present) second-order spin-phonon couplings, and
 prints a summary.
 Nothing is written to disk or to the registry.
@@ -76,7 +76,8 @@ def build_coupling_parser(parser: argparse.ArgumentParser) -> None:
 
 def load_manager(args: argparse.Namespace, command: str):
     """ZFSManager for the inputs in ``args``, loaded as ``spinlabs run`` loads them and with its coupling
-    settings (by default inconsistent pairs excluded and the off-diagonal fill on; see spinlabs.cli.production).
+    settings (by default inconsistent pairs excluded, the off-diagonal fill and the mirror projection on; see
+    spinlabs.cli.production).
 
     Returns ``(manager, phonon_path, orders)``; ``orders`` is what to compute.
     """

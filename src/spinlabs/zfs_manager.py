@@ -715,18 +715,27 @@ class ZFSManager:
         """
         if self._mirror_parity is None:
             self._mirror_parity = {}
-            if self.spectrum is None or self.point_group != "3m":
-                LOGGER.warning(
-                    f"mirror projection needs a C3v structure in the phonon spectrum (point group "
-                    f"{self.point_group or 'unknown'}); the forward second differences are left as they are"
-                )
-            else:
-                from spinlabs.symmetry import SymmetryDetectionError, mirror_parities
+            if self.spectrum is None:
+                return self._mirror_parity
+            from spinlabs.symmetry import SymmetryDetectionError, detect_point_group_from_spectrum, mirror_parities
 
-                try:
-                    self._mirror_parity = mirror_parities(self.spectrum)
-                except (SymmetryDetectionError, NotImplementedError) as exc:
-                    LOGGER.warning(f"mirror projection skipped: no mirrors from the structure ({exc})")
+            # The structure itself must be C3v (self.point_group may only be implied by the labels).
+            try:
+                symbol = detect_point_group_from_spectrum(self.spectrum).symbol
+            except (SymmetryDetectionError, ValueError) as exc:
+                symbol, reason = None, str(exc)
+            else:
+                reason = f"point group {symbol}"
+            if symbol != "3m":
+                LOGGER.warning(
+                    f"mirror projection needs a C3v structure in the phonon spectrum ({reason}); "
+                    "the forward second differences are left as they are"
+                )
+                return self._mirror_parity
+            try:
+                self._mirror_parity = mirror_parities(self.spectrum)
+            except (SymmetryDetectionError, NotImplementedError, ValueError) as exc:
+                LOGGER.warning(f"mirror projection skipped: no mirrors from the structure ({exc})")
         return self._mirror_parity
 
     def _mirror_project(self, i: int, d2D: np.ndarray) -> np.ndarray:

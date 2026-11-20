@@ -161,9 +161,11 @@ def test_weakly_aligned_and_central_entries_are_left_alone(manager):
 
 
 def test_non_c3v_structure_skips_the_projection_with_a_warning(manager, caplog):
+    # The fixture's labels imply C3v (manager.point_group == "3m"), but its structure (atoms at the
+    # origin) has no detectable C3v: the mirrors must come from the structure, so nothing is projected.
     manager.mirror_projection = True
     manager._mirror_parity = None
-    manager.point_group = "mm2"
+    assert manager.point_group == "3m"
     _run(manager, {(1, 1): _forward_entry(1, "Ex")}, _first_order())
     assert manager.mirror_projected == []
     assert "needs a C3v structure" in caplog.text

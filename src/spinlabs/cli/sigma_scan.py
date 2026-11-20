@@ -7,7 +7,7 @@ dependence on that choice can be seen and justified. Everything else is as in
 ``spinlabs run``, production defaults included (spinlabs.cli.production): Debye
 direct rate, zero-gap pairs left out of the two-phonon rates, T1 from the direct
 and two-phonon rates (no first-order Raman), inconsistent second-order entries
-excluded and the off-diagonal fill on; at the run's sigma the scan gives the
+excluded, the off-diagonal fill and the mirror projection on; at the run's sigma the scan gives the
 run's T1. Nothing is written to the registry or the run folders.
 """
 

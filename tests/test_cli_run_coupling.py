@@ -213,7 +213,7 @@ def test_stages_default_to_the_production_settings_of_run():
     assert "second_order" not in PRODUCTION_PROCESSES and set(PRODUCTION_PROCESSES) < set(ALL_PROCESSES)
     assert coupling_options(coupling) == dict(
         exclude_inconsistent_pairs=True, degenerate_pairs_from_symmetry=False, offdiag_from_diagonal=True,
-        mirror_projection=False,
+        mirror_projection=True,
     )
     assert scan.init_state == list(INIT_STATES)
 
@@ -223,7 +223,7 @@ def test_stage_flags_bring_back_the_old_settings():
     from spinlabs.pipeline import ALL_PROCESSES
 
     old = ["--direct", "gaussian", "--keep-zero-gap-pairs", "--first-order-raman",
-           "--no-exclude-inconsistent-pairs", "--no-offdiag-from-diagonal"]
+           "--no-exclude-inconsistent-pairs", "--no-offdiag-from-diagonal", "--no-mirror-projection"]
     scan = _parse("run", "sigma-scan", "--raw-zfs-file", "x.npz", *old)
     assert rate_options(scan) == dict(direct="gaussian", nogap=False, processes=ALL_PROCESSES)
     assert coupling_options(scan) == dict(
@@ -234,7 +234,8 @@ def test_stage_flags_bring_back_the_old_settings():
     assert coupling.exclude_inconsistent_pairs is False
     assert _parse("run", "coupling", "--raw-zfs-file", "x.npz", "--no-offdiag-from-diagonal").offdiag_from_diagonal is False
     for stage in (("run",), ("run", "coupling"), ("run", "sigma-scan")):
-        assert _parse(*stage, "--raw-zfs-file", "x.npz", "--mirror-projection").mirror_projection is True
+        assert _parse(*stage, "--raw-zfs-file", "x.npz").mirror_projection is True
+        assert _parse(*stage, "--raw-zfs-file", "x.npz", "--no-mirror-projection").mirror_projection is False
 
 
 def test_coupling_stage_excludes_inconsistent_pairs_by_default(tmp_path, capsys):

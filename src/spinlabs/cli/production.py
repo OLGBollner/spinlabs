@@ -13,7 +13,7 @@ from spinlabs.transition_rate import TransitionRate
 
 
 def add_coupling_args(opt: argparse._ArgumentGroup) -> None:
-    """ZFSManager options: inconsistent pairs excluded and the off-diagonal fill on by default."""
+    """ZFSManager options: inconsistent pairs excluded, the off-diagonal fill and the mirror projection on by default."""
     opt.add_argument(
         "--exclude-inconsistent-pairs",
         action=argparse.BooleanOptionalAction,
@@ -44,11 +44,12 @@ def add_coupling_args(opt: argparse._ArgumentGroup) -> None:
     opt.add_argument(
         "--mirror-projection",
         action=argparse.BooleanOptionalAction,
-        default=False,
+        default=True,
         help="Remove the odd-in-Q error of forward diagonal second differences (D(2Q) - 2 D(Q) + D0) by mirror "
         "symmetry (C3v): a mode that a sigma_v maps onto -Q keeps the mirror-symmetric part of its d2D, and its "
         "mirror-even E partner takes its couplings. Central (+-Q) data is unaffected; A1 modes and E partners "
-        "without a computed odd twin cannot be corrected and are listed (default: off)",
+        "without a computed odd twin cannot be corrected and are listed (default: on; --no-mirror-projection "
+        "turns it off)",
     )
 
 
