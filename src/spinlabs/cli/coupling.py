@@ -194,6 +194,12 @@ def _summary(manager, ph_path, first, second, top: int, modes: list[int]) -> str
             f"  inconsistent entries {action}: {len(bad)} of {len(manager.zfs_tensors_2d)}"
             + (" -- " + ", ".join(f"{i + 1}_{j + 1} (alpha={a:.2f})" for i, j, a, _ in bad) if bad else "")
         )
+        if manager.mirror_projection:
+            lines.append(
+                f"  mirror projection: {len(manager.mirror_projected)} forward diagonals projected, "
+                f"{len(manager.mirror_inherited)} even partners from their odd twin, "
+                f"{len(manager.mirror_uncorrected)} E diagonals uncorrected"
+            )
         for k, v in zip(_V_KEYS, v2):
             total = np.sum(v**2)
             off = total - np.sum(np.diag(v) ** 2)

@@ -180,7 +180,8 @@ def _table(manager, t1, temps, states, has_second, default_sigma, rates) -> str:
         f"  second order: {'yes' if has_second else 'no (one-phonon processes only)'}; "
         f"inconsistent second-order entries "
         f"{'excluded' if manager.exclude_inconsistent_pairs else 'kept'}: {len(manager.inconsistent_pairs)}; "
-        f"off-diagonal fill {'on' if manager.offdiag_from_diagonal else 'off'}",
+        f"off-diagonal fill {'on' if manager.offdiag_from_diagonal else 'off'}; "
+        f"mirror projection {'on' if manager.mirror_projection else 'off'}",
         f"  direct rate {rates['direct']}, zero-gap pairs {'left out' if rates['nogap'] else 'kept'}, "
         f"T1 from {' + '.join(rates['processes'])}",
         "  T1 in ms:",

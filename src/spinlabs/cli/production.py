@@ -41,6 +41,15 @@ def add_coupling_args(opt: argparse._ArgumentGroup) -> None:
         "types the pair's symmetry allows (computed pairs keep their values) (default: on; "
         "--no-offdiag-from-diagonal turns it off)",
     )
+    opt.add_argument(
+        "--mirror-projection",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Remove the odd-in-Q error of forward diagonal second differences (D(2Q) - 2 D(Q) + D0) by mirror "
+        "symmetry (C3v): a mode that a sigma_v maps onto -Q keeps the mirror-symmetric part of its d2D, and its "
+        "mirror-even E partner takes its couplings. Central (+-Q) data is unaffected; A1 modes and E partners "
+        "without a computed odd twin cannot be corrected and are listed (default: off)",
+    )
 
 
 def coupling_options(args: argparse.Namespace) -> dict:
@@ -49,6 +58,7 @@ def coupling_options(args: argparse.Namespace) -> dict:
         exclude_inconsistent_pairs=args.exclude_inconsistent_pairs,
         degenerate_pairs_from_symmetry=args.degenerate_pairs_from_symmetry,
         offdiag_from_diagonal=args.offdiag_from_diagonal,
+        mirror_projection=args.mirror_projection,
     )
 
 

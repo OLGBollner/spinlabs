@@ -31,6 +31,10 @@ INCONSISTENT_ALPHA = 0.5
 # norm, MHz) the expected change is too small for that ratio to mean anything, so
 # the entry is not judged.
 MIN_EXPECTED_MHZ = 0.05
+# Mirror projection of forward second differences (see calculate_second_order_derivatives): a mode
+# counts as mirror-odd when its overlap with its best sigma_v (symmetry.mirror_parities) is at most
+# minus this. Every E partner reaches |chi| >= 0.866 with one of the three planes, A modes +-1.
+MIRROR_MIN_OVERLAP = 0.8
 
 
 class ZFSManager:
@@ -47,6 +51,7 @@ class ZFSManager:
         exclude_inconsistent_pairs: bool = False,
         degenerate_pairs_from_symmetry: bool = False,
         offdiag_from_diagonal: bool = False,
+        mirror_projection: bool = False,
     ):
         # spectrum is the primary dataclass
         if spectrum is not None:
@@ -133,6 +138,14 @@ class ZFSManager:
         self.offdiag_from_diagonal = offdiag_from_diagonal
         self.n_offdiag_filled = 0  # pairs (i < j) filled that way
         self.n_offdiag_filled_a_x_e = 0  # of which A x E pairs, filled by the mixed-type root
+        # Remove the odd-in-Q error of forward diagonal second differences by the mode's mirror
+        # symmetry; see calculate_second_order_derivatives. 0-based modes, filled per call:
+        self.mirror_projection = mirror_projection
+        self.mirror_projected: list[int] = []  # mirror-odd modes whose d2D was projected
+        self.mirror_inherited: list[tuple[int, int]] = []  # (even partner, odd twin) taking the twin's couplings
+        self.mirror_uncorrected: list[int] = []  # forward E diagonals neither projected nor inherited
+        # {mode: (mirror matrix in the cell frame, overlap)}, computed on first use; None until then.
+        self._mirror_parity: Optional[dict[int, tuple[np.ndarray, float]]] = None
         if self.displacement != "mass_weighted":
             if spectrum is None:
                 raise ValueError(
@@ -517,6 +530,8 @@ class ZFSManager:
         V_0_pm_2nd = np.zeros((n_modes, n_modes))
 
         no_first_order = []
+        self.mirror_projected, self.mirror_inherited, self.mirror_uncorrected = [], [], []
+        forward_diagonal: set[int] = set()  # modes whose (i, i) came from a forward (pair) run
         diagonal_done: set[int] = set()  # modes whose own (i, i) coupling was computed
         computed_pairs: set[tuple[int, int]] = set()  # (i, j), i <= j, whose coupling came from a run
         # Entries with content outside the exact Gi x Gj rule (MHz of that content), for the summary.
@@ -581,6 +596,11 @@ class ZFSManager:
                 if check.strict_forbidden > SYMMETRY_TOL:
                     outside_strict.append(check.strict_forbidden * check.size_mhz)
 
+            if i == j and not item.get("central"):
+                forward_diagonal.add(i)
+                if self.mirror_projection:
+                    d2D_dqidqj = self._mirror_project(i, d2D_dqidqj)
+
             zfs_2nd_derivs[i, j] = d2D_dqidqj
             zfs_2nd_derivs[j, i] = d2D_dqidqj
 
@@ -630,6 +650,9 @@ class ZFSManager:
                     V_0_pm_2nd[i, j] / CONSTANTS["MHz2J"],
                     V_p_m_2nd[i, j] / CONSTANTS["MHz2J"],
                 )
+
+        if self.mirror_projection:
+            self._mirror_inherit(forward_diagonal, V_0_0_2nd, V_p_m_2nd, V_0_pm_2nd)
 
         # A degenerate twin without its own diagonal run inherits its partner's diagonal
         # coupling (the spectrum owns the pairing). Fill-only, as for first order: a twin
@@ -683,6 +706,82 @@ class ZFSManager:
         )
 
         return zfs_2nd_derivs, V_0_0_2nd, V_p_m_2nd, V_0_pm_2nd
+
+    def _mirror_parities(self) -> dict[int, tuple[np.ndarray, float]]:
+        """{mode: (mirror, overlap)} of symmetry.mirror_parities, computed once; {} where it cannot apply.
+
+        Needs a C3v structure: the mirrors come from the spectrum's geometry. Elsewhere the
+        projection is skipped with a warning (no mode counts as mirror-odd).
+        """
+        if self._mirror_parity is None:
+            self._mirror_parity = {}
+            if self.spectrum is None or self.point_group != "3m":
+                LOGGER.warning(
+                    f"mirror projection needs a C3v structure in the phonon spectrum (point group "
+                    f"{self.point_group or 'unknown'}); the forward second differences are left as they are"
+                )
+            else:
+                from spinlabs.symmetry import SymmetryDetectionError, mirror_parities
+
+                try:
+                    self._mirror_parity = mirror_parities(self.spectrum)
+                except (SymmetryDetectionError, NotImplementedError) as exc:
+                    LOGGER.warning(f"mirror projection skipped: no mirrors from the structure ({exc})")
+        return self._mirror_parity
+
+    def _mirror_project(self, i: int, d2D: np.ndarray) -> np.ndarray:
+        """The forward diagonal second derivative of mode i without its odd-in-Q error, if i is mirror-odd.
+
+        The forward difference (D(2Q) - 2 D(Q) + D0) / Q^2 = D'' + Q D''' + ... carries every odd
+        power of Q beyond the linear one. For a mode its mirror M maps onto -Q, D(-Q) = M D(Q) M,
+        so the even terms (D'') are M-symmetric and the odd ones (D''', ...) M-antisymmetric:
+        (d2D + M d2D M) / 2 keeps D'' and drops them exactly. Central differences have no odd
+        terms and never come here. Mirror-even modes are returned unchanged: their odd terms are
+        M-symmetric too and cannot be told apart (_mirror_inherit gives them the odd twin's value).
+        """
+        parity = self._mirror_parities().get(i)
+        if parity is None or parity[1] > -MIRROR_MIN_OVERLAP:
+            return d2D
+        rot = self.eigen_rotation if self.eigen_rotation is not None else np.eye(3)
+        M = rot.T @ parity[0] @ rot  # the stored tensors are in the D0 principal frame (R.T D R)
+        self.mirror_projected.append(i)
+        return 0.5 * (d2D + M @ d2D @ M.T)
+
+    def _mirror_inherit(
+        self, forward_diagonal: set[int], V_0_0_2nd: np.ndarray, V_p_m_2nd: np.ndarray, V_0_pm_2nd: np.ndarray
+    ) -> None:
+        """Give each forward mirror-even E partner the diagonal couplings of its projected odd twin.
+
+        Within an E pair the diagonal second-order response has one A1 and one E constant, so both
+        partners have the same V_00, V_+- and V_0+- (as the fill-only twin inheritance assumes); the
+        odd twin's are free of the forward error, the even partner's are not. E diagonals with no
+        projected twin are listed in mirror_uncorrected. Only the V-coefficients are replaced.
+        """
+        projected = set(self.mirror_projected)
+        labels = list(self.spectrum.symmetries) if self.spectrum is not None and self.spectrum.symmetries else []
+        for i in sorted(forward_diagonal - projected):
+            twin = twin_of(self.spectrum.deg_groups, i) if self.spectrum is not None else None
+            if twin is not None and twin in projected:
+                for V in (V_0_0_2nd, V_p_m_2nd, V_0_pm_2nd):
+                    V[i, i] = V[twin, twin]
+                self.mirror_inherited.append((i, twin))
+            elif i < len(labels) and str(labels[i]) in ("Ex", "Ey"):
+                self.mirror_uncorrected.append(i)
+        if not forward_diagonal:
+            return
+        overlaps = [abs(self._mirror_parities()[i][1]) for i in self.mirror_projected]
+        LOGGER.info(
+            f"mirror projection: {len(self.mirror_projected)} mirror-odd forward diagonals projected"
+            + (f" (overlap with their mirror {min(overlaps):.3f} to {max(overlaps):.3f})" if overlaps else "")
+            + f", {len(self.mirror_inherited)} mirror-even E partners took their odd twin's couplings"
+        )
+        if self.mirror_uncorrected:
+            LOGGER.warning(
+                f"mirror projection: {len(self.mirror_uncorrected)} forward E diagonals keep their odd-in-Q error "
+                "(mirror-even, and their odd twin has no forward diagonal run); modes "
+                + ", ".join(str(i + 1) for i in self.mirror_uncorrected[:20])
+                + (", ..." if len(self.mirror_uncorrected) > 20 else "")
+            )
 
     def _degenerate_pairs_from_symmetry(
         self, zfs_2nd_derivs: np.ndarray, V_0_0_2nd: np.ndarray, V_p_m_2nd: np.ndarray, V_0_pm_2nd: np.ndarray

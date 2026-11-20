@@ -457,6 +457,7 @@ def run_full_pipeline(
     exclude_inconsistent_pairs: bool = False,
     degenerate_pairs_from_symmetry: bool = False,
     offdiag_from_diagonal: bool = False,
+    mirror_projection: bool = False,
     sigma: float = DEFAULT_SIGMA_MEV,
     b_field_mt: float = 0.0,
     direct: str = "gaussian",
@@ -510,6 +511,7 @@ def run_full_pipeline(
             exclude_inconsistent_pairs=exclude_inconsistent_pairs,
             degenerate_pairs_from_symmetry=degenerate_pairs_from_symmetry,
             offdiag_from_diagonal=offdiag_from_diagonal,
+            mirror_projection=mirror_projection,
             sigma=sigma,
             b_field_mt=b_field_mt,
             direct=direct,
@@ -548,6 +550,7 @@ def _execute_pipeline(
     exclude_inconsistent_pairs: bool = False,
     degenerate_pairs_from_symmetry: bool = False,
     offdiag_from_diagonal: bool = False,
+    mirror_projection: bool = False,
     sigma: float = DEFAULT_SIGMA_MEV,
     b_field_mt: float = 0.0,
     direct: str = "gaussian",
@@ -732,6 +735,9 @@ def _execute_pipeline(
     coupling_path = run_dir / "spin_phonon_coupling.npz"
     inconsistent_pairs: list[tuple[int, int, float, float]] = []
     symmetry_derived_pairs: list[tuple[int, int]] = []
+    mirror_projected: list[int] = []
+    mirror_inherited: list[tuple[int, int]] = []
+    mirror_uncorrected: list[int] = []
     offdiag_filled = offdiag_filled_a_x_e = 0
     if coupling_data is not None:
         coupling_data.save(coupling_path)
@@ -743,6 +749,7 @@ def _execute_pipeline(
             exclude_inconsistent_pairs=exclude_inconsistent_pairs,
             degenerate_pairs_from_symmetry=degenerate_pairs_from_symmetry,
             offdiag_from_diagonal=offdiag_from_diagonal,
+            mirror_projection=mirror_projection,
         )
         if calc_method:
             manager.calc_method = calc_method
@@ -767,6 +774,9 @@ def _execute_pipeline(
         symmetry_derived_pairs = manager.symmetry_derived_pairs
         offdiag_filled = manager.n_offdiag_filled
         offdiag_filled_a_x_e = manager.n_offdiag_filled_a_x_e
+        mirror_projected = manager.mirror_projected
+        mirror_inherited = manager.mirror_inherited
+        mirror_uncorrected = manager.mirror_uncorrected
 
     # ── 6. Transition Rates Calculation ──────────────────────────────────────
     # Initial states against the spin of the couplings, for every spin (S = 1 included), before any rates
@@ -915,6 +925,15 @@ def _execute_pipeline(
             "enabled": offdiag_from_diagonal,
             "pairs_filled": offdiag_filled,
             "a_x_e_pairs_filled": offdiag_filled_a_x_e,
+        },
+        # Forward diagonal second differences with their odd-in-Q error removed by mirror symmetry
+        # (1-based modes): projected (mirror-odd), even partners given their odd twin's couplings,
+        # and E diagonals that could not be corrected.
+        "mirror_projection": {
+            "enabled": mirror_projection,
+            "projected": [i + 1 for i in mirror_projected],
+            "inherited": [f"{i + 1}<-{t + 1}" for i, t in mirror_inherited],
+            "uncorrected": [i + 1 for i in mirror_uncorrected],
         },
     }
 

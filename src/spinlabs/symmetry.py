@@ -377,6 +377,32 @@ def defect_frame_operations(spectrum) -> list[np.ndarray]:
     return ops
 
 
+def mirror_parities(spectrum) -> dict[int, tuple[np.ndarray, float]]:
+    """Per mode, the C3v mirror it is most nearly (anti)symmetric under: {mode: (M, chi)}.
+
+    M is the mirror's 3x3 matrix (Cartesian, the cell frame of the structure and of the ZFS
+    tensors) and chi = <e|M e> / <e|e> the mode's overlap with its mirror image, the one of
+    the three sigma_v with the largest |chi|. A1 modes give +1 and A2 modes -1. The two
+    partners of an E pair are only symmetry-adapted when the phonon code returned them so;
+    in general they sit at some angle t inside their pair, and chi = cos 2t for the
+    nearest plane (|chi| >= cos 30 deg = 0.866 for one of the three planes, always).
+    chi ~ -1 means M maps the displacement +Q onto -Q (the mode is mirror-odd).
+    """
+    ops = defect_frame_operations(spectrum)
+    chars = np.real(_mode_characters(spectrum, ops))
+    eigs = np.asarray(spectrum.eigenvectors)
+    norms = np.sum(np.abs(eigs.reshape(eigs.shape[0], -1)) ** 2, axis=1)
+    mirrors = [k for k, R in enumerate(ops) if np.linalg.det(R) < 0]
+    out: dict[int, tuple[np.ndarray, float]] = {}
+    for m in range(eigs.shape[0]):
+        if norms[m] == 0:
+            continue
+        c = chars[m, mirrors] / norms[m]
+        best = int(np.argmax(np.abs(c)))
+        out[m] = (np.asarray(ops[mirrors[best]], dtype=float), float(c[best]))
+    return out
+
+
 def _mode_characters(spectrum, operations: list[np.ndarray]) -> np.ndarray:
     """chi_m(R) = <psi_m | R psi_m> for each mode m and operation R.
 
