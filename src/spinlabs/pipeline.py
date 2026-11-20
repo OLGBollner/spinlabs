@@ -19,7 +19,13 @@ from spinlabs.logging_utils import (
 )
 
 from spinlabs.constants import CONSTANTS
-from spinlabs.models import PhononSpectrum, RawZFSData, SpinPhononCouplingData, normalize_calc_method
+from spinlabs.models import (
+    PhononSpectrum,
+    RawZFSData,
+    SpinPhononCouplingData,
+    normalize_calc_method,
+    packaged_phonon_name,
+)
 from spinlabs.registry import ensure_db, find_phonon, finish_run, parse_orders, register_file, register_run
 from spinlabs.parsers import (
     parse_phonon_data,
@@ -137,11 +143,14 @@ def find_default_phonon_file(sim_folder: Path | None) -> Path | None:
     return None
 
 
-def find_default_phonon_file_for_raw(raw_zfs_file: str | Path | Sequence[str | Path]) -> Path | None:
+def find_default_phonon_file_for_raw(
+    raw_zfs_file: str | Path | Sequence[str | Path], aligned: bool = False
+) -> Path | None:
     """Search next to the raw ZFS .npz file(s) for phonon_data.npz / phonopy.yaml.
 
     Looks from the file's folder up to the defect folder of the packaged layout
-    ``data/<defect>/pert_<x>/<method>/<date>/<file>.npz``, nearest first.
+    ``data/<defect>/pert_<x>/<method>/<date>/<file>.npz``, nearest first. With ``aligned``
+    (data displaced along mirror-aligned modes) the file is phonon_data_aligned.npz instead.
     """
     if raw_zfs_file is None:
         return None
@@ -154,15 +163,18 @@ def find_default_phonon_file_for_raw(raw_zfs_file: str | Path | Sequence[str | P
     if anchor.is_dir():  # a full-decontamination set folder: look from a file inside it
         anchor = anchor / "set.npz"
     anchor_dir = anchor.parent
+    name = packaged_phonon_name(aligned)
     candidates = [
-        anchor_dir / "phonon_data.npz",
+        anchor_dir / name,
         anchor_dir / "phonopy.yaml",
-        anchor_dir.parent / "phonon_data.npz",
+        anchor_dir.parent / name,
         anchor_dir.parent / "phonopy.yaml",
-        anchor_dir.parent.parent / "phonon_data.npz",
-        anchor_dir.parent.parent / "data" / "phonon_data.npz",
-        anchor_dir.parent.parent.parent / "phonon_data.npz",
+        anchor_dir.parent.parent / name,
+        anchor_dir.parent.parent / "data" / name,
+        anchor_dir.parent.parent.parent / name,
     ]
+    if aligned:  # a phonopy yaml holds the phonon code's modes, never aligned ones
+        candidates = [c for c in candidates if c.name == name]
     for cand in candidates:
         if cand.exists():
             return cand
@@ -275,6 +287,22 @@ def load_raw_inputs(
     cell_size = raw_data.cell_size or cell_size or 0
     n_needed = raw_mode_count(raw_data)
 
+    # Data displaced along mirror-aligned modes (aligned=True, spinlabs package) needs the aligned full
+    # spectrum: its E modes are other vectors than the phonon code's. A spectrum of the other kind is never used.
+    aligned = bool(raw_data.aligned)
+    if spectrum is not None and bool(spectrum.aligned) != aligned:
+        if phonon_file is not None:
+            raise ValueError(
+                f"the raw data was displaced along {'aligned' if aligned else 'unaligned'} phonon modes, but "
+                f"{ph_path} is {'aligned' if spectrum.aligned else 'not aligned'}; pass the matching spectrum "
+                f"({packaged_phonon_name(aligned)})"
+            )
+        spectrum, ph_path = None, None
+    if spectrum is None and aligned and phonon_file is None and raw_zfs_file is not None:
+        found = find_default_phonon_file_for_raw(raw_zfs_file, aligned=True)
+        if found is not None:
+            ph_path, spectrum = found, parse_phonon_data(found)
+
     # A phonon file found by searching (not passed explicitly) must hold the raw data's modes;
     # otherwise it belongs to another cell and the registry is asked instead.
     if spectrum is not None and phonon_file is None and not _covers(spectrum, n_needed):
@@ -289,6 +317,7 @@ def load_raw_inputs(
         reg = ensure_db()
         reg_hits = find_phonon(reg, str(defect), cell_size)
         candidates = [(p, parse_phonon_data(p)) for p in reg_hits]
+        candidates = [(p, s) for p, s in candidates if bool(s.aligned) == aligned]  # the data's kind only
         fitting = [(p, s) for p, s in candidates if _covers(s, n_needed)]
         for p, s in candidates:
             if not _covers(s, n_needed):
@@ -306,7 +335,12 @@ def load_raw_inputs(
         elif candidates:
             LOGGER.warning(f"no registry phonon file for {defect}_{cell_size} covers the raw data's modes")
     if spectrum is not None:
-        LOGGER.info(f"phonon data: {ph_path}")
+        LOGGER.info(f"phonon data: {ph_path}" + (" (aligned modes)" if aligned else ""))
+    elif aligned:
+        raise FileNotFoundError(
+            f"the raw data of {defect}_{cell_size} was displaced along mirror-aligned phonon modes, and no "
+            f"{packaged_phonon_name(True)} was found next to it or in the registry; pass it with --phonon-file"
+        )
     else:
         LOGGER.warning(f"no phonon data for {defect}_{cell_size}; mode frequencies and symmetries are unknown")
 

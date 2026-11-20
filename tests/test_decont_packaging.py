@@ -16,7 +16,7 @@ from spinlabs.decont import (
     load_sublevel_set,
     sublevel_info,
 )
-from spinlabs.parsers import parse_decont_dataset, parse_phonon_npz
+from spinlabs.parsers import parse_decont_dataset
 
 INCAR = """ENCUT = 520
 ALGO = Normal
@@ -129,9 +129,10 @@ def test_package_writes_one_file_per_sublevel_into_one_folder(tmp_path):
     _run(_args(tmp_path, defect))  # default methods: only the decont trees exist
     folder = tmp_path / "data" / "NV_64" / f"pert_{STEP:g}" / "full_decont" / DAY
     assert sorted(p.name for p in folder.iterdir()) == [
-        f"NV_64_raw_zfs_data_full_decont_{lv}_12d.npz" for lv in SUBLEVELS] + ["phonon_data.npz"]
-    # the full spectrum of the phonon file the trees' job scripts displace along, kept with the set
-    assert parse_phonon_npz(folder / "phonon_data.npz").n_modes == 3
+        f"NV_64_raw_zfs_data_full_decont_{lv}_12d.npz" for lv in SUBLEVELS]
+    # tagged with the alignment of the phonon file the trees' job scripts displace along (classified only here)
+    for f in folder.iterdir():
+        assert bool(np.load(f, allow_pickle=True)["aligned"]) is False
     assert not (tmp_path / "data" / "NV_64" / f"pert_{STEP:g}" / "all_bands").exists()
 
     loaded = load_sublevel_set(folder)

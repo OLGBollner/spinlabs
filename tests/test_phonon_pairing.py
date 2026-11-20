@@ -15,7 +15,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 NV_64_PHONONS = REPO_ROOT / "NV_64" / "phonon_data.npz"  # plain git blob
 
 
-def _spectrum(vectors, original=None, n_full=None):
+def _spectrum(vectors, original=None, n_full=None, aligned=None):
     n = len(vectors)
     return PhononSpectrum(
         frequencies_mev=np.linspace(10.0, 30.0, n),
@@ -27,6 +27,7 @@ def _spectrum(vectors, original=None, n_full=None):
         symmetries=["A1"] * n,
         original_indices=None if original is None else np.asarray(original),
         n_full=n_full,
+        aligned=aligned,
     )
 
 
@@ -37,8 +38,9 @@ def _pair(folder, stem="phonon_data", stub="", full=FULL):
     """A full spectrum <stem><stub>.npz and its reduction <stem>_sym2<stub>.npz (modes 0 and 2)."""
     folder.mkdir(parents=True, exist_ok=True)
     full_path, reduced_path = folder / f"{stem}{stub}.npz", folder / f"{stem}_sym2{stub}.npz"
-    _spectrum(full).save(full_path)
-    _spectrum(FULL[[0, 2]], original=[0, 2], n_full=3).save(reduced_path)
+    aligned = stub == "_aligned"
+    _spectrum(full, aligned=aligned).save(full_path)
+    _spectrum(FULL[[0, 2]], original=[0, 2], n_full=3, aligned=aligned).save(reduced_path)
     return full_path, reduced_path
 
 
@@ -120,20 +122,21 @@ def test_full_spectrum_of_rejects_a_missing_or_mismatched_spectrum(tmp_path):
         full_spectrum_of(tmp_path / "missing.npz")
 
 
-# -- spinlabs package pairs each dataset with its spectrum ----------------------------------------------------
+# -- spinlabs package tags each dataset; the analysis picks the defect's spectrum by the tag --------------------
 
 
 def _package(tmp_path, monkeypatch, phonon_line):
-    """Package the two-order tree of test_cli_package whose job scripts carry ``phonon_line``; return the dataset
-    folder (a path that does not exist when nothing was saved)."""
+    """Package the two-order tree of test_cli_package whose job scripts carry ``phonon_line``.
+
+    Returns the packaged raw file, or None when nothing was saved.
+    """
     from test_cli_package import _make_args, _patch, _raw, _registry, _tree
 
     from spinlabs.cli.package import _run
+    from spinlabs.methods import basis_dir
 
     _tree(tmp_path)
     _registry(monkeypatch, tmp_path)
-    from spinlabs.methods import basis_dir
-
     for order in ("first", "second"):
         # where the scan reads the tree (the fixture's data is packaged as AO)
         basis = basis_dir(tmp_path / "NV_512" / f"{order}_order" / "pert_0.025", "AO")
@@ -141,27 +144,76 @@ def _package(tmp_path, monkeypatch, phonon_line):
         (basis / f"run_{order}_order.sh").write_text(f"#!/bin/bash\n{phonon_line}\n")
     with _patch(lambda **kw: _raw(order=kw["order"])):
         _run(_make_args(tmp_path))
-    datasets = sorted((tmp_path / "data" / "NV_512" / "pert_0.025").glob(f"*/{date.today():%Y%m%d}"))
-    assert len(datasets) <= 1
-    return datasets[0] if datasets else tmp_path / "data" / "NV_512" / "pert_0.025" / "none"
+    files = sorted((tmp_path / "data" / "NV_512" / "pert_0.025").glob(f"*/{date.today():%Y%m%d}/*.npz"))
+    assert len(files) <= 1
+    return files[0] if files else None
 
 
-def test_package_saves_the_job_scripts_spectrum_with_the_dataset(tmp_path, monkeypatch):
+def _tag(path):
+    with np.load(path, allow_pickle=True) as data:
+        return bool(data["aligned"]) if "aligned" in data.files else None
+
+
+def test_aligned_data_is_tagged_and_its_spectrum_packaged_once(tmp_path, monkeypatch):
+    from spinlabs.pipeline import load_raw_inputs
+
     full, reduced = _pair(tmp_path / "NV_512" / "data", stub="_aligned")
-    dataset = _package(tmp_path, monkeypatch, f"PHONON_PATH={reduced}")
-    saved = dataset / "phonon_data.npz"
-    assert saved.is_file()
-    assert saved.read_bytes() == full.read_bytes()  # the aligned full spectrum, not the original
+    raw_file = _package(tmp_path, monkeypatch, f"PHONON_PATH={reduced}")
+    assert _tag(raw_file) is True
+    assert [p.name for p in raw_file.parent.iterdir()] == [raw_file.name]  # no phonon copy with the data
+    packaged = tmp_path / "data" / "NV_512" / "phonon_data_aligned.npz"
+    assert packaged.read_bytes() == full.read_bytes()
+    # The analysis takes the aligned spectrum by the tag, not the defect's phonon_data.npz.
+    _spectrum(np.eye(3), aligned=None).save(tmp_path / "data" / "NV_512" / "phonon_data.npz")
+    raw, spectrum, path = load_raw_inputs(raw_zfs_file=raw_file)
+    assert raw.aligned is True and path == packaged and spectrum.aligned is True
+
+
+def test_unaligned_data_is_tagged_and_uses_the_job_scripts_spectrum(tmp_path, monkeypatch):
+    from spinlabs.pipeline import load_raw_inputs
+
+    full, reduced = _pair(tmp_path / "NV_512" / "data")
+    raw_file = _package(tmp_path, monkeypatch, f"PHONON_PATH={reduced}")
+    assert _tag(raw_file) is False
+    packaged = tmp_path / "data" / "NV_512" / "phonon_data.npz"
+    assert packaged.read_bytes() == full.read_bytes()
+    assert not (tmp_path / "data" / "NV_512" / "phonon_data_aligned.npz").exists()
+    _, spectrum, path = load_raw_inputs(raw_zfs_file=raw_file)
+    assert path == packaged and not spectrum.aligned
+
+
+def test_analysis_refuses_a_spectrum_of_the_other_kind(tmp_path, monkeypatch):
+    from spinlabs.pipeline import load_raw_inputs
+
+    full, reduced = _pair(tmp_path / "NV_512" / "data", stub="_aligned")
+    raw_file = _package(tmp_path, monkeypatch, f"PHONON_PATH={reduced}")
+    plain = tmp_path / "plain.npz"
+    _spectrum(np.eye(3)).save(plain)
+    with pytest.raises(ValueError, match="pass the matching spectrum"):
+        load_raw_inputs(raw_zfs_file=raw_file, phonon_file=plain)
+    (tmp_path / "data" / "NV_512" / "phonon_data_aligned.npz").unlink()
+    _spectrum(np.eye(3)).save(tmp_path / "data" / "NV_512" / "phonon_data.npz")  # only the unaligned one
+    with pytest.raises(FileNotFoundError, match="mirror-aligned"):
+        load_raw_inputs(raw_zfs_file=raw_file)
+
+
+def test_package_refuses_to_replace_a_packaged_aligned_spectrum(tmp_path, monkeypatch):
+    _, reduced = _pair(tmp_path / "NV_512" / "data", stub="_aligned")
+    earlier = tmp_path / "data" / "NV_512" / "phonon_data_aligned.npz"
+    earlier.parent.mkdir(parents=True)
+    _spectrum(np.array([[0.0, 1.0, 0.0], [1.0, 0.0, 0.0], [0.0, 0.0, 1.0]]), aligned=True).save(earlier)
+    with pytest.raises(SystemExit, match="holds other aligned modes"):
+        _package(tmp_path, monkeypatch, f"PHONON_PATH={reduced}")
+    assert not list((tmp_path / "data" / "NV_512").glob("pert_*"))  # nothing saved
 
 
 def test_package_skips_a_dataset_it_cannot_pair(tmp_path, monkeypatch, caplog):
     _, reduced = _pair(tmp_path / "NV_512" / "data", stub="_aligned")
     (tmp_path / "NV_512" / "data" / "phonon_data_aligned.npz").unlink()
-    dataset = _package(tmp_path, monkeypatch, f"PHONON_PATH={reduced}")
-    assert not dataset.exists()
+    assert _package(tmp_path, monkeypatch, f"PHONON_PATH={reduced}") is None
     assert "cannot pair the data with its phonon spectrum" in caplog.text
 
 
 def test_package_without_phonon_path_keeps_the_old_behaviour(tmp_path, monkeypatch):
-    dataset = _package(tmp_path, monkeypatch, "BINARY=/x/vasp")
-    assert dataset.is_dir() and not (dataset / "phonon_data.npz").exists()
+    raw_file = _package(tmp_path, monkeypatch, "BINARY=/x/vasp")
+    assert _tag(raw_file) is None

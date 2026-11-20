@@ -80,9 +80,16 @@ def convert_energy(values: Union[float, np.ndarray], from_unit: str, to_unit: st
         raise ValueError(f"Unsupported target unit: '{to_unit}'")
 
 
-# Name of a packaged phonon spectrum: data/<defect>_<cell>/phonon_data.npz, and the copy that spinlabs
-# package keeps with a dataset (the spectrum its runs were displaced along) in the dataset's folder.
+# Packaged phonon spectra, one of each per defect in data/<defect>_<cell>/: the full spectrum as the
+# phonon code gave it, and the mirror-aligned one (spinlabs symmetrize --align) that data packaged
+# with aligned=True was displaced along.
 PACKAGED_PHONON_NAME = "phonon_data.npz"
+ALIGNED_PHONON_NAME = "phonon_data_aligned.npz"
+
+
+def packaged_phonon_name(aligned: Optional[bool]) -> str:
+    """File name of the packaged full spectrum that data with this ``aligned`` tag was displaced along."""
+    return ALIGNED_PHONON_NAME if aligned else PACKAGED_PHONON_NAME
 
 # How a perturbation run displaces the atoms along mode k (e_k: unit mass-weighted eigenvector,
 # m: atomic masses, step: the tree's PERT):
@@ -1212,6 +1219,10 @@ class RawZFSData:
     mass_weighted: bool = True
     # One of DISPLACEMENTS; None for data from before the key, read through mass_weighted.
     displacement: Optional[str] = None
+    # Whether the runs were displaced along mirror-aligned phonon modes (the trees' phonon file is an
+    # aligned one, PhononSpectrum.aligned): the analysis then needs the aligned full spectrum,
+    # phonon_data_aligned.npz. False for the classified-only spectrum; None for data from before the key.
+    aligned: Optional[bool] = None
     order: Optional[int] = None
     ground_state_zfs: Optional[ZFSTensor] = None
     eigen_rotation: Optional[np.ndarray] = None
@@ -1371,6 +1382,11 @@ class RawZFSData:
                 f"Cannot combine {self.displacement_convention} and {other.displacement_convention} perturbation "
                 "datasets: their perturbation amplitudes differ per mode."
             )
+        if bool(self.aligned) != bool(other.aligned):
+            raise ValueError(
+                "Cannot combine perturbation datasets displaced along aligned and along unaligned phonon modes: "
+                "their E modes are different vectors."
+            )
 
         merged_metadata = dict(self.metadata)
         for k, v in other.metadata.items():
@@ -1395,6 +1411,7 @@ class RawZFSData:
             spin=merged_spin,
             mass_weighted=self.mass_weighted,
             displacement=self.displacement,
+            aligned=self.aligned if self.aligned is not None else other.aligned,
             order=eff_order,
             ground_state_zfs=gs,
             eigen_rotation=merged_rotation,
@@ -1461,6 +1478,7 @@ class RawZFSData:
             spin=self.spin,
             mass_weighted=self.mass_weighted,
             displacement=self.displacement,
+            aligned=self.aligned,
             order=self.order,
             ground_state_zfs=new_gs,
             eigen_rotation=self.eigen_rotation.copy() if self.eigen_rotation is not None else None,
@@ -1533,6 +1551,7 @@ class RawZFSData:
         FieldSpec("spin", "float", optional=True),
         FieldSpec("mass_weighted", "bool", optional=True),
         FieldSpec("displacement", "str", optional=True),
+        FieldSpec("aligned", "bool", optional=True),
         FieldSpec("order", "int", optional=True),
         FieldSpec("ground_state_zfs", "zfstensor", optional=True, legacy_keys=("zfs_relaxed",)),
         FieldSpec("eigen_rotation", "array", optional=True),
@@ -1609,9 +1628,6 @@ class RawZFSData:
         else:
             paths = [Path(in_path)]
         paths = [f for p in paths for f in (sorted(p.glob("*.npz")) if p.is_dir() else [p])]
-        # A dataset folder also holds the phonon spectrum its runs were displaced along (spinlabs package):
-        # not a ZFS package, so left out of a folder or a glob of it (kept when it is all that was given).
-        paths = [p for p in paths if p.name != PACKAGED_PHONON_NAME] or paths
         if not paths:
             raise FileNotFoundError(f"no .npz files in {in_path}")
         by_sublevel = _group_by_sublevel(paths)
@@ -1671,6 +1687,10 @@ class RawZFSData:
         if len(conventions) > 1:
             raise ValueError(f"Cannot load perturbation files with different displacements together: {conventions}")
         convention = conventions.pop()
+        alignments = {bool(f.get("aligned")) for f in scaled_fields}
+        if len(alignments) > 1:
+            raise ValueError("Cannot load files displaced along aligned and along unaligned phonon modes together")
+        aligned = alignments.pop() if any(f.get("aligned") is not None for f in scaled_fields) else None
         sublevels = {f.get("spin_sublevel") for f in scaled_fields}
         if len(sublevels) > 1:
             raise ValueError(f"Cannot load files of different spin sublevels together: {sorted(map(str, sublevels))}")
@@ -1692,6 +1712,7 @@ class RawZFSData:
             spin=_merged_spin([f.get("spin") for f in scaled_fields], paths),
             mass_weighted=convention != "unweighted",
             displacement=convention,
+            aligned=aligned,
             order=order,
             ground_state_zfs=base.get("ground_state_zfs"),
             eigen_rotation=base.get("eigen_rotation"),
@@ -1734,6 +1755,8 @@ class RawZFSData:
         sets = {n: raw.to_unit("MHz") for n, raw in sublevels.items()}
         high = sets[highs[0]]
         for name, raw in sets.items():
+            if bool(raw.aligned) != bool(high.aligned):
+                raise ValueError(f"sublevel {name}: aligned {raw.aligned} != {high.aligned}")
             for attr in ("defect", "cell_size", "pert_scale", "displacement_convention"):
                 if getattr(raw, attr) != getattr(high, attr):
                     raise ValueError(f"sublevel {name}: {attr} {getattr(raw, attr)} != {getattr(high, attr)}")

@@ -17,7 +17,7 @@ from typing import NamedTuple
 
 from spinlabs.cli import add_verbosity_args
 from spinlabs.logging_utils import attach_db_logging, section
-from spinlabs.models import PACKAGED_PHONON_NAME, RawZFSData, normalize_calc_method
+from spinlabs.models import ALIGNED_PHONON_NAME, PACKAGED_PHONON_NAME, RawZFSData, normalize_calc_method
 from spinlabs.vasp.trees import full_spectrum_of, tree_displacement, tree_phonon
 from spinlabs.registry import SUBLEVEL_KINDS, ensure_db, register_file
 from spinlabs.pack_convergence import ConvergenceScan, save_convergence, scan_convergence
@@ -183,6 +183,10 @@ def _run(args: argparse.Namespace) -> None:
         phonon = _find_phonon_npz(defect_folder)
         if found and phonon is not None:
             phonons[(found[0].defect, found[0].cell_size)] = phonon
+    try:
+        aligned_phonons = _job_script_phonons(scanned, phonons)
+    except ValueError as error:
+        raise SystemExit(f"error: {error}")
     section(LOGGER, "Summary")
     _print_scan_summary(scanned, phonons)
     _print_mass_weighting(scanned, cli_unweighted=getattr(args, "no_mass_weighted", False))
@@ -191,9 +195,68 @@ def _run(args: argparse.Namespace) -> None:
     if not getattr(args, "yes", False) and not _confirm("Save the perturbation data to file? (Y/n): "):
         LOGGER.info("nothing saved")
         return
+    try:
+        _check_packaged_aligned(aligned_phonons, args.output_root)
+    except ValueError as error:
+        raise SystemExit(f"error: {error}")
     section(LOGGER, "Save perturbation data")
     _save_raw(scanned, args.output_root, cli_unweighted=getattr(args, "no_mass_weighted", False))
     _save_phonons(phonons, args.output_root)
+    _save_phonons(aligned_phonons, args.output_root, name=ALIGNED_PHONON_NAME)
+
+
+def _same_spectrum(a: Path, b: Path) -> bool:
+    """Whether two phonon files hold the same modes (frequencies and eigenvectors)."""
+    from spinlabs.parsers import parse_phonon_data
+
+    if Path(a).resolve() == Path(b).resolve():
+        return True
+    sa, sb = parse_phonon_data(a), parse_phonon_data(b)
+    return (
+        sa.n_modes == sb.n_modes
+        and np.allclose(sa.frequencies_mev, sb.frequencies_mev)
+        and np.allclose(np.asarray(sa.eigenvectors), np.asarray(sb.eigenvectors), atol=1e-8)
+    )
+
+
+def _job_script_phonons(scanned: list["_Scanned"], phonons: dict) -> dict[tuple[str, int], Path]:
+    """The defects' aligned full spectra, from the datasets' job scripts; updates ``phonons`` (unaligned) too.
+
+    Each dataset is tagged with the alignment of the spectrum its trees displaced along (_Scanned.aligned);
+    the analysis picks the packaged phonon_data.npz or phonon_data_aligned.npz of the defect by that tag,
+    so one of each per defect must hold for all its datasets. Raises ValueError on a conflict.
+    """
+    named: dict[bool, dict[tuple[str, int], Path]] = {True: {}, False: {}}
+    for s in scanned:
+        if s.phonon is None:
+            continue
+        key, group = (s.defect, s.cell_size), named[bool(s.aligned)]
+        if key in group and not _same_spectrum(group[key], s.phonon):
+            kind = "aligned" if s.aligned else "unaligned"
+            raise ValueError(
+                f"{s.defect}_{s.cell_size}: datasets displaced along different {kind} spectra "
+                f"({group[key]} and {s.phonon}); package them separately"
+            )
+        group[key] = s.phonon
+    for key, path in named[False].items():  # the job scripts' spectrum wins over the one found by name
+        if key in phonons and not _same_spectrum(phonons[key], path):
+            LOGGER.warning(
+                f"{key[0]}_{key[1]}: the job scripts displace along {path}, not {phonons[key]}; "
+                f"packaging {path} as the defect's spectrum"
+            )
+        phonons[key] = path
+    return named[True]
+
+
+def _check_packaged_aligned(aligned: dict[tuple[str, int], Path], output_root: Path) -> None:
+    """Refuse to replace a packaged aligned spectrum by a different one: earlier aligned data needs it."""
+    for (defect, cell_size), src in aligned.items():
+        dest = output_root / f"{defect}_{cell_size}" / ALIGNED_PHONON_NAME
+        if dest.is_file() and not _same_spectrum(dest, src):
+            raise ValueError(
+                f"{dest} holds other aligned modes than {src}; data packaged before was displaced along it. "
+                "Keep the earlier spectrum (rebuild the trees from it) or package into another --output-root"
+            )
 
 
 class _Scanned(NamedTuple):
@@ -208,9 +271,11 @@ class _Scanned(NamedTuple):
     displacement: str | None = None
     # Full spin decontamination: {sublevel: data}, one file each; raw is the high-spin (ms = S) one
     sublevels: dict[str, RawZFSData] | None = None
-    # Full phonon spectrum of the file the trees' job scripts displace along (PHONON_PATH), saved next
-    # to the dataset; None when the scripts name none (older trees: the defect's phonon file is used)
+    # Full phonon spectrum of the file the trees' job scripts displace along (PHONON_PATH); None when the
+    # scripts name none (older trees: the defect's phonon file is used)
     phonon: Path | None = None
+    # Whether that spectrum is mirror-aligned; saved as the packaged files' aligned tag (None: not known)
+    aligned: bool | None = None
 
 
 _DISPLACEMENT_TEXT = {
@@ -353,8 +418,18 @@ def _scan_raw(args: argparse.Namespace, defect_folder: Path, methods: list[str])
             if problem:
                 LOGGER.error(f"{defect_folder.name} {calc_method} pert {pert_scale:g}: {problem}; skipped")
                 continue
-            found.append(_Scanned(defect, cell_size, calc_method, pert_scale, raw, convention, phonon=phonon))
+            found.append(_Scanned(defect, cell_size, calc_method, pert_scale, raw, convention,
+                                  phonon=phonon, aligned=_aligned_of(phonon)))
     return found
+
+
+def _aligned_of(phonon: Path | None) -> bool | None:
+    """The spectrum's aligned flag (False for one that does not say), None without a spectrum."""
+    if phonon is None:
+        return None
+    from spinlabs.parsers import parse_phonon_data
+
+    return bool(parse_phonon_data(phonon).aligned)
 
 
 def _dataset_phonon(named: set[Path]) -> tuple[Path | None, str | None]:
@@ -446,7 +521,8 @@ def _scan_decont(
             LOGGER.error(f"{name}: {problem}; skipped")
             continue
         found.append(
-            _Scanned(defect, cell_size, "full_decont", pert_scale, sets[high_spin(sets)], convention, sets, phonon)
+            _Scanned(defect, cell_size, "full_decont", pert_scale, sets[high_spin(sets)], convention, sets, phonon,
+                     _aligned_of(phonon))
         )
     return found
 
@@ -500,10 +576,14 @@ def _find_phonon_npz(defect_folder: Path) -> Path | None:
     return None
 
 
-def _save_phonons(phonons: dict[tuple[str, int], Path], output_root: Path) -> None:
-    """Copy each phonon file to <output_root>/<defect>_<cell>/phonon_data.npz and register it."""
+def _save_phonons(phonons: dict[tuple[str, int], Path], output_root: Path, name: str = PACKAGED_PHONON_NAME) -> None:
+    """Copy each phonon file to <output_root>/<defect>_<cell>/<name> and register it.
+
+    ``name`` is phonon_data.npz, or phonon_data_aligned.npz for the aligned full spectrum that data
+    packaged with aligned=True was displaced along (the analysis picks it by that tag).
+    """
     for (defect, cell_size), src in phonons.items():
-        dest = output_root / f"{defect}_{cell_size}" / PACKAGED_PHONON_NAME
+        dest = output_root / f"{defect}_{cell_size}" / name
         dest.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(src, dest)
         register_file(ensure_db(), dest, "phonon", defect=defect, cell_size=cell_size)
@@ -528,7 +608,8 @@ def _print_scan_summary(scanned: list[_Scanned], phonons: dict[tuple[str, int], 
         if s.sublevels:
             print(f"{'':<12} one file per spin sublevel: {', '.join(s.sublevels)}")
         if s.phonon is not None:
-            print(f"{'':<12} phonon spectrum (from the job scripts): {s.phonon}")
+            tag = "aligned" if s.aligned else "not aligned"
+            print(f"{'':<12} phonon spectrum (from the job scripts, {tag}): {s.phonon}")
     if phonons:
         print("\nPhonon data:")
         for (defect, cell_size), path in phonons.items():
@@ -628,6 +709,8 @@ def _save_raw(scanned: list[_Scanned], output_root: Path, cli_unweighted: bool =
         # a full-decontamination set is one file per spin sublevel, all in this folder
         for raw in (s.sublevels or {None: s.raw}).values():
             raw.displacement = _displacement_of(s, cli_unweighted)
+            if s.aligned is not None:  # which packaged spectrum the analysis must use (models.packaged_phonon_name)
+                raw.aligned = s.aligned
             raw.mass_weighted = raw.displacement != "unweighted"
             save_path = raw.save(pert_folder / raw._default_name())
             register_file(
@@ -642,12 +725,6 @@ def _save_raw(scanned: list[_Scanned], output_root: Path, cli_unweighted: bool =
                 spin_sublevel=raw.spin_sublevel,
             )
             LOGGER.info(f"saved raw ZFS data: {save_path}")
-        if s.phonon is not None:
-            # The spectrum the runs were displaced along, where the analysis looks first
-            # (pipeline.find_default_phonon_file_for_raw); found by location, not registered.
-            dest = pert_folder / PACKAGED_PHONON_NAME
-            shutil.copy2(s.phonon, dest)
-            LOGGER.info(f"saved phonon data with the dataset: {dest} (copied from {s.phonon})")
 
 
 _DICT_ORDER_SUFFIXES = {
@@ -682,12 +759,8 @@ def _register_only(data_path: Path) -> None:
     conn = ensure_db()
     registered, skipped = 0, 0
     for npz_path in sorted(data_path.rglob("*.npz")):
-        if npz_path.name == PACKAGED_PHONON_NAME:
+        if npz_path.name in (PACKAGED_PHONON_NAME, ALIGNED_PHONON_NAME):
             defect, cell_size = split_defect_folder_name(npz_path.parent.name)
-            if cell_size is None and any(p.name != PACKAGED_PHONON_NAME for p in npz_path.parent.glob("*.npz")):
-                # the spectrum kept with a dataset: found by location (next to its data), not registered
-                LOGGER.debug(f"phonon data kept with its dataset, not registered: {npz_path}")
-                continue
             if cell_size is None:
                 LOGGER.warning(f"phonon file outside a <defect>_<cell> folder, not registered: {npz_path}")
                 skipped += 1
