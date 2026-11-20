@@ -600,6 +600,7 @@ def filter_degenerate_partners(
         iprs=spectrum.iprs[mask] if spectrum.iprs is not None else None,
         original_indices=kept,
         n_full=((spectrum.n_full if spectrum.n_full is not None else len(original)) if original is not None else n),
+        aligned=spectrum.aligned,
     )
     # indices point into the FULL pre-reduction spectrum, so the parent
     # size is the recorded n_full (or the input's own size when unreduced)
@@ -882,4 +883,79 @@ def symmetrize_degenerate_groups(spectrum, tol_mev: float = 0.01, verbose: bool 
     )
     classify_and_pair(new_spec, tol_mev)
     new_spec.symmetrization_report = report
+    return new_spec
+
+
+# Index (in defect_frame_operations) of the mirror the E sets are aligned to: sigma_v2, not sigma_v1.
+# The Ex/Ey sublabel is the sign of the character on sigma_v1 and filter_degenerate_partners keeps Ex.
+# Aligned to sigma_v2, the sigma_v2-odd partner has chi(sigma_v1) = cos 300 deg = +1/2 and is the Ex
+# kept, so the kept partner is mirror-odd: the one whose forward second difference the mirror
+# projection (ZFSManager mirror_projection) can clean. Aligned to sigma_v1 the kept partner would be
+# the mirror-even one.
+ALIGN_MIRROR = 4
+# Largest departure of the mirror's eigenvalues in a set from +-1 for the set to count as aligned.
+ALIGN_TOL = 1e-3
+
+
+def align_degenerate_pairs(spectrum, tol_mev: float = 0.01):
+    """Rotate every degenerate E set onto one mirror plane: each vector exactly even or odd under sigma_v2.
+
+    A degenerate pair is returned by the phonon code in any orthonormal basis of its subspace, so its
+    partners are in general neither even nor odd under any mirror (NV_64: |<e|M e>| 0.88 to 1, spread
+    over all three planes). Within a set's subspace the mirror is a symmetric matrix with eigenvalues
+    +-1; its eigenvectors are the aligned basis. Frequencies are kept (the rotation stays inside a
+    degenerate subspace), labels and groups are re-derived (classify_and_pair). Sets whose eigenvalues
+    depart from +-1 by more than ALIGN_TOL (a set that is not a complete E multiplet, or a broken
+    symmetry) are left as they are and reported.
+
+    Run it after symmetrize_degenerate_groups, so accidental mixed clusters are pure first. Never
+    align the phonon file of existing runs: they were displaced along the old vectors.
+
+    Returns a new PhononSpectrum with ``aligned`` True (False when a set was skipped) and an
+    ``alignment_report`` attribute ({"aligned": [set], "skipped": [(set, max ||lambda| - 1|)]}).
+    """
+    labels, groups = classify_and_pair(spectrum, tol_mev)
+    pg = detect_point_group_from_spectrum(spectrum)
+    if pg.symbol != "3m":
+        raise NotImplementedError(f"aligning degenerate sets to a mirror needs C3v, got point group {pg.symbol}")
+    ops = defect_frame_operations(spectrum)
+    mirror = [ops[ALIGN_MIRROR]]
+    mapping = _op_mappings(spectrum, mirror)
+    vecs = np.array(spectrum.eigenvectors, dtype=float, copy=True)
+    report: dict[str, list] = {"aligned": [], "skipped": []}
+    for g in groups:
+        if len(g) < 2 or _parent_label(labels[g[0]]) != "E":
+            continue
+        g = sorted(g)
+        V = vecs[g]  # (k, n_atoms, 3)
+        MV = np.stack([_group_operator_apply(mapping, mirror, V[k : k + 1])[0] for k in range(len(g))])
+        flat, mflat = V.reshape(len(g), -1), MV.reshape(len(g), -1)
+        S = flat @ mflat.T
+        S = 0.5 * (S + S.T)
+        lam, W = np.linalg.eigh(S)
+        off = float(np.max(np.abs(np.abs(lam) - 1.0)))
+        if off > ALIGN_TOL:
+            report["skipped"].append((g, off))
+            continue
+        new = (W.T @ flat).reshape(V.shape)  # orthonormal: W orthogonal, V orthonormal
+        for slot, v in zip(g, new):
+            vecs[slot] = v
+        report["aligned"].append(g)
+    new_spec = replace(
+        spectrum,
+        eigenvectors=vecs,
+        symmetries=None,
+        e_pair_complete=None,
+        pair_ids=None,
+        deg_groups=None,
+        original_indices=spectrum.original_indices,
+        aligned=not report["skipped"],  # True only when every E set is aligned
+    )
+    classify_and_pair(new_spec, tol_mev)
+    new_spec.alignment_report = report
+    if report["skipped"]:
+        LOGGER.warning(
+            f"{len(report['skipped'])} degenerate E set(s) not aligned (mirror eigenvalues off +-1 by up to "
+            f"{max(o for _, o in report['skipped']):.3g}): " + ", ".join(str(g) for g, _ in report["skipped"][:10])
+        )
     return new_spec

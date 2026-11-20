@@ -394,6 +394,7 @@ def resolve_sym_phonon(out: Path, phonon: Path) -> Path:
     spectrum = parse_phonon_data(phonon)
     classify_and_pair(spectrum)
     symmetrized = symmetrize_degenerate_groups(spectrum)
+    symmetrized.aligned = False  # classified only; spinlabs symmetrize --align writes aligned files
     filtered = filter_degenerate_partners(symmetrized)
     target = data / f"phonon_data_sym{filtered.n_modes}.npz"
     if target.is_file():

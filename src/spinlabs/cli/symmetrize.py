@@ -2,7 +2,11 @@
 
 Same steps as the perturbation-tree setup (``spinlabs.vasp.trees.resolve_sym_phonon``):
 classify the modes, re-diagonalize accidentally mixed near-degenerate clusters into
-pure irreps, then drop the redundant partners of each degenerate set. A phonopy yaml
+pure irreps, then drop the redundant partners of each degenerate set. With ``--align`` every
+degenerate E set is first rotated onto one mirror plane (``symmetry.align_degenerate_pairs``) and
+the file is named ``<stem>_sym<n>_aligned.npz``; its ``aligned`` key says which kind a file is. The aligned
+full spectrum (every mode, same mode indices) is written too, as ``<stem>_aligned.npz``: runs made from
+the aligned file must be analysed with it, not with the original spectrum. A phonopy yaml
 is read through ``prepare_phonopy_yaml``, so repeated q-point blocks are dropped and,
 when the yaml has no structure, a structure-complete ``<stem>_full.yaml`` is written
 from the POSCAR next to it.
@@ -24,7 +28,15 @@ def build_symmetrize_parser(parser: argparse.ArgumentParser) -> None:
         "--out",
         type=resolve_path,
         default=None,
-        help="output .npz (default: <phonon stem>_sym<n>.npz next to the input, n = kept mode count)",
+        help="output .npz (default: <phonon stem>_sym<n>.npz next to the input, n = kept mode count; "
+        "<phonon stem>_sym<n>_aligned.npz with --align)",
+    )
+    parser.add_argument(
+        "--align",
+        action="store_true",
+        help="Rotate every degenerate E set onto one mirror plane, so each kept E mode is exactly mirror-odd "
+        "(sigma_v2); for new perturbation runs only, never for the phonon file of existing runs (they were "
+        "displaced along the old vectors)",
     )
     parser.add_argument(
         "--poscar",
@@ -39,6 +51,7 @@ def build_symmetrize_parser(parser: argparse.ArgumentParser) -> None:
 def _run(args: argparse.Namespace) -> None:
     from spinlabs.parsers import parse_phonon_npz, prepare_phonopy_yaml, save_phonon_npz
     from spinlabs.symmetry import (
+        align_degenerate_pairs,
         classify_and_pair,
         filter_degenerate_partners,
         SymmetryDetectionError,
@@ -66,20 +79,41 @@ def _run(args: argparse.Namespace) -> None:
     try:
         classify_and_pair(spectrum)
         symmetrized = symmetrize_degenerate_groups(spectrum)
+        report = getattr(symmetrized, "symmetrization_report", None) or {}
+        if args.align:
+            symmetrized = align_degenerate_pairs(symmetrized)
+        else:
+            symmetrized.aligned = False
         filtered = filter_degenerate_partners(symmetrized)
-    except SymmetryDetectionError as error:
+    except (SymmetryDetectionError, NotImplementedError) as error:
         hint = " (no structure in the yaml: pass --poscar or put a POSCAR next to it)" if suffix != ".npz" else ""
         raise SystemExit(f"error: {error}{hint}")
 
-    out = args.out or path.with_name(f"{path.stem}_sym{filtered.n_modes}.npz")
+    stub = "_aligned" if args.align else ""
+    out = args.out or path.with_name(f"{path.stem}_sym{filtered.n_modes}{stub}.npz")
     save_phonon_npz(filtered, out)
+    full_out = None
+    if args.align:
+        # The analysis needs every mode (ZFSManager rejects a reduced spectrum) along the same vectors
+        # the runs were displaced along: the aligned spectrum before the partners were dropped.
+        full_out = out.with_name(f"{path.stem}_aligned.npz")
+        save_phonon_npz(symmetrized, full_out)
 
-    report = getattr(symmetrized, "symmetrization_report", None) or {}
     n_sym = len(report.get("symmetrized", []))
     n_skip = len(report.get("skipped", []))
     check = sym_check_summary(getattr(spectrum, "sym_check", None))
+    aligned = ""
+    if args.align:
+        rep = getattr(symmetrized, "alignment_report", None) or {}
+        aligned = (f"; {len(rep.get('aligned', []))} degenerate E set(s) aligned to a mirror, "
+                   f"{len(rep.get('skipped', []))} not")
     print(
         f"wrote {out}: {filtered.n_modes} of {spectrum.n_modes} modes kept; "
         f"{n_sym} mixed cluster(s) symmetrized, {n_skip} skipped"
+        + aligned
         + (f"; sym_check: {check}" if check else "")
+        + f"; aligned: {filtered.aligned}"
     )
+    if full_out is not None:
+        print(f"wrote {full_out}: the aligned full spectrum ({symmetrized.n_modes} modes); analyse runs made from "
+              f"{out.name} with it, not with {path.name}")

@@ -317,6 +317,9 @@ class PhononSpectrum:
     deg_groups: Optional[list] = None  # Lists of mode indices forming complete irrep component sets
     original_indices: Optional[np.ndarray] = None  # Shape (N_modes,): mode index in the full DFT run
     n_full: Optional[int] = None  # size of the full spectrum original_indices point into
+    # Whether every degenerate E set was rotated onto one mirror plane (symmetry.align_degenerate_pairs):
+    # True for an aligned file, False for a symmetrized file whose sets are only classified, None unstated.
+    aligned: Optional[bool] = None
     frequency_unit: str = "meV"
 
     def __post_init__(self):
@@ -951,6 +954,7 @@ class PhononSpectrum:
         FieldSpec("deg_groups", "array", optional=True),
         FieldSpec("original_indices", "array", shape=("n_modes",), optional=True, save_aliases=("idx",)),
         FieldSpec("n_full", "int", optional=True),
+        FieldSpec("aligned", "bool", optional=True),
     ]
 
     def save(self, out_path: Union[str, Path]) -> str:
