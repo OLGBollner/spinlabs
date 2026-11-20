@@ -11,7 +11,8 @@ REPO = Path(__file__).resolve().parents[2]
 SCRIPTS = REPO / "scripts" / "cluster"
 TEMPLATES = REPO / "src" / "spinlabs" / "vasp" / "templates"  # the per-tree job scripts
 RUNNER = SCRIPTS / "perturbation_runner.sh"
-WRAPPERS = ("run_perturbation_first_order.sh", "run_perturbation_second_order.sh", "run_convergence.sh")
+WRAPPERS = ("run_perturbation_first_order.sh", "run_perturbation_second_order.sh", "run_convergence.sh",
+            "run_ground_state.sh")
 
 
 def _lock_block() -> str:
@@ -53,7 +54,7 @@ def test_job_scripts_parse(path):
 def test_runner_takes_the_lock_before_touching_a_run_directory():
     text = RUNNER.read_text()
     run_one = text[text.index("run_one() {"):text.index("mkdir -p runs")]
-    assert run_one.index('acquire_lock "$TARGET_DIR"') < run_one.index('cp "$INPUT_DIR"/*')
+    assert run_one.index('acquire_lock "$TARGET_DIR"') < run_one.index('for f in "$INPUT_DIR"/*')
     # Released after the run, once back in the tree's top folder.
     assert run_one.rindex("release_lock") > run_one.rindex('cd "$HEAD_DIR"')
     assert "mkdir -p $TARGET_DIR" not in run_one  # the lock creates the directory

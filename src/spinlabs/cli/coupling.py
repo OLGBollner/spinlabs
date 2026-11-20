@@ -1,7 +1,7 @@
 """``spinlabs run coupling``: the ZFSManager stage alone, for debugging.
 
 Loads the inputs exactly as ``spinlabs run`` does, with its coupling settings
-(production defaults: inconsistent pairs excluded, off-diagonal fill on),
+(production defaults: inconsistent pairs excluded, off-diagonal fill and mirror projection on),
 computes the first- and (when present) second-order spin-phonon couplings, and
 prints a summary.
 Nothing is written to disk or to the registry.
@@ -11,11 +11,13 @@ import argparse
 
 import numpy as np
 
+from spinlabs.methods import CLI_CHOICES
 from spinlabs.cli import add_verbosity_args
 from spinlabs.cli.production import add_coupling_args, coupling_options
 from spinlabs.constants import CONSTANTS
 from spinlabs.logging_utils import get_logger, section
 from spinlabs.registry import parse_orders
+from spinlabs.utils import relative_to_cwd, resolve_path
 
 LOGGER = get_logger(__name__)
 
@@ -28,16 +30,16 @@ def add_input_args(parser: argparse.ArgumentParser) -> argparse._ArgumentGroup:
     The coupling options and their defaults are those of ``spinlabs run`` (spinlabs.cli.production).
     """
     inputs = parser.add_argument_group("input mode (exactly one)")
-    inputs.add_argument("--sim-folder", nargs="+", metavar="DIR", help="Path to VASP simulation folder(s)")
-    inputs.add_argument("--raw-zfs-file", metavar="FILE", help="Path to a raw ZFS .npz dataset file")
-    inputs.add_argument("--raw-zfs-file-1d", metavar="FILE", help="Raw ZFS 1st-order .npz (combined 1d+2d mode)")
-    inputs.add_argument("--raw-zfs-file-2d", metavar="FILE", help="Raw ZFS 2nd-order .npz (combined 1d+2d mode)")
+    inputs.add_argument("--sim-folder", type=resolve_path, nargs="+", metavar="DIR", help="Path to VASP simulation folder(s)")
+    inputs.add_argument("--raw-zfs-file", type=resolve_path, metavar="FILE", help="Path to a raw ZFS .npz dataset file")
+    inputs.add_argument("--raw-zfs-file-1d", type=resolve_path, metavar="FILE", help="Raw ZFS 1st-order .npz (combined 1d+2d mode)")
+    inputs.add_argument("--raw-zfs-file-2d", type=resolve_path, metavar="FILE", help="Raw ZFS 2nd-order .npz (combined 1d+2d mode)")
 
     opt = parser.add_argument_group("options")
-    opt.add_argument("-ph", "--phonon-file", metavar="FILE", help="phonopy.yaml or phonon_data.npz")
+    opt.add_argument("-ph", "--phonon-file", type=resolve_path, metavar="FILE", help="phonopy.yaml or phonon_data.npz")
     opt.add_argument(
         "--method",
-        choices=["all", "approx"],
+        choices=CLI_CHOICES,
         help="Calculation method; inferred from the input name when omitted (as for run)",
     )
     opt.add_argument(
@@ -74,7 +76,8 @@ def build_coupling_parser(parser: argparse.ArgumentParser) -> None:
 
 def load_manager(args: argparse.Namespace, command: str):
     """ZFSManager for the inputs in ``args``, loaded as ``spinlabs run`` loads them and with its coupling
-    settings (by default inconsistent pairs excluded and the off-diagonal fill on; see spinlabs.cli.production).
+    settings (by default inconsistent pairs excluded, the off-diagonal fill and the mirror projection on; see
+    spinlabs.cli.production).
 
     Returns ``(manager, phonon_path, orders)``; ``orders`` is what to compute.
     """
@@ -115,7 +118,8 @@ def load_manager(args: argparse.Namespace, command: str):
     if len(orders) == 1:
         order_hint = orders[0]
     else:
-        order_hint = 2 if any(k in str(sim_folder).lower() for k in ("second_order", "2d", "2nd")) else 1
+        typed = " ".join(relative_to_cwd(p) for p in (args.sim_folder or [])).lower()  # not the absolute parents
+        order_hint = 2 if any(k in typed for k in ("second_order", "2d", "2nd")) else 1
 
     section(LOGGER, "Load input data")
     raw_data, spectrum, ph_path = load_raw_inputs(
@@ -191,6 +195,12 @@ def _summary(manager, ph_path, first, second, top: int, modes: list[int]) -> str
             f"  inconsistent entries {action}: {len(bad)} of {len(manager.zfs_tensors_2d)}"
             + (" -- " + ", ".join(f"{i + 1}_{j + 1} (alpha={a:.2f})" for i, j, a, _ in bad) if bad else "")
         )
+        if manager.mirror_projection:
+            lines.append(
+                f"  mirror projection: {len(manager.mirror_projected)} forward diagonals projected, "
+                f"{len(manager.mirror_inherited)} even partners from their odd twin, "
+                f"{len(manager.mirror_uncorrected)} E diagonals uncorrected"
+            )
         for k, v in zip(_V_KEYS, v2):
             total = np.sum(v**2)
             off = total - np.sum(np.diag(v) ** 2)

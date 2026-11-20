@@ -81,11 +81,17 @@ def _attempt_reason(attempt: _Attempt, run_dir: Path) -> str:
         return "creating the perturbed structure failed"
     if "not the intended displacement" in text:
         return "perturbed POSCAR failed the displacement check"
+    if "WAVECAR alignment failed" in text:
+        return "the WAVECAR's unpaired down-spin orbitals could not be aligned to the up spin"
+    if "no sublevel runs" in text:
+        return "the SCF before the spin sublevels failed its check"
     if m := _VASP_EXIT.search(text):
         return f"VASP exited with {m.group(1)}"
     if "did not finish" in text:
         scf = scf_problem(scf_status(run_dir)) if run_dir.is_dir() else None
         return scf.split(":")[0] if scf else "VASP ended without a ZFS block"
+    if "without a ZFS block" in text:
+        return "spin sublevel(s) ended without a ZFS block"
     if "Done!" in text:
         return "VASP finished but the run has no .done"
     if _OOM.search(text):

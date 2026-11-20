@@ -78,6 +78,13 @@ def main() -> int:
         "(package them with 'spinlabs package --central')",
     )
     ap.add_argument(
+        "--full-decont",
+        action="store_true",
+        help="full spin decontamination (Biktagirov): one basis full_decont/ from ZFS_hyp whose runs do an SCF "
+        "that saves the WAVECAR, then the ZFS of every spin sublevel (ms=S and each ms=S-1 spin flip) from it "
+        "with ALGO=None; convergence folder convergence_test_decont/",
+    )
+    ap.add_argument(
         "--array-jobs", type=int, default=10, help="number of SLURM array jobs to split the sweep into (default: 10)"
     )
     ap.add_argument(
@@ -121,6 +128,7 @@ def main() -> int:
             vasp_binary=vasp_binary,
             force=args.force,
             central=args.central,
+            decont=args.full_decont,
         )
     except (FileNotFoundError, ValueError) as e:
         sys.exit(f"Error: {e}")

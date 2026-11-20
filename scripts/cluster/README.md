@@ -1,6 +1,35 @@
 # Cluster run scripts
 
-ZFS perturbation runs on SLURM. Each tree folder (e.g. `first_order/pert_0.025/all_bands/`,
+## A new defect
+
+```bash
+spinlabs init tree NV_64 <inputs>     # NV_64/relax/ (POSCAR, INCAR, KPOINTS, POTCAR; add the job script),
+                                      # NV_64/data/ (<inputs>/data/ + phonopy/phonon files), ZFS_AO/, ZFS_UO/
+# ... run the relaxation in NV_64/relax ...
+spinlabs init zfs NV_64/relax --method all        # ZFS_AO: the ZFS run with the EIGENVAL occupations
+spinlabs init zfs NV_64/relax --method unpaired   # ZFS_UO: only the unpaired orbitals occupied
+spinlabs init zfs NV_64/relax --method decont     # ZFS_full: SCF + one ALGO=None run per spin sublevel
+spinlabs init convergence NV_64 --pert 0.025      # pick convergence modes, show them, ask, then build
+                                                  # convergence_test_AO/ and convergence_test_UO/
+```
+
+`spinlabs init convergence` symmetrizes the phonons (as for the trees), then picks `-n` (default 6)
+varied modes: the most localized (largest IPR), the lowest- and highest-frequency, the mode of each
+irrep nearest the defect (P_2bond), the most bulk-like (smallest IPR) and the most defect-centred,
+filling the rest by the widest gap in (frequency, log IPR, P_2bond). It prints each with its mode
+number, frequency, irrep, IPR, P_2bond, <r> and why it was picked, then asks
+`create convergence runs of modes? [Y/n]:` (`-y` skips the question; `--modes` runs given modes
+instead). `--method` takes all, unpaired and/or decont (default all unpaired); the step defaults to
+that of the defect's trees and the displacement to theirs (normalized without trees).
+
+Each ground-state folder gets `run_ground_state.sh` (submit with `sh run_ground_state.sh`): ZFS_AO and
+ZFS_UO are one self-consistent ZFS run (ALGO from the relaxation, NSW = 0, IBRION = -1, ISYM = 0,
+LDMATRIX), ZFS_full the SCF, WAVECAR alignment and sublevel runs. The methods are AO (all orbitals),
+UO (unpaired orbitals, spin-corrected) and full_decont; `--method` takes all/AO, unpaired/UO, decont.
+
+## Perturbation runs
+
+ZFS perturbation runs on SLURM. Each tree folder (e.g. `first_order/pert_0.025/AO/`,
 with `input/` next to it) holds a job script made from the templates in
 `src/spinlabs/vasp/templates/` (`run_perturbation_first_order.sh` / `_second_order.sh`, and
 `run_convergence.sh` for the step-size convergence folders). The job script holds only the
@@ -39,10 +68,18 @@ from that snapshot.
   first runs its own share (run index mod array size), then takes the other tasks' runs that
   are still free, so no task idles while others have work left; a run directory's `.lock`
   keeps two tasks out of it, and its `.attempted` (the array job id) stops the other tasks of
-  the same submission from retrying a run that failed.
+  the same submission from retrying a run that failed. A task stops, starting nothing more, when
+  squeue says its job no longer runs (past its time limit the batch shell is not always signalled,
+  while every srun is refused) or has less time left than the longest run the task has done so
+  far (`RUN_SECONDS` in the submitting shell sets a first estimate, e.g.
+  `RUN_SECONDS=150 sh run_perturbation_first_order.sh`). An unfinished run restarts from its own
+  CHGCAR when VASP left a complete one (`python -m spinlabs.vasp.restart CHGCAR`), else from
+  the input's; a restart from its own density that crashes drops it for the next attempt.
 - `create_perturbation_tree.py`: build ready-to-go trees (`first_order`/`second_order` x
-  `all_bands`/`defect_band_approx` x steps) from `<defect>/ZFS_hyp` and `<defect>/ZFS_occup`,
-  plus the convergence folders `convergence_test_all/` and `convergence_test_occup/`.
+  `AO`/`UO` x steps) from `<defect>/ZFS_AO` and `<defect>/ZFS_UO`,
+  plus the convergence folders `convergence_test_AO/` and `convergence_test_UO/`. Defects set up
+  before the rename keep their `ZFS_hyp`/`ZFS_occup`, `all_bands/`/`defect_band_approx/` and
+  `convergence_test_all/occup` folders: those are found and used where they are.
   `--pert` (the step) is required; `--displacement` defaults to `normalized`;
   `--central` builds first-order trees at +p and -p and no second-order tree, for central
   differences (package them with `spinlabs package --central`);
@@ -51,9 +88,49 @@ from that snapshot.
   both signs). The generated script gets
   `#SBATCH -J <defect>_<order>_<basis>` and a time limit / array size from the reference
   OUTCAR's wall time x tasks / `--array-jobs`; `--max-hours` caps the per-job limit.
+- `create_perturbation_tree.py --full-decont`: trees for the full spin decontamination
+  (Biktagirov) instead, one basis `full_decont/` from `ZFS_AO` (and `convergence_test_decont/`).
+  Its `input/INCAR` is the SCF of the ms=S state with `LWAVE = .TRUE.` and `LDMATRIX = .FALSE.`;
+  `input/sublevels/<name>/INCAR` is one ALGO=None ZFS run per spin sublevel: `ms_<S>` (the
+  ZFS_AO occupations) and, for each of the 2S unpaired bands k (occupied up, empty down),
+  `ms_<S-1>_<k>`: k's electron moved to the down channel, NUPDOWN = 2S-2 (NV: `ms_1`,
+  `ms_0_127`, `ms_0_128`). The runner sees `input/sublevels/` and does, per run directory:
+  1. perturb the structure, 2. the SCF (`.scf_done` once converged, from the OSZICAR),
+  2b. the unpaired down-spin orbitals (the NV e pair, degenerate or split by the displacement)
+  rotated onto the up-spin ones in its WAVECAR (`python -m spinlabs.vasp.wavecar align .`,
+  `.wavecar_aligned`; each channel picks its own basis or order of the pair, and a spin flip must
+  land in the orbital it left;
+  a run whose channels cannot be matched gets a CHECK file and no sublevel runs),
+  3. a subfolder per sublevel with its INCAR, the run's POSCAR/KPOINTS/POTCAR and
+  `WAVECAR -> ../WAVECAR`, 4. VASP there (ALGO=None, ISTART=1, LWAVE off); a sublevel gets
+  `.done` with its ZFS block, the run directory once all have it. WAVECAR is kept; CHGCAR/CHG
+  go. A restart reuses a finished SCF and runs only the sublevels left. The unperturbed ground
+  state goes through the same steps once per defect in `<defect>/ZFS_full/` (next to `ZFS_AO/`),
+  filled at creation: the SCF input (INCAR, POSCAR, KPOINTS, POTCAR, CHGCAR from ZFS_AO), one
+  `ms_*/INCAR` per sublevel and `run_ground_state.sh`. Submit it on its own from there with
+  `sh run_ground_state.sh` (one job, the runner's `ground_state` mode); the trees' jobs do not
+  run it. A rerun skips a finished SCF and sublevels. Unlike the runs, it keeps its CHGCAR.
+  `spinlabs package` (method `decont`, picked by default when the trees exist) writes one npz
+  per spin sublevel into one folder, `data/<defect>_<cell>/pert_<p>/full_decont/<date>/`, each
+  with a `spin_sublevel` key and its ground state from `ZFS_full/<sublevel>`; only runs with a
+  ZFS tensor in every sublevel go in. `spinlabs package --conv` does the same for
+  `convergence_test_decont/` (`data/<defect>_<cell>/full_decont/<date>/`). Each set is one dataset
+  of method `decont` (calc_method `full_decont`): `--query`/`--latest` and `spinlabs list` find its
+  folder, and loading it (`RawZFSData.load`, `load_convergence`) combines the sublevels into the
+  decontaminated D (`RawZFSData.decontaminated`), so `spinlabs run`, `plot` and `tables` take
+  `--method decont` like `all`/`unpaired`. The per-sublevel files stay, with
+  `spinlabs.decont.load_sublevel_set` / `load_conv_sublevel_set` and
+  `spinlabs.registry.find_sublevel_sets` for the raw sublevels.
+- `spinlabs update <defect> --set EDIFF=1E-7 ISYM=0 [--dry-run] [--yes] [--skip-done]`: set INCAR
+  tags in every INCAR under a folder (ZFS_*, the trees' input/ and input/sublevels/*/, ZFS_full and
+  its ms_*/, runs/*), leaving out .spinlabs-code/ snapshots and data/. A tag is replaced where set
+  (inline comments kept) and appended where missing; a summary per tag (old -> new) comes first.
+  Only tags that must agree across all runs are allowed (accuracy, symmetry, parallelization);
+  occupation/spin, run-control and system-size tags are refused with the reason. Finished runs
+  (.done) are flagged, since their results keep the old value; --skip-done leaves them out.
 - `add_convergence_tree.py`: add the convergence folders to an existing defect folder
   (`--modes`, and `--steps` or `--pert`); the displacement and VASP binary default to the
-  ones its trees use.
+  ones its trees use. `spinlabs init convergence` does the same and picks the modes for you.
 - `update_tree_scripts.sh`: put the current templates into existing trees and convergence
   folders, keeping each script's `#SBATCH` lines, config and displacement (an older
   convergence script becomes `run_convergence.sh`), and copy in the current

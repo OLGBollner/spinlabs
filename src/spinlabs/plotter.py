@@ -138,7 +138,7 @@ def plot_1d_spectral_functions(
 
 
 def _name_meta(defect, cell_size, calc_method=None, pert=None) -> str:
-    """Filename suffix naming a run's configuration, e.g. ``_NV_512_all_bands_pert-0.05`` (as plot_t1 names it).
+    """Filename suffix naming a run's configuration, e.g. ``_NV_512_AO_pert-0.05`` (as plot_t1 names it).
 
     Figures of every run share one folder per plot kind, so the name is what tells them apart.
     """
@@ -419,8 +419,13 @@ def plot_run_t1(run_dir: Path, out_dir: Path, fmt: str, dpi: int, show: bool):
     plot_t1(t1_files, output_path=out_file, plain_name=True)
 
 
-# ZFS schemes: AO all orbitals, UO the unpaired (defect-band) orbitals
-_CALC_METHOD_LABELS = {"all_bands": "AO", "defect_band_approx": "UO", "defect_band": "UO"}
+def _method_label(calc_method: str) -> str:
+    """The scheme's label (AO all orbitals, UO the unpaired orbitals, FD the full decontamination; legacy
+    names read too), else the name itself."""
+    from spinlabs.methods import METHODS, normalize_calc_method
+
+    found = METHODS.get(normalize_calc_method(calc_method))
+    return found.label if found else str(calc_method)
 
 
 def init_state_label(init_state: str) -> str:
@@ -447,7 +452,7 @@ def _t1_label_parts(
     details = []
     if pert is not None:
         details.append(f"pert {pert:g}")
-    method = _CALC_METHOD_LABELS.get(calc_method, calc_method.replace("_", " "))
+    method = _method_label(calc_method).replace("_", " ")
     if method:
         details.append(method)
     if init_state:
@@ -519,7 +524,7 @@ def plot_t1(
                 t1_fit = np.asarray(data[key], dtype=float)
                 break
 
-        scheme = _CALC_METHOD_LABELS.get(calc_method, calc_method)
+        scheme = _method_label(calc_method)
         meta_parts.extend(x.replace(" ", "-") for x in (defect, cell_size, scheme, init_state) if x)
         if pert is not None:
             meta_parts.append(f"pert-{pert:g}")

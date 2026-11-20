@@ -561,7 +561,10 @@ def common_window(reports: dict[int, SNRReport]) -> str:
 
 
 def read_conv_metadata(npz_path: Path) -> dict:
-    """Return the JSON 'metadata' key of a packed convergence npz ({} if absent)."""
+    """Return the JSON 'metadata' key of a packed convergence npz ({} if absent); for a full-decontamination
+    set folder, that of the decontaminated set."""
+    if Path(npz_path).is_dir():
+        return _decontaminated_pack(npz_path)["metadata"]
     data = np.load(npz_path)
     if "metadata" not in data:
         return {}
@@ -586,15 +589,23 @@ class ConvergenceData:
     metadata: dict
 
 
+def _decontaminated_pack(folder: Path) -> dict:
+    """A full-decontamination convergence set folder as one pack's arrays (spinlabs.decont)."""
+    from spinlabs.decont import decontaminate_conv_set, load_conv_sublevel_set
+
+    return decontaminate_conv_set(load_conv_sublevel_set(folder))
+
+
 def load_convergence(npz_path: Path) -> ConvergenceData:
     """Load a packed convergence npz, with Q=0 anchored for every mode.
 
     Q=0 comes from the perts array if present, else from the 'd0' key written by
     pack_perturbation_runs.py --ground-state (prepended as a Q=0 column). Q=0 is the
     relaxed structure, so its tensor is identical for every mode: a mode without its
-    own Q=0 run (absent column or NaN) borrows it from one that has it.
+    own Q=0 run (absent column or NaN) borrows it from one that has it. A full-decontamination
+    set folder (one file per spin sublevel) loads as its decontaminated pack.
     """
-    data = np.load(npz_path)
+    data = _decontaminated_pack(npz_path) if Path(npz_path).is_dir() else np.load(npz_path)
     modes = data["modes"]
     perts = data["perts"]
     tensors = np.array(data["tensors"], dtype=float)
@@ -623,7 +634,8 @@ def load_convergence(npz_path: Path) -> ConvergenceData:
                     f"borrowed the Q=0 tensor for {patched} mode(s) that lack "
                     "their own pert=0 run (identical relaxed structure)",
                 )
-    return ConvergenceData(modes=modes, perts=perts, tensors=tensors, q0=q0, metadata=read_conv_metadata(npz_path))
+    meta = data["metadata"] if isinstance(data, dict) else read_conv_metadata(npz_path)
+    return ConvergenceData(modes=modes, perts=perts, tensors=tensors, q0=q0, metadata=meta)
 
 
 PC_NAMES = ("xx", "yy", "zz")

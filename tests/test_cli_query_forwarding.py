@@ -10,6 +10,7 @@ timestamped run directory.
 """
 
 import argparse
+from pathlib import Path
 
 import pytest
 
@@ -115,8 +116,8 @@ def test_query_honours_explicit_phonon_file(captured, monkeypatch):
     args = _parse(["--query", "-ph", "/data/phonopy.yaml", "--two-phonon", "/data/raman.npz"])
     args.func(args)
 
-    assert captured[0]["phonon_file"] == "/data/phonopy.yaml"
-    assert captured[0]["two_phonon_file"] == "/data/raman.npz"
+    assert captured[0]["phonon_file"] == Path("/data/phonopy.yaml")
+    assert captured[0]["two_phonon_file"] == Path("/data/raman.npz")
 
 
 def test_query_defaults_to_no_phonon_override(captured, monkeypatch):
@@ -150,8 +151,9 @@ def test_query_still_infers_method_per_dataset(captured, monkeypatch):
     args = _parse(["--query", "--t-end", "500"])
     args.func(args)
 
-    assert [c["calc_method"] for c in captured] == ["all_bands", "defect_band_approx"]
-    assert [c["zfs_folder"] for c in captured] == ["ZFS_hyp", "ZFS_occup"]
+    assert [c["calc_method"] for c in captured] == ["AO", "UO"]
+    # the ground-state folder is the method's own (ZFS_AO / ZFS_UO or a legacy name), found by the parser
+    assert [c["zfs_folder"] for c in captured] == [None, None]
     # ... and the forwarded options apply to every dataset, not just the first
     assert {c["t_end"] for c in captured} == {500.0}
 
@@ -237,7 +239,7 @@ def test_query_runs_a_dataset_matched_twice_once(captured, monkeypatch):
     assert len(captured) == 1
 
 
-@pytest.mark.parametrize("flag", [["--cell-size", "64", "128"], ["--method", "all", "approx"], ["--pert-scale", "0.1", "0.025"]])
+@pytest.mark.parametrize("flag", [["--cell-size", "64", "128"], ["--method", "all", "unpaired"], ["--pert-scale", "0.1", "0.025"]])
 def test_multiple_filter_values_rejected_without_query(flag):
     args = _parse(["--raw-zfs-file", "x_all_bands.npz", *flag])
     with pytest.raises(SystemExit):
@@ -275,3 +277,23 @@ def test_query_forwards_sigma(captured, monkeypatch):
     args = _parse(["--query", "--sigma", "2"])
     args.func(args)
     assert captured[0]["sigma"] == 2.0
+
+
+def test_relative_and_home_paths_reach_the_pipeline_resolved(captured, monkeypatch, tmp_path):
+    """Paths are taken relative to the working directory (~ expanded) and resolved before use; the method is
+    still inferred from the typed part, not from the absolute path's parent folders."""
+    home = tmp_path / "test_all_home"  # a parent whose name matches the AO pattern: must not count
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    work = tmp_path / "test_all_work"
+    (work / "pkg").mkdir(parents=True)
+    monkeypatch.chdir(work)
+    args = _parse(["--raw-zfs-file", "pkg/NV_64_raw_zfs_data_defect_band_approx_12d.npz", "-ph", "~/phonopy.yaml",
+                   "-o", "out"])
+    args.func(args)
+
+    kwargs = captured[0]
+    assert kwargs["raw_zfs_file"] == work / "pkg" / "NV_64_raw_zfs_data_defect_band_approx_12d.npz"
+    assert kwargs["phonon_file"] == home / "phonopy.yaml"
+    assert kwargs["output_root"] == work / "out"
+    assert kwargs["calc_method"] == "UO"

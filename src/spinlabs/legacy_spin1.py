@@ -13,6 +13,7 @@ import numpy as np
 from scipy import constants as Cn
 from scipy.optimize import OptimizeWarning, curve_fit
 
+from spinlabs.methods import spin_corrected
 from spinlabs.constants import CONSTANTS
 from spinlabs.relaxation_dynamics import MIN_DECAY_RATE
 from spinlabs.transition_rate import Phonons
@@ -447,7 +448,7 @@ class RelaxationDynamicsSpin1:
         data = np.load(data_file, allow_pickle=True)
         self.defect = data.get("defect")
         self.cell_size = data.get("cell_size")
-        self.sim_type = "(spin corrected)" if data.get("calc_method") == "defect_band_approx" else ""
+        self.sim_type = "(spin corrected)" if spin_corrected(data.get("calc_method")) else ""
 
         rate_matrices = []
 

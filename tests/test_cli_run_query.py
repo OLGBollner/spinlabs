@@ -81,6 +81,7 @@ def _query_args(tmp_path, out_root, run_name="spi17"):
         exclude_inconsistent_pairs=False,
         degenerate_pairs_from_symmetry=False,
         offdiag_from_diagonal=False,
+        mirror_projection=False,
         sigma=7.5,
         b_field=0.0,
         direct="gaussian",

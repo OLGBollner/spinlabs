@@ -6,21 +6,24 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 
 from spinlabs.cli import add_verbosity_args
+from spinlabs.methods import CLI_CHOICES, METHODS, normalize_calc_method
 from spinlabs.convergence import SNR_TARGET, TRUNC_TOL, plot_pert_convergence, read_conv_metadata
 from spinlabs.convergence_summary import WEAK_FRACTION, plot_convergence_summary
 from spinlabs.plotter import plot_run_coupling, plot_run_rates, plot_t1
 from spinlabs.registry import ensure_db, find_convergence, find_runs, parse_orders
 from spinlabs.relaxation_dynamics import find_t1_files, normalize_init_state
 from spinlabs.logging_utils import get_logger, section
+from spinlabs.utils import resolve_path
 
 LOGGER = get_logger(__name__)
 
-_METHODS = {"all": "all_bands", "approx": "defect_band_approx"}  # --method values -> registry calc_method
+# --method values are spinlabs.methods.CLI_CHOICES (all/AO, unpaired/UO, decont); queries match every name a
+# method has been stored under (registry: calc_method IN aliases).
 
 
 def _add_output_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
-        "-o", "--output", type=Path, help="Output file (or directory for run plots); defaults to figures/<kind>/"
+        "-o", "--output", type=resolve_path, help="Output file (or directory for run plots); defaults to figures/<kind>/"
     )
     parser.add_argument("--fmt", default="png", help="Image format, e.g. png or pdf")
     parser.add_argument("--dpi", type=int, default=300, help="Image resolution")
@@ -31,19 +34,19 @@ def _add_output_args(parser: argparse.ArgumentParser) -> None:
 def build_plot_parser(subparsers: argparse._SubParsersAction) -> None:  # noqa: SLF001
     """Add the ``plot`` subcommands to a subparsers object."""
     coupling = subparsers.add_parser("coupling", help="Plot run coupling from a run directory")
-    coupling.add_argument("run_dir", type=Path, nargs="?")
+    coupling.add_argument("run_dir", type=resolve_path, nargs="?")
     _add_query_args(coupling)
     _add_output_args(coupling)
     coupling.set_defaults(func=_run_coupling)
 
     rates = subparsers.add_parser("rates", help="Plot transition rates from a run directory")
-    rates.add_argument("run_dir", type=Path, nargs="?")
+    rates.add_argument("run_dir", type=resolve_path, nargs="?")
     _add_query_args(rates)
     _add_output_args(rates)
     rates.set_defaults(func=_run_rates)
 
     t1 = subparsers.add_parser("t1", help="Plot T1 curves from one or more npz files or run directories in one figure")
-    t1.add_argument("inputs", nargs="*", type=Path)
+    t1.add_argument("inputs", nargs="*", type=resolve_path)
     _add_query_args(t1)
     t1.add_argument(
         "--init-state",
@@ -68,7 +71,7 @@ def build_plot_parser(subparsers: argparse._SubParsersAction) -> None:  # noqa: 
         help="Plot finite differences and SNR against step size for every mode of a defect (one summary figure "
         "per defect); with --mode, the per-mode ZFS principal components and fits",
     )
-    conv.add_argument("npz", type=Path, nargs="*", help="npz files from 'spinlabs package --conv'")
+    conv.add_argument("npz", type=resolve_path, nargs="*", help="npz files from 'spinlabs package --conv'")
     _add_query_args(conv, runs=False)
     conv.add_argument(
         "-m", "--mode", type=int, action="append",
@@ -85,7 +88,7 @@ def build_plot_parser(subparsers: argparse._SubParsersAction) -> None:  # noqa: 
         help="with --mode: plot D(Q) - D(Q=0) instead of raw D, so the response fills the y-range",
     )
     conv.add_argument(
-        "--csv", type=Path, default=None,
+        "--csv", type=resolve_path, default=None,
         help="with --mode: write slopes (and quad coefficients with --quad) to this csv",
     )
     conv.add_argument(
@@ -123,7 +126,7 @@ def _run_convergence(args: argparse.Namespace) -> None:
             ensure_db(),
             defects=args.defect or [],
             cell_sizes=args.cell_size or [],
-            calc_methods=[_METHODS[m] for m in args.method or []],
+            calc_methods=[normalize_calc_method(m) for m in args.method or []],
             latest=args.latest,
         )
         if not files:
@@ -164,8 +167,8 @@ def _plot_convergence_summaries(args: argparse.Namespace, files: list[Path]) -> 
         meta = read_conv_metadata(npz)
         name = "_".join(str(meta[k]) for k in ("defect", "cell") if meta.get(k) is not None) or npz.stem
         name = f"{name}_{_conv_displacement(meta)}"
-        order = (list(_METHODS).index(meta["method"]) if meta.get("method") in _METHODS else len(_METHODS),
-                 str(meta.get("method_key") or ""))
+        method = normalize_calc_method(meta.get("method"))
+        order = (list(METHODS).index(method) if method in METHODS else len(METHODS), str(meta.get("method_key") or ""))
         groups.setdefault(name, []).append((order, npz))
     if len(groups) > 1 and args.output:
         raise SystemExit(
@@ -325,8 +328,9 @@ def _add_query_args(parser: argparse.ArgumentParser, runs: bool = True) -> None:
     parser.add_argument(
         "--method",
         nargs="+",
-        choices=["all", "approx"],
-        help="Filter by calculation method(s): 'all' for all_bands, 'approx' for defect_band_approx",
+        choices=CLI_CHOICES,
+        help="Filter by calculation method(s): all/AO (all orbitals), unpaired/UO (unpaired orbitals), "
+        "'decont' for the full spin decontamination",
     )
     if not runs:
         parser.add_argument(
@@ -352,7 +356,7 @@ def _add_query_args(parser: argparse.ArgumentParser, runs: bool = True) -> None:
         "(defect, cell size, method, order, pert-scale)",
     )
     parser.add_argument(
-        "-r", "--output-root", default="runs",
+        "-r", "--output-root", type=resolve_path, default="runs",
         help="Root folder holding run directories (default: runs); used to resolve runs queried from the registry",
     )
 
@@ -366,7 +370,7 @@ def _query_filters(args: argparse.Namespace) -> list[tuple[str, str]]:
     out = []
     out += [("defect", d) for d in args.defect or []]
     out += [("cell", c) for c in args.cell_size or []]
-    out += [("method", _METHODS[m]) for m in args.method or []]
+    out += [("method", normalize_calc_method(m)) for m in args.method or []]
     if args.order is not None:
         out.append(("order", parse_orders(args.order)))
     out += [("pert", p) for p in args.pert_scale or []]

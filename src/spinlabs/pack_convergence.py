@@ -29,18 +29,21 @@ from spinlabs.logging_utils import configure_logging, get_logger
 LOGGER = get_logger(__name__)
 
 
-def discover_runs(run_root: Path) -> list[tuple[int, float, Path]]:
-    """Find runs/<mode>_pert_<p>/OUTCAR; returns sorted (mode, pert, dir)."""
+def discover_runs(run_root: Path, sublevel: str | None = None) -> list[tuple[int, float, Path]]:
+    """Find runs/<mode>_pert_<p>/OUTCAR (with ``sublevel``: runs/<mode>_pert_<p>/<sublevel>/OUTCAR of a
+    full-decontamination folder); returns sorted (mode, pert, OUTCAR)."""
     runs = []
-    for outcar in sorted(Path(run_root).glob("runs/*/OUTCAR")):
-        m = re.fullmatch(r"(\d+)_pert_(.+)", outcar.parent.name)
+    pattern = f"runs/*/{sublevel}/OUTCAR" if sublevel else "runs/*/OUTCAR"
+    for outcar in sorted(Path(run_root).glob(pattern)):
+        run = outcar.parent.parent if sublevel else outcar.parent
+        m = re.fullmatch(r"(\d+)_pert_(.+)", run.name)
         if not m:
-            LOGGER.warning(f"run folder name is not <mode>_pert_<step>, skipped: {outcar.parent}")
+            LOGGER.warning(f"run folder name is not <mode>_pert_<step>, skipped: {run}")
             continue
         try:
             runs.append((int(m.group(1)), float(m.group(2)), outcar))
         except ValueError:
-            LOGGER.warning(f"cannot read the step of run folder {outcar.parent}; skipped")
+            LOGGER.warning(f"cannot read the step of run folder {run}; skipped")
     return sorted(runs, key=lambda r: (r[0], r[1]))
 
 
@@ -82,14 +85,16 @@ class ConvergenceScan:
         return len(self.modes) * len(nonzero) + self.n_zero_runs
 
 
-def scan_convergence(run_root: Path) -> ConvergenceScan:
-    """Parse runs/<mode>_pert_<p>/OUTCAR under one root; ValueError when there is nothing to parse."""
+def scan_convergence(run_root: Path, sublevel: str | None = None) -> ConvergenceScan:
+    """Parse runs/<mode>_pert_<p>/OUTCAR under one root (with ``sublevel``: that spin sublevel's
+    OUTCARs of a full-decontamination folder); ValueError when there is nothing to parse."""
     run_root = Path(run_root)
     if not (run_root / "runs").is_dir():
         raise ValueError(f"no runs/ under {run_root}")
-    runs = discover_runs(run_root)
+    runs = discover_runs(run_root, sublevel)
     if not runs:
-        raise ValueError(f"no runs/*/OUTCAR found under {run_root}")
+        where = f"runs/*/{sublevel}/OUTCAR" if sublevel else "runs/*/OUTCAR"
+        raise ValueError(f"no {where} found under {run_root}")
 
     modes = sorted({m for m, _, _ in runs})
     perts = sorted({p for _, p, _ in runs})
@@ -104,7 +109,7 @@ def scan_convergence(run_root: Path) -> ConvergenceScan:
         tensor = parse_outcar_zfs(outcar)
         if tensor is None or bool(np.isnan(tensor.matrix).all()):
             LOGGER.debug(f"no ZFS tensor (unfinished or failed run): {outcar}")
-            unfinished.append(outcar.parent.name)
+            unfinished.append(outcar.parent.parent.name if sublevel else outcar.parent.name)
             continue
         i, j = mode_idx[mode], pert_idx[pert]
         tensors[i, j] = tensor.matrix
@@ -127,9 +132,16 @@ def save_convergence(
     cell: str | None = None,
     method: str | None = None,
     method_key: str | None = None,
+    spin_sublevel: str | None = None,
 ) -> Path:
-    """Write a scanned root to one .npz (with the ground-state tensor as 'd0' when given)."""
+    """Write a scanned root to one .npz (with the ground-state tensor as 'd0' when given).
+
+    ``spin_sublevel`` (full spin decontamination) names the sublevel the tensors belong to; it
+    is stored in the metadata and as a top-level ``spin_sublevel`` key.
+    """
     extra: dict = {}
+    if spin_sublevel is not None:
+        extra["spin_sublevel"] = np.array(spin_sublevel)
     if ground_state is not None:
         d0 = parse_outcar_zfs(ground_state)
         if d0 is None:
@@ -155,6 +167,7 @@ def save_convergence(
         # how the steps displaced the atoms (spinlabs.models.DISPLACEMENTS): normalized steps are
         # Cartesian lengths in Angstrom, the others Q in Angstrom*sqrt(amu)
         "displacement": scan.displacement or "mass_weighted",
+        "spin_sublevel": spin_sublevel,
     }
     np.savez_compressed(
         output,

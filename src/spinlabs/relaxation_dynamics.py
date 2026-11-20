@@ -4,6 +4,7 @@ from pathlib import Path
 import numpy as np
 import scipy.constants as Cn
 from scipy.optimize import OptimizeWarning, curve_fit
+from spinlabs.methods import spin_corrected
 from spinlabs.logging_utils import get_logger
 
 LOGGER = get_logger(__name__)
@@ -121,7 +122,7 @@ class RelaxationDynamics:
         data = np.load(data_file, allow_pickle=True)
         self.defect = data.get("defect")
         self.cell_size = data.get("cell_size")
-        self.sim_type = "(spin corrected)" if data.get("calc_method") == "defect_band_approx" else ""
+        self.sim_type = "(spin corrected)" if spin_corrected(data.get("calc_method")) else ""
 
         ms = spin_projections(self.spin)
         temperatures = np.array(data.get("temperatures", []))

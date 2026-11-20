@@ -58,7 +58,7 @@ def test_coupling_stage_prints_both_orders_and_saves_nothing(tmp_path, capsys, m
     cli.main(["run", "coupling", "--raw-zfs-file", str(raw_file), "--top", "2", "--mode", "1", "-q"])
 
     out = capsys.readouterr().out
-    assert "NV_64  all_bands  pert 0.1" in out
+    assert "NV_64  AO  pert 0.1" in out
     assert "4 first order, 4 second order (4 diagonal, 0 off-diagonal)" in out
     assert "First order (MHz/q):" in out and "Second order (MHz/q^2):" in out
     assert "      1  A1    10.00" in out  # --mode 1 is listed (1-based)
@@ -190,7 +190,7 @@ def test_run_rejects_init_state_of_another_spin_before_the_rates(tmp_path, monke
 # -- production defaults, shared with `spinlabs run` -------------------------------------------------------------
 
 _SHARED = ("direct", "keep_zero_gap_pairs", "first_order_raman", "exclude_inconsistent_pairs",
-           "degenerate_pairs_from_symmetry", "offdiag_from_diagonal", "init_state")
+           "degenerate_pairs_from_symmetry", "offdiag_from_diagonal", "mirror_projection", "init_state")
 
 
 def _parse(*argv):
@@ -212,7 +212,8 @@ def test_stages_default_to_the_production_settings_of_run():
     assert rate_options(scan) == dict(direct=PRODUCTION_DIRECT, nogap=True, processes=PRODUCTION_PROCESSES)
     assert "second_order" not in PRODUCTION_PROCESSES and set(PRODUCTION_PROCESSES) < set(ALL_PROCESSES)
     assert coupling_options(coupling) == dict(
-        exclude_inconsistent_pairs=True, degenerate_pairs_from_symmetry=False, offdiag_from_diagonal=True
+        exclude_inconsistent_pairs=True, degenerate_pairs_from_symmetry=False, offdiag_from_diagonal=True,
+        mirror_projection=True,
     )
     assert scan.init_state == list(INIT_STATES)
 
@@ -222,15 +223,19 @@ def test_stage_flags_bring_back_the_old_settings():
     from spinlabs.pipeline import ALL_PROCESSES
 
     old = ["--direct", "gaussian", "--keep-zero-gap-pairs", "--first-order-raman",
-           "--no-exclude-inconsistent-pairs", "--no-offdiag-from-diagonal"]
+           "--no-exclude-inconsistent-pairs", "--no-offdiag-from-diagonal", "--no-mirror-projection"]
     scan = _parse("run", "sigma-scan", "--raw-zfs-file", "x.npz", *old)
     assert rate_options(scan) == dict(direct="gaussian", nogap=False, processes=ALL_PROCESSES)
     assert coupling_options(scan) == dict(
-        exclude_inconsistent_pairs=False, degenerate_pairs_from_symmetry=False, offdiag_from_diagonal=False
+        exclude_inconsistent_pairs=False, degenerate_pairs_from_symmetry=False, offdiag_from_diagonal=False,
+        mirror_projection=False,
     )
     coupling = _parse("run", "coupling", "--raw-zfs-file", "x.npz", "--keep-inconsistent-pairs")  # older spelling
     assert coupling.exclude_inconsistent_pairs is False
     assert _parse("run", "coupling", "--raw-zfs-file", "x.npz", "--no-offdiag-from-diagonal").offdiag_from_diagonal is False
+    for stage in (("run",), ("run", "coupling"), ("run", "sigma-scan")):
+        assert _parse(*stage, "--raw-zfs-file", "x.npz").mirror_projection is True
+        assert _parse(*stage, "--raw-zfs-file", "x.npz", "--no-mirror-projection").mirror_projection is False
 
 
 def test_coupling_stage_excludes_inconsistent_pairs_by_default(tmp_path, capsys):

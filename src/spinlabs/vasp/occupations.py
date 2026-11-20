@@ -4,13 +4,14 @@ from __future__ import annotations
 
 import re
 import shutil
+from dataclasses import dataclass
 from pathlib import Path
 
 from spinlabs.logging_utils import get_logger, section
 
 LOGGER = get_logger(__name__)
 
-GAMMA_KPOINTS = """Gamma point only (rewritten by relax_to_zfs)
+GAMMA_KPOINTS = """Gamma point only (written by spinlabs init zfs)
 0
 Gamma
 1 1 1
@@ -28,6 +29,7 @@ REMOVE_TAGS = (
     "LDAPMINUS",
     "NBANDS",
     "KPAR",
+    "ISYM",
 )  # never kept verbatim; rebuilt below
 
 
@@ -47,7 +49,7 @@ def occupied_bands_from_eigenval(eigenval: Path) -> tuple[int, int, int, set[int
     Returns (n_up, n_down, nbands, unpaired_up, unpaired_dn).  Occupied means
     occ > 0.5 in the respective spin column.  Assumes Gamma-only (one k-point)
     or takes the first k-point.  Unpaired bands are occupied in one spin
-    channel only (the defect states used by the defect_band_approx runs).
+    channel only (the defect states the UO runs keep).
     """
     lines = eigenval.read_text().splitlines()
     header = lines[5].split()
@@ -91,29 +93,48 @@ def patch_incar(
     nbands: int,
     unpaired_up: set[int] | None = None,
     unpaired_dn: set[int] | None = None,
+    unpaired_only: bool = False,
 ) -> str:
-    """Turn a relaxation INCAR into a single-point ZFS INCAR."""
+    """Turn a relaxation INCAR into a single-point ZFS INCAR: the self-consistent ZFS run (ALGO as in the
+    relaxation, never None), no ionic steps, LDMATRIX on.
+
+    The occupations (DOCCUP/DOCCDO) are the EIGENVAL ones, the AO scheme. With ``unpaired_only`` (the UO
+    scheme) they are 0 everywhere except the unpaired orbitals (``unpaired_up``/``unpaired_dn``, which
+    must be given); NUPDOWN is the same either way. ISMEAR and FERWE/FERDO stay as in the relaxation.
+    """
+    from spinlabs.vasp.trees import forbid_algo_none
+
+    text, algo_note = forbid_algo_none(text)
+    if algo_note:
+        LOGGER.warning(algo_note)
     body_lines = []
     for line in text.splitlines():
         stripped = line.strip()
         tag = stripped.split("=")[0].strip().upper() if "=" in stripped else ""
         if tag in REMOVE_TAGS:
             continue  # dropped, re-added below
-        if tag == "ISYM" and parse_tag(text, "ISYM") == "2":
-            line = re.sub(r"ISYM\s*=\s*2", "ISYM = 3", line)  # 2 -> 3
         if tag == "ICHARG" and parse_tag(text, "ICHARG") == "2":
             line = re.sub(r"ICHARG\s*=\s*2", "ICHARG = 1", line)  # 2 -> 1
         body_lines.append(line)
 
+    if unpaired_only:
+        if unpaired_up is None or unpaired_dn is None:
+            raise ValueError("the UO occupations need the unpaired bands (unpaired_up, unpaired_dn)")
+        doccup = format_occupations([1.0 if b in unpaired_up else 0.0 for b in range(1, nbands + 1)])
+        doccdo = format_occupations([1.0 if b in unpaired_dn else 0.0 for b in range(1, nbands + 1)])
+    else:
+        doccup = f"{n_up}*1.0 {nbands - n_up}*0.0"
+        doccdo = f"{n_dn}*1.0 {nbands - n_dn}*0.0"
     additions = f"""
 ### ZFS stage (added by spinlabs.vasp)
 NSW = 0                  # single point: no ionic relaxation
 IBRION = -1              # no ionic degrees of freedom
+ISYM = 0                 # symmetry off, as in the perturbation runs differenced against this ground state
 LDMATRIX = .TRUE.
 NUPDOWN = {int(n_up - n_dn)}
 NBANDS = {nbands}
-DOCCUP = {n_up}*1.0 {nbands - n_up}*0.0
-DOCCDO = {n_dn}*1.0 {nbands - n_dn}*0.0
+DOCCUP = {doccup}
+DOCCDO = {doccdo}
 """
     if unpaired_up is not None and unpaired_dn is not None:
         # machine-readable record of the defect bands, derived here where the
@@ -125,8 +146,10 @@ DOCCDO = {n_dn}*1.0 {nbands - n_dn}*0.0
     return "\n".join(body_lines).rstrip() + "\n" + additions
 
 
-def prepare_relax_to_zfs(relax: Path, zfs: Path) -> list[str]:
+def prepare_relax_to_zfs(relax: Path, zfs: Path, unpaired_only: bool = False) -> list[str]:
     """Prepare one ZFS run directory from a finished relaxation directory.
+
+    ``unpaired_only``: the UO scheme's occupations, only the unpaired orbitals (see patch_incar).
 
     Copies CONTCAR -> POSCAR, CHGCAR, POTCAR and (Gamma-only) KPOINTS,
     derives DOCCUP/DOCCDO from the EIGENVAL and patches the INCAR.  Nothing
@@ -176,7 +199,7 @@ def prepare_relax_to_zfs(relax: Path, zfs: Path) -> list[str]:
         )
 
     incar_text = (relax / "INCAR").read_text()
-    for tag in ("NUPDOWN", "NELECT", "ISPIN", "NBANDS", "ISYM", "NSW", "IBRION"):
+    for tag in ("NUPDOWN", "NELECT", "ISPIN", "NBANDS", "NSW", "IBRION"):
         occ = all_tag_occurrences(incar_text, tag)
         if len(occ) > 1:
             fail(f"INCAR defines {tag} {len(occ)} times: {occ} (last one wins in VASP -- fix before running)")
@@ -200,10 +223,11 @@ def prepare_relax_to_zfs(relax: Path, zfs: Path) -> list[str]:
     if nupdown and int(float(nupdown)) != n_up - n_dn:
         fail(f"NUPDOWN = {nupdown} inconsistent with occupied difference {n_up} - {n_dn} = {n_up - n_dn}")
 
-    (zfs / "INCAR").write_text(patch_incar(incar_text, n_up, n_dn, nbands, unp_up, unp_dn))
+    incar = patch_incar(incar_text, n_up, n_dn, nbands, unp_up, unp_dn, unpaired_only=unpaired_only)
+    (zfs / "INCAR").write_text(incar)
     LOGGER.info(
-        f"wrote INCAR with NUPDOWN={n_up - n_dn}, "
-        f"DOCCUP={n_up}*1.0 {nbands - n_up}*0.0, DOCCDO={n_dn}*1.0 {nbands - n_dn}*0.0"
+        f"wrote INCAR with NUPDOWN={n_up - n_dn}, DOCCUP={parse_tag(incar, 'DOCCUP')}, "
+        f"DOCCDO={parse_tag(incar, 'DOCCDO')}" + (" (unpaired orbitals only)" if unpaired_only else "")
     )
 
     if failures:
@@ -211,3 +235,103 @@ def prepare_relax_to_zfs(relax: Path, zfs: Path) -> list[str]:
     else:
         LOGGER.info("all checks passed; ready to launch")
     return failures
+
+
+# --------------------------------------------------------------------------- #
+# spin sublevels for the full (Biktagirov) spin decontamination
+# --------------------------------------------------------------------------- #
+def expand_occupations(value: str) -> list[float]:
+    """Expand a DOCCUP/DOCCDO value such as ``125*1.0 1*0.0 128*0.0`` into one entry per band."""
+    occ: list[float] = []
+    for item in value.split():
+        count, star, occupation = item.partition("*")
+        if star:
+            occ.extend([float(occupation)] * int(count))
+        else:
+            occ.append(float(item))
+    return occ
+
+
+def parse_occupations(incar: str) -> tuple[list[float], list[float]]:
+    """The (up, down) band occupations of an INCAR: DOCCUP/DOCCDO, else FERWE/FERDO (the last of each wins)."""
+    up, dn = parse_tag(incar, "DOCCUP"), parse_tag(incar, "DOCCDO")
+    if up is None or dn is None:
+        up, dn = parse_tag(incar, "FERWE"), parse_tag(incar, "FERDO")
+    if up is None or dn is None:
+        raise ValueError("INCAR has no DOCCUP/DOCCDO or FERWE/FERDO occupations")
+    up_occ, dn_occ = expand_occupations(up), expand_occupations(dn)
+    if len(up_occ) != len(dn_occ):
+        raise ValueError(f"DOCCUP has {len(up_occ)} bands, DOCCDO {len(dn_occ)}")
+    return up_occ, dn_occ
+
+
+def _runs(occ: list[float]) -> list[str]:
+    out: list[str] = []
+    i = 0
+    while i < len(occ):
+        j = i
+        while j < len(occ) and occ[j] == occ[i]:
+            j += 1
+        out.append(f"{j - i}*{occ[i]:.1f}")
+        i = j
+    return out
+
+
+def format_occupations(occ: list[float], window: tuple[int, int] | None = None) -> str:
+    """A DOCCUP/DOCCDO value: run-length ``n*x`` entries; the bands of ``window``
+    (1-based, inclusive) are written one by one (``1*1.0 1*0.0``) so the defect levels stand out."""
+    if window is None:
+        return " ".join(_runs(occ))
+    lo, hi = max(window[0], 1), min(window[1], len(occ))
+    parts = _runs(occ[: lo - 1]) + [f"1*{x:.1f}" for x in occ[lo - 1 : hi]] + _runs(occ[hi:])
+    return " ".join(parts)
+
+
+@dataclass(frozen=True)
+class SpinSublevel:
+    """One determinant of the decontamination: its run folder name, occupations and NUPDOWN."""
+
+    name: str
+    up: tuple[float, ...]
+    dn: tuple[float, ...]
+    nupdown: int
+    window: tuple[int, int]
+
+    def doccup(self) -> str:
+        return format_occupations(list(self.up), self.window)
+
+    def doccdo(self) -> str:
+        return format_occupations(list(self.dn), self.window)
+
+
+def spin_sublevels(up: list[float], dn: list[float]) -> list[SpinSublevel]:
+    """The ms = S determinant and the 2S spin-flip ms = S-1 determinants of a high-spin state.
+
+    The 2S unpaired bands are the ones occupied in the up channel and empty in the down
+    channel; S = (number of unpaired bands)/2. ``ms_<S>`` keeps the occupations; for each
+    unpaired band k, ``ms_<S-1>_<k>`` moves k's electron to the down channel at the same band
+    index (up loses k, down gains k), NUPDOWN = 2S - 2. For the NV centre (S = 1, unpaired 127
+    and 128) that is ms_1, ms_0_127 and ms_0_128.
+    """
+    if len(up) != len(dn):
+        raise ValueError(f"up has {len(up)} bands, down {len(dn)}")
+    unpaired = [i + 1 for i, (u, d) in enumerate(zip(up, dn)) if u > 0.5 and d < 0.5]
+    minority = [i + 1 for i, (u, d) in enumerate(zip(up, dn)) if d > 0.5 and u < 0.5]
+    if minority:
+        raise ValueError(f"bands {minority} are occupied in the down channel only; the majority spin must be up")
+    if not unpaired:
+        raise ValueError("no unpaired band (occupied up, empty down): not a high-spin state")
+    two_s = len(unpaired)
+    window = (unpaired[0] - 1, unpaired[-1])
+
+    def label(two_ms: int) -> str:
+        return f"ms_{two_ms / 2:g}"
+
+    levels = [SpinSublevel(label(two_s), tuple(up), tuple(dn), two_s, window)]
+    for k in unpaired:
+        flipped_up, flipped_dn = list(up), list(dn)
+        flipped_up[k - 1], flipped_dn[k - 1] = 0.0, 1.0
+        levels.append(
+            SpinSublevel(f"{label(two_s - 2)}_{k}", tuple(flipped_up), tuple(flipped_dn), two_s - 2, window)
+        )
+    return levels

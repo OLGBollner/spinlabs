@@ -12,6 +12,7 @@ about 3 Omega, whatever gamma is; so compare it with INIT_STATE = "ms_0"), or Om
 The computed numbers go to <OUTPUT>.json next to the figure.
 """
 
+from spinlabs.methods import normalize_calc_method
 import json
 import logging
 import tempfile
@@ -139,7 +140,7 @@ def case_description(case):
     """Every setting of a case, for the printout and the JSON."""
     pairs = {"computed": "all pairs", "diagonal": "diagonal only", "diagonal-sqrt": "diagonal + fill",
              "sqrt": "computed + fill"}[case["pairs"]]
-    method = "all bands" if case["method"] == "all_bands" else "defect band approx"
+    method = "AO" if normalize_calc_method(case["method"]) == "AO" else "UO"
     gap = ", no zero-gap pairs" if case["nogap"] else ""
     return f"{case['defect']} {case['cell']} step {case['step']:g}, {method}, {pairs}{gap}, $\\sigma$ = {case['sigma']:g} meV"
 

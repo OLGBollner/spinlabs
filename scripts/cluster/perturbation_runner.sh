@@ -1,7 +1,7 @@
 #!/bin/sh
 # perturbation_runner.sh -- the loop behind run_perturbation_{first,second}_order.sh and run_convergence.sh.
 #
-# The per-tree wrappers start it inside a SLURM job, from the tree's folder (all_bands, ...,
+# The per-tree wrappers start it inside a SLURM job, from the tree's folder (AO, UO, full_decont,
 # or convergence_test_<method>):
 #     sh "$SPINLABS_CODE/scripts/cluster/perturbation_runner.sh" first_order|second_order|convergence
 # with the tree's config in the environment: DEFECT, binary, PHONON_PATH, PERT (first and second
@@ -10,11 +10,26 @@
 # 1/0 instead) and SPINLABS_CODE, the snapshot of the spinlabs repo taken when the job was
 # submitted. This file, the structure scripts and the spinlabs package all come from that
 # snapshot, so every task of a submission runs the same code.
+#
+# A tree whose input/ has a sublevels/ folder (create_perturbation_tree.py --full-decont) runs the
+# full spin decontamination in every run directory: 1. perturb the structure, 2. SCF with
+# input/INCAR, which writes the WAVECAR (.scf_done), 2b. the unpaired down-spin orbitals (the NV e
+# pair, degenerate or split by the displacement) rotated onto the up-spin ones in that WAVECAR
+# (.wavecar_aligned: each channel picks its own basis or order of the pair, and a spin flip must put
+# the electron in the orbital it left), 3. one subfolder per spin sublevel
+# (input/sublevels/<name>: ms=S and every ms=S-1 spin flip), 4. in each, the ZFS from ../WAVECAR
+# (a symlink) with ALGO=None. The run directory is done once every sublevel has its ZFS block;
+# its WAVECAR is kept.
+#
+# ground_state: a defect's unperturbed ground state, submitted on its own with run_ground_state.sh in
+# its folder (spinlabs init zfs). ZFS_full (the full spin decontamination): the SCF from its
+# INCAR/POSCAR/CHGCAR, then the ALGO=None ZFS in every ms_*/ subfolder (its INCAR already there) from
+# ../WAVECAR. ZFS_AO / ZFS_UO (no ms_*/): one self-consistent ZFS run of the INCAR.
 
 ORDER=${1:-}
 case $ORDER in
-  first_order|second_order|convergence) ;;
-  *) echo "usage: $0 first_order|second_order|convergence" >&2; exit 2 ;;
+  first_order|second_order|convergence|ground_state) ;;
+  *) echo "usage: $0 first_order|second_order|convergence|ground_state" >&2; exit 2 ;;
 esac
 
 INPUT_DIR="input"
@@ -30,52 +45,78 @@ get_n_modes="$SCRIPTS/get_n_modes.py"
 # ---- preflight: verify every dependency BEFORE burning core hours ----
 fail() { echo "FATAL (task ${SLURM_ARRAY_TASK_ID:-?}): $*" >&2; exit 1; }
 [ -n "${SPINLABS_CODE:-}" ] || fail "SPINLABS_CODE not set -- submit with: sh run_perturbation_${ORDER}.sh"
-[ -d "$INPUT_DIR" ] || fail "input dir '$INPUT_DIR' missing (run this from the all_bands folder)"
-case ${DEFECT:-} in ''|*'<defect>'*) fail "DEFECT unset or still placeholder: '${DEFECT:-}'" ;; esac
 case ${binary:-} in ''|*'<'*|*'/path/to/'*) fail "BINARY unset or still placeholder: '${binary:-}'" ;; esac
-case ${PHONON_PATH:-} in ''|*'<path_to_phonon_data.npz>'*) fail "PHONON_PATH unset or still placeholder: '${PHONON_PATH:-}'" ;; esac
-if [ "$ORDER" = "convergence" ]; then
-  case ${MODES:-} in ''|*'<'*) fail "MODES unset or still placeholder: '${MODES:-}'" ;; esac
-  case ${PERTS:-} in ''|*'<'*) fail "PERTS unset or still placeholder: '${PERTS:-}'" ;; esac
-  for m in $MODES; do
-    case $m in *[!0-9]*) fail "MODES must be 1-based mode numbers, got: '$m'" ;; esac
-  done
-  # Each step size p runs at -p and +p. A sign in PERTS is dropped (older scripts list signed
-  # steps), and so are repeated sizes and zero, which is the unperturbed reference ZFS_hyp/ZFS_occup.
-  bad=$(echo "$PERTS" | tr ' ' '\n' | awk 'NF && $1 !~ /^[-+]?([0-9]+\.?[0-9]*|\.[0-9]+)([eE][-+]?[0-9]+)?$/ { print $1; exit }')
-  [ -z "$bad" ] || fail "PERTS must be numbers, got: '$bad'"
-  # LC_ALL=C: in a comma-decimal locale (sv_SE on Dardel) sort -g reads 0.05 as 0, and -u then
-  # keeps only the first size.
-  SIZES=$(echo "$PERTS" | tr ' ' '\n' \
-    | LC_ALL=C awk 'NF { v = $1 + 0; if (v < 0) v = -v; if (v > 0) printf "%g\n", v }' | LC_ALL=C sort -g -u)
-  [ -n "$SIZES" ] || fail "PERTS has no nonzero step size: '$PERTS'"
-  STEPS=""
-  for s in $SIZES; do STEPS="$STEPS${STEPS:+ }-$s $s"; done
-else
-  case ${PERT:-} in ''|*'<pert_scale>'*) fail "PERT unset or still placeholder: '${PERT:-}'" ;; esac
-fi
-if [ "$ORDER" = "second_order" ]; then
-  case ${PAIR_MODE:-} in diag|all) ;; *) fail "PAIR_MODE must be diag or all, got: '${PAIR_MODE:-}'" ;; esac
-fi
-# The displacement convention; job scripts from before DISPLACEMENT give MASS_WEIGHTED (1 or unset:
-# mass_weighted, 0: unweighted) and must keep displacing as their runs so far did.
-if [ -z "${DISPLACEMENT+set}" ]; then
-  MASS_WEIGHTED=${MASS_WEIGHTED-1}  # unset: 1; set but empty (a broken config line) fails below
-  case $MASS_WEIGHTED in
-    1) DISPLACEMENT=mass_weighted ;;
-    0) DISPLACEMENT=unweighted ;;
-    '') fail "MASS_WEIGHTED is empty -- check the job script's config line (\${MASS_WEIGHTED:-0} needs the '-', or write MASS_WEIGHTED=0)" ;;
-    *) fail "MASS_WEIGHTED must be 1 (Q*e/sqrt(m)) or 0 (Q*e), got: '$MASS_WEIGHTED'" ;;
-  esac
-fi
-case $DISPLACEMENT in
-  normalized|mass_weighted|unweighted) DISP_FLAG="--displacement $DISPLACEMENT" ;;
-  *) fail "DISPLACEMENT must be normalized, mass_weighted or unweighted, got: '$DISPLACEMENT'" ;;
-esac
 [ -x "$binary" ] || fail "VASP binary not found/executable: $binary"
-[ -f "$create_struct" ] || fail "create_struct script missing from the code snapshot: $create_struct"
-[ -f "$get_n_modes" ] || fail "get_n_modes script missing from the code snapshot: $get_n_modes"
-[ -f "$PHONON_PATH" ] || fail "phonon data file missing: $PHONON_PATH"
+SUBLEVELS=""
+if [ "$ORDER" = "ground_state" ]; then
+  # This folder holds the SCF input and one ms_*/INCAR per spin sublevel.
+  for name in INCAR POSCAR KPOINTS POTCAR; do
+    [ -f "$name" ] || fail "$name missing in $HEAD_DIR (run this from the ground-state folder, e.g. <defect>/ZFS_AO or ZFS_full)"
+  done
+  for d in ms_*/; do
+    [ -f "${d}INCAR" ] || continue
+    SUBLEVELS="$SUBLEVELS${SUBLEVELS:+ }${d%/}"
+  done
+  # No ms_* sublevels (ZFS_AO, ZFS_UO): one plain self-consistent ZFS run of this folder's INCAR.
+  if [ -n "$SUBLEVELS" ]; then DECONT=1; else DECONT=0; fi
+  SUBLEVEL_INCARS=""  # each ms_*/INCAR is already in place
+else
+  [ -d "$INPUT_DIR" ] || fail "input dir '$INPUT_DIR' missing (run this from the tree basis folder: AO, UO, ...)"
+  case ${DEFECT:-} in ''|*'<defect>'*) fail "DEFECT unset or still placeholder: '${DEFECT:-}'" ;; esac
+  case ${PHONON_PATH:-} in ''|*'<path_to_phonon_data.npz>'*) fail "PHONON_PATH unset or still placeholder: '${PHONON_PATH:-}'" ;; esac
+  if [ "$ORDER" = "convergence" ]; then
+    case ${MODES:-} in ''|*'<'*) fail "MODES unset or still placeholder: '${MODES:-}'" ;; esac
+    case ${PERTS:-} in ''|*'<'*) fail "PERTS unset or still placeholder: '${PERTS:-}'" ;; esac
+    for m in $MODES; do
+      case $m in *[!0-9]*) fail "MODES must be 1-based mode numbers, got: '$m'" ;; esac
+    done
+    # Each step size p runs at -p and +p. A sign in PERTS is dropped (older scripts list signed
+    # steps), and so are repeated sizes and zero, which is the unperturbed reference ZFS_hyp/ZFS_occup.
+    bad=$(echo "$PERTS" | tr ' ' '\n' | awk 'NF && $1 !~ /^[-+]?([0-9]+\.?[0-9]*|\.[0-9]+)([eE][-+]?[0-9]+)?$/ { print $1; exit }')
+    [ -z "$bad" ] || fail "PERTS must be numbers, got: '$bad'"
+    # LC_ALL=C: in a comma-decimal locale (sv_SE on Dardel) sort -g reads 0.05 as 0, and -u then
+    # keeps only the first size.
+    SIZES=$(echo "$PERTS" | tr ' ' '\n' \
+      | LC_ALL=C awk 'NF { v = $1 + 0; if (v < 0) v = -v; if (v > 0) printf "%g\n", v }' | LC_ALL=C sort -g -u)
+    [ -n "$SIZES" ] || fail "PERTS has no nonzero step size: '$PERTS'"
+    STEPS=""
+    for s in $SIZES; do STEPS="$STEPS${STEPS:+ }-$s $s"; done
+  else
+    case ${PERT:-} in ''|*'<pert_scale>'*) fail "PERT unset or still placeholder: '${PERT:-}'" ;; esac
+  fi
+  # Full spin decontamination: input/sublevels/<name>/INCAR, one per spin sublevel.
+  DECONT=0
+  SUBLEVEL_INCARS="$HEAD_DIR/$INPUT_DIR/sublevels"
+  if [ -d "$INPUT_DIR/sublevels" ]; then
+    DECONT=1
+    for d in "$INPUT_DIR"/sublevels/*/; do
+      [ -f "${d}INCAR" ] || fail "spin sublevel folder without INCAR: $d"
+      SUBLEVELS="$SUBLEVELS${SUBLEVELS:+ }$(basename "$d")"
+    done
+    [ -n "$SUBLEVELS" ] || fail "$INPUT_DIR/sublevels has no spin sublevel folders"
+  fi
+  if [ "$ORDER" = "second_order" ]; then
+    case ${PAIR_MODE:-} in diag|all) ;; *) fail "PAIR_MODE must be diag or all, got: '${PAIR_MODE:-}'" ;; esac
+  fi
+  # The displacement convention; job scripts from before DISPLACEMENT give MASS_WEIGHTED (1 or unset:
+  # mass_weighted, 0: unweighted) and must keep displacing as their runs so far did.
+  if [ -z "${DISPLACEMENT+set}" ]; then
+    MASS_WEIGHTED=${MASS_WEIGHTED-1}  # unset: 1; set but empty (a broken config line) fails below
+    case $MASS_WEIGHTED in
+      1) DISPLACEMENT=mass_weighted ;;
+      0) DISPLACEMENT=unweighted ;;
+      '') fail "MASS_WEIGHTED is empty -- check the job script's config line (\${MASS_WEIGHTED:-0} needs the '-', or write MASS_WEIGHTED=0)" ;;
+      *) fail "MASS_WEIGHTED must be 1 (Q*e/sqrt(m)) or 0 (Q*e), got: '$MASS_WEIGHTED'" ;;
+    esac
+  fi
+  case $DISPLACEMENT in
+    normalized|mass_weighted|unweighted) DISP_FLAG="--displacement $DISPLACEMENT" ;;
+    *) fail "DISPLACEMENT must be normalized, mass_weighted or unweighted, got: '$DISPLACEMENT'" ;;
+  esac
+  [ -f "$create_struct" ] || fail "create_struct script missing from the code snapshot: $create_struct"
+  [ -f "$get_n_modes" ] || fail "get_n_modes script missing from the code snapshot: $get_n_modes"
+  [ -f "$PHONON_PATH" ] || fail "phonon data file missing: $PHONON_PATH"
+fi
 python -c "import numpy, pymatgen.core" >/dev/null 2>&1 \
   || fail "python env broken (numpy/pymatgen import failed) -- conda env did not activate?"
 # spinlabs is a namespace package (no __file__): check a module the structure scripts use.
@@ -85,7 +126,7 @@ case $spinlabs_dir in
   "$SPINLABS_CODE"/src/*) ;;
   *) fail "spinlabs is imported from $spinlabs_dir, not from the code snapshot $SPINLABS_CODE/src" ;;
 esac
-if [ "$ORDER" != "convergence" ]; then  # convergence runs only the modes its config names
+if [ "$ORDER" != "convergence" ] && [ "$ORDER" != "ground_state" ]; then  # convergence runs only the modes its config names
   MODES=$(python "$get_n_modes" "$PHONON_PATH") || fail "get_n_modes exited nonzero on $PHONON_PATH"
   [ -n "$MODES" ] || fail "get_n_modes returned no modes for $PHONON_PATH"
 fi
@@ -97,13 +138,20 @@ if [ "$ORDER" = "second_order" ] && [ "$PAIR_MODE" = "all" ]; then
   PAIRS=$(python "$get_n_modes" --pairs "$PHONON_PATH") || fail "get_n_modes --pairs exited nonzero on $PHONON_PATH"
   [ -n "$PAIRS" ] || fail "get_n_modes --pairs returned no pairs for $PHONON_PATH"
 fi
+if [ "$ORDER" = "ground_state" ]; then
+  echo "Preflight OK: ground state in $HEAD_DIR, ${SUBLEVELS:+sublevels $SUBLEVELS}${SUBLEVELS:-one ZFS run}, binary=$binary"
+else
 echo "Preflight OK: $ORDER, $(echo $MODES | wc -w) modes${PAIR_MODE:+, pair_mode=$PAIR_MODE}${PAIRS:+, $(echo "$PAIRS" | wc -l) pairs by frequency gap}${STEPS:+, steps $STEPS}, binary=$binary"
 case $DISPLACEMENT in
   normalized) echo "displacements: step * u/|u|, u = e/sqrt(m) (normalized: the same Cartesian step for every mode)" ;;
   mass_weighted) echo "displacements: Q*e/sqrt(m) (mass-weighted)" ;;
   unweighted) echo "displacements: Q*e (not mass-weighted)" ;;
 esac
+fi
 echo "spinlabs code: $(basename "$SPINLABS_CODE") ($SPINLABS_CODE)"
+if [ "$DECONT" = 1 ] && [ "$ORDER" != "ground_state" ]; then
+  echo "full spin decontamination: SCF -> WAVECAR, then ALGO=None ZFS of sublevels $SUBLEVELS (ground state: <defect>/ZFS_full, its own job)"
+fi
 # ------------------------------------------------------------------------
 
 ID=${SLURM_ARRAY_TASK_ID:-0}
@@ -186,6 +234,80 @@ trap 'release_lock; exit 143' TERM
 trap 'release_lock; exit 130' INT
 # ---- end lock ----
 
+# ---- job state ----
+# A job past its time limit stops accepting steps -- srun fails at once with "Unable to create step
+# ... Job/step already completing or completed" -- but its batch shell is not always signalled: on
+# Dardel (job 27178920, 2026-11-03) a task past its 45 min limit got no TERM, ran on for 4 min and
+# stamped 58 runs it never started as attempted. So before each run, and when srun fails, the task
+# asks Slurm whether the job still runs, and stops if not. No answer (no squeue, not in a SLURM job)
+# counts as running, as before.
+STOP=no
+STOP_WHY=""
+JOB_STATE=""
+job_ending() {
+  [ -n "${SLURM_JOB_ID:-}" ] || return 1
+  JOB_STATE=$(squeue -h -j "$SLURM_JOB_ID" -o %T 2>/dev/null | head -n 1)
+  if [ -n "$JOB_STATE" ] && [ "$JOB_STATE" != "RUNNING" ]; then
+    STOP_WHY="job ${SLURM_JOB_ID} is $JOB_STATE (past its time limit or cancelled)"
+    return 0
+  fi
+  return 1
+}
+
+# Nor is a run started that the time limit would cut off: the job has less time left than the
+# longest run this task has done (RUN_SECONDS, measured; a job script may set it as a first
+# estimate, else the task's first run always starts). squeue gives the time left as [D-]HH:MM:SS,
+# MM:SS or SS; UNLIMITED, NOT_SET or INVALID mean no limit to keep to.
+RUN_SECONDS=${RUN_SECONDS:-}
+TIME_LEFT=""
+time_left() {
+  TIME_LEFT=""
+  [ -n "${SLURM_JOB_ID:-}" ] || return 0
+  TIME_LEFT=$(squeue -h -j "$SLURM_JOB_ID" -o %L 2>/dev/null | head -n 1 | awk -F'[-:]' '
+    /^[0-9][0-9:-]*$/ {
+      s = 0; first = 1
+      if (index($0, "-")) { s = $1 * 86400; first = 2 }
+      m = 1
+      for (k = NF; k >= first; k--) { s += $k * m; m *= 60 }
+      print s
+    }')
+}
+too_little_time() {
+  [ -n "$RUN_SECONDS" ] || return 1
+  time_left
+  if [ -n "$TIME_LEFT" ] && [ "$TIME_LEFT" -lt "$RUN_SECONDS" ]; then
+    STOP_WHY="${TIME_LEFT} s left in job ${SLURM_JOB_ID:-}, a run takes up to ${RUN_SECONDS} s"
+    return 0
+  fi
+  return 1
+}
+
+# job_end_stop LABEL: after a failed srun, from inside a run directory: 0 when the job is ending
+# (srun was refused or cut off, not a VASP failure). The run keeps the .attempted it had before, so
+# it is not counted as failed by this submission, and the task starts nothing more (STOP).
+job_end_stop() {
+  job_ending || return 1
+  if [ -n "${PREV_ATTEMPT:-}" ]; then
+    printf '%s\n' "$PREV_ATTEMPT" > "$HEAD_DIR/$TARGET_DIR/.attempted"
+  elif [ "$ORDER" != "ground_state" ]; then
+    rm -f "$HEAD_DIR/$TARGET_DIR/.attempted"
+  fi
+  echo "$ID: $1 not run -- the job is $JOB_STATE"
+  STOP=yes
+  return 0
+}
+
+# note_run_seconds: the longest run so far (from RUN_START) is what a next run is expected to need
+# (too_little_time); a run the job's end cut short says nothing about that.
+note_run_seconds() {
+  [ "$STOP" = yes ] && return 0
+  run_seconds=$(( $(date +%s) - RUN_START ))
+  if [ -z "$RUN_SECONDS" ] || [ "$run_seconds" -gt "$RUN_SECONDS" ]; then
+    RUN_SECONDS=$run_seconds
+  fi
+}
+# ---- end job state ----
+
 # The submission this task belongs to: a run directory's .attempted names the last one that
 # started it. A failed run is retried by the next submission, not by the other tasks of this one.
 ARRAY_TAG=${SLURM_ARRAY_JOB_ID:-${SLURM_JOB_ID:-local-$$}}
@@ -207,7 +329,126 @@ is_done() {
   return 1
 }
 
+# ---- full spin decontamination (DECONT=1), run from inside the run directory ----
+# The SCF of step 2 can be reused (a restart runs only the sublevels left) once it has .scf_done
+# and its WAVECAR.
+scf_reusable() {
+  [ -f "$1/.scf_done" ] && [ -f "$1/WAVECAR" ]
+}
+
+# decont_scf LABEL: step 2, the SCF that writes the WAVECAR. 0 = .scf_done written.
+decont_scf() {
+  if srun $binary; then
+    echo "$ID: SCF done for $1"
+  else
+    status=$?
+    if job_end_stop "$1 (SCF)"; then
+      return 1
+    fi
+    echo "$ID: VASP exited with $status in the SCF of $1"
+    VASP_FAILED=$((VASP_FAILED + 1))
+    if [ "${RESUME:-no}" = yes ]; then
+      # A restart from the run's own density that crashes must not be repeated.
+      rm -f CHGCAR
+      echo "$ID: $1 crashed after restarting from its own CHGCAR -- dropped; the next attempt starts from the input CHGCAR"
+    fi
+    return 1
+  fi
+  if [ ! -f WAVECAR ]; then
+    echo "$ID: $1: the SCF wrote no WAVECAR (LWAVE?) -- no sublevel runs"
+    return 1
+  fi
+  if ! SCF_MSG=$(python -c "import sys; from spinlabs.vasp.settings import scf_problem, scf_status; p = scf_problem(scf_status('.')); print(p or ''); sys.exit(1 if p else 0)"); then
+    echo "$ID: $1: $SCF_MSG -- no sublevel runs"
+    printf 'SCF check failed\n%s\n' "$SCF_MSG" > CHECK
+    return 1
+  fi
+  : > .scf_done
+  return 0
+}
+
+# decont_align LABEL: step 2b, once per SCF (.wavecar_aligned). 0 = aligned (or nothing to align).
+decont_align() {
+  if [ -f .wavecar_aligned ]; then
+    return 0
+  fi
+  if ALIGN_MSG=$(python -m spinlabs.vasp.wavecar align . 2>&1); then
+    echo "$ID: $1: $ALIGN_MSG"
+    : > .wavecar_aligned
+    return 0
+  fi
+  echo "$ID: $1: $ALIGN_MSG -- no sublevel runs"
+  printf '%s\n' "$ALIGN_MSG" > CHECK
+  return 1
+}
+
+# decont_sublevels LABEL: steps 3 and 4, the ZFS of every spin sublevel without .done from the
+# run directory's WAVECAR; the run directory gets .done once all have their ZFS block.
+decont_sublevels() {
+  left=0
+  for s in $SUBLEVELS; do
+    if [ -f "$s/.done" ]; then
+      echo "$ID: $1: sublevel $s done earlier"
+      continue
+    fi
+    if [ "$STOP" = yes ]; then
+      left=$((left + 1))
+      continue
+    fi
+    if job_ending; then  # past the time limit (or cancelled): no step would start
+      echo "$ID: $1: sublevel $s not run -- the job is $JOB_STATE"
+      STOP=yes
+      left=$((left + 1))
+      continue
+    fi
+    mkdir -p "$s"
+    rm -f "$s/OUTCAR" "$s/OSZICAR" "$s/WAVECAR"
+    cp POSCAR KPOINTS POTCAR "$s"/
+    if [ -n "$SUBLEVEL_INCARS" ]; then
+      cp "$SUBLEVEL_INCARS/$s/INCAR" "$s"/
+    fi
+    ln -s ../WAVECAR "$s/WAVECAR"
+    cd "$s"
+    echo "$ID: $1: ZFS of sublevel $s (ALGO=None from ../WAVECAR)"
+    if srun $binary; then
+      echo "$ID: $1: sublevel $s finished"
+    else
+      status=$?
+      if job_end_stop "$1, sublevel $s"; then
+        left=$((left + 1))
+        cd "$HEAD_DIR/$TARGET_DIR"
+        continue
+      fi
+      echo "$ID: VASP exited with $status for $1, sublevel $s"
+      VASP_FAILED=$((VASP_FAILED + 1))
+    fi
+    if [ -f OUTCAR ] && grep -qzP "$ZFS_REGEX_PATTERN" OUTCAR; then
+      : > .done
+    else
+      echo "$ID: $1: sublevel $s has no ZFS block"
+      left=$((left + 1))
+    fi
+    cd "$HEAD_DIR/$TARGET_DIR"
+  done
+  if [ "$left" -eq 0 ]; then
+    : > .done
+    if [ "$ORDER" = "ground_state" ]; then
+      rm -f CHG  # the ground state keeps its CHGCAR (and WAVECAR)
+      echo "$ID: Done! $1 (all sublevels: $SUBLEVELS; WAVECAR and CHGCAR kept)"
+    else
+      rm -f CHGCAR CHG
+      echo "$ID: Done! $1 (all sublevels: $SUBLEVELS; WAVECAR kept)"
+    fi
+  elif [ "$STOP" = yes ]; then
+    echo "$ID: $1: $left sublevel(s) left -- the job ended; the next submission runs them from the WAVECAR"
+  else
+    echo "$ID: $1: $left sublevel(s) without a ZFS block -- the next submission reruns them from the WAVECAR"
+  fi
+}
+# ---- end full spin decontamination ----
+
 # run_one LABEL DIR STRUCT_ARGS...: perturb input/POSCAR along the modes and run VASP in DIR.
+# Without STRUCT_ARGS the structure is input/POSCAR as is.
 run_one() {
   label=$1
   TARGET_DIR=$2
@@ -218,6 +459,11 @@ run_one() {
   fi
   if attempted_by_this_array "$TARGET_DIR"; then
     echo "$ID: skipping $label -- already attempted by another task of this array"
+    return 0
+  fi
+  # Past the time limit (or cancelled) no step would start; with too little time left it would be cut off.
+  if job_ending || too_little_time; then
+    STOP=yes
     return 0
   fi
   acquire_lock "$TARGET_DIR" || return 0
@@ -232,44 +478,116 @@ run_one() {
     release_lock
     return 0
   fi
+  PREV_ATTEMPT=$(cat "$TARGET_DIR/.attempted" 2>/dev/null || true)
   printf '%s\n' "$ARRAY_TAG" > "$TARGET_DIR/.attempted"
   rm -f "$TARGET_DIR"/CHECK "$TARGET_DIR"/.done  # from an earlier attempt
-  cp "$INPUT_DIR"/* "$TARGET_DIR"/
-  cd "$TARGET_DIR"
-  echo "$ID: starting job for $label"
-  # In the if-condition a failing script does not trip set -e, so the job still
-  # reports the failure and the script's output before exiting.
-  if MSG=$(python "$create_struct" -o POSCAR POSCAR "$PHONON_PATH" "$@" "$PERT" $DISP_FLAG) \
-    && echo "$MSG" | grep -q "Success"; then
-    echo "Successfully created perturbed structure"
-  else
-    echo "Failed to create structure."
-    echo "Shutting down job $ID"
-    echo "$MSG"
-    exit 1
-  fi
-  # The displacement must be Q along exactly these modes before any VASP time is spent.
-  if ! CHECK_MSG=$(python "$SCRIPTS/check_perturbation.py" POSCAR "$HEAD_DIR/$INPUT_DIR/POSCAR" "$PHONON_PATH" "$@" --pert "$PERT" $DISP_FLAG); then
-    echo "$ID: $CHECK_MSG"
-    echo "$ID: $label: perturbed POSCAR is not the intended displacement -- VASP not started"
-    printf 'perturbation check failed\n%s\n' "$CHECK_MSG" > CHECK
+  if [ "$DECONT" = 1 ] && scf_reusable "$TARGET_DIR"; then
+    cd "$TARGET_DIR"
+    echo "$ID: starting job for $label"
+    echo "$ID: $label: SCF finished earlier -- ZFS of the sublevels left from its WAVECAR"
+    RUN_START=$(date +%s)
+    if decont_align "$label"; then
+      decont_sublevels "$label"
+    fi
+    note_run_seconds
     cd "$HEAD_DIR"
     release_lock
     return 0
   fi
-  echo "$ID: $CHECK_MSG"
+  rm -f "$TARGET_DIR"/.scf_done "$TARGET_DIR"/.wavecar_aligned
+  # The INCAR reads a CHGCAR (ICHARG = 1). An earlier attempt that left a complete one of its own
+  # restarts from it; else the ground-state one from input/ goes in. VASP writes CHGCAR at the end
+  # of the SCF, so a run cut off mid-SCF leaves none, or part of one (spinlabs.vasp.restart checks).
+  RESUME=no
+  OWN_CHGCAR=""
+  if [ -s "$TARGET_DIR/CHGCAR" ]; then
+    if OWN_CHGCAR=$(python -m spinlabs.vasp.restart "$TARGET_DIR/CHGCAR" 2>&1); then
+      RESUME=yes
+    fi
+  fi
+  # Files only: a decontamination tree's input/ also holds the sublevels/ folder.
+  for f in "$INPUT_DIR"/*; do
+    if [ ! -f "$f" ] || { [ "$RESUME" = yes ] && [ "${f##*/}" = CHGCAR ]; }; then
+      continue
+    fi
+    cp "$f" "$TARGET_DIR"/
+  done
+  cd "$TARGET_DIR"
+  echo "$ID: starting job for $label"
+  if [ "$RESUME" = yes ]; then
+    echo "$ID: $label restarts from its own CHGCAR"
+  elif [ -n "$OWN_CHGCAR" ]; then
+    echo "$ID: $label: its own CHGCAR is not usable ($OWN_CHGCAR) -- starting from the input CHGCAR"
+  fi
+  RUN_START=$(date +%s)
+  if [ $# -gt 0 ]; then
+    # In the if-condition a failing script does not trip set -e, so the job still
+    # reports the failure and the script's output before exiting.
+    if MSG=$(python "$create_struct" -o POSCAR POSCAR "$PHONON_PATH" "$@" "$PERT" $DISP_FLAG) \
+      && echo "$MSG" | grep -q "Success"; then
+      echo "Successfully created perturbed structure"
+    else
+      echo "Failed to create structure."
+      echo "Shutting down job $ID"
+      echo "$MSG"
+      exit 1
+    fi
+    # The displacement must be Q along exactly these modes before any VASP time is spent.
+    if ! CHECK_MSG=$(python "$SCRIPTS/check_perturbation.py" POSCAR "$HEAD_DIR/$INPUT_DIR/POSCAR" "$PHONON_PATH" "$@" --pert "$PERT" $DISP_FLAG); then
+      echo "$ID: $CHECK_MSG"
+      echo "$ID: $label: perturbed POSCAR is not the intended displacement -- VASP not started"
+      printf 'perturbation check failed\n%s\n' "$CHECK_MSG" > CHECK
+      cd "$HEAD_DIR"
+      release_lock
+      return 0
+    fi
+    echo "$ID: $CHECK_MSG"
+  else
+    echo "$ID: $label: the unperturbed structure (input/POSCAR)"
+  fi
+  if [ "$DECONT" = 1 ]; then
+    if decont_scf "$label" && decont_align "$label"; then
+      decont_sublevels "$label"
+    fi
+    note_run_seconds
+    cd "$HEAD_DIR"
+    release_lock
+    return 0
+  fi
   # A failing VASP run (crash, SCF abort, node error) must not end the task under set -e and
   # leave its other directories unattempted; the task exits nonzero at the end instead.
   if srun $binary; then
     echo "$ID: Done! $label"
+    # The longest run so far is what a next run is expected to need (too_little_time).
+    run_seconds=$(( $(date +%s) - RUN_START ))
+    if [ -z "$RUN_SECONDS" ] || [ "$run_seconds" -gt "$RUN_SECONDS" ]; then
+      RUN_SECONDS=$run_seconds
+    fi
   else
     status=$?
+    if job_ending; then
+      # srun was refused (or cut off) because the job is ending, not because VASP failed: the run
+      # keeps the .attempted it had before, so it is not counted as a failure of this submission.
+      # A CHGCAR it may have written is judged on the next attempt.
+      if [ -n "$PREV_ATTEMPT" ]; then printf '%s\n' "$PREV_ATTEMPT" > .attempted; else rm -f .attempted; fi
+      echo "$ID: $label not run -- the job is $JOB_STATE"
+      cd "$HEAD_DIR"
+      release_lock
+      STOP=yes
+      return 0
+    fi
     echo "$ID: VASP exited with $status for $label"
     VASP_FAILED=$((VASP_FAILED + 1))
+    if [ "$RESUME" = yes ]; then
+      # A restart from the run's own density that crashes must not be repeated: the next attempt
+      # starts from the ground-state CHGCAR again.
+      rm -f CHGCAR
+      echo "$ID: $label crashed after restarting from its own CHGCAR -- dropped; the next attempt starts from the input CHGCAR"
+    fi
   fi
   # The one read of this OUTCAR's ZFS block: only a complete run gets .done and loses its
-  # restart files. VASP can exit 0 without writing a ZFS block; such a directory gets no .done,
-  # so it is retried and needs CHGCAR/CHG to resume. (A cancelled job never reaches this line.)
+  # restart files. VASP can exit 0 without writing a ZFS block; such a directory gets no .done and
+  # is retried, from its own CHGCAR if complete. (A job that ends meanwhile returns above.)
   if [ -f OUTCAR ] && grep -qzP "$ZFS_REGEX_PATTERN" OUTCAR; then
     : > .done
     echo "$ID: removing excess VASP results (WAVECAR, CHGCAR, CHG)"
@@ -279,11 +597,62 @@ run_one() {
     python "$SCRIPTS/check_run.py" "$HEAD_DIR/$TARGET_DIR" --phonons "$PHONON_PATH" --write-check \
       | sed "s/^/$ID: /" || true
   else
-    echo "$ID: $label did not finish -- keeping CHGCAR/CHG so it can resume"
+    echo "$ID: $label did not finish -- the next attempt restarts from its CHGCAR if VASP left a complete one"
   fi
   cd "$HEAD_DIR"
   release_lock
 }
+
+# ---- ground state (ORDER=ground_state): this folder is the run directory ----
+if [ "$ORDER" = "ground_state" ]; then
+  VASP_FAILED=0
+  TARGET_DIR=.
+  acquire_lock . || exit 0  # another job runs it
+  if [ -f .done ]; then
+    echo "$ID: ground state already done (every sublevel has its ZFS block)"
+    exit 0
+  fi
+  rm -f CHECK
+  echo "$ID: starting job for ground state"
+  if [ "$DECONT" = 0 ]; then
+    # ZFS_AO / ZFS_UO: the INCAR is the self-consistent ZFS run itself (no WAVECAR, alignment or sublevels)
+    if job_ending; then
+      echo "$ID: ground state not run -- the job is $JOB_STATE"
+      exit 0
+    fi
+    if srun $binary; then
+      echo "$ID: ground state VASP finished"
+    else
+      status=$?
+      if job_end_stop "ground state"; then
+        exit 0
+      fi
+      echo "$ID: VASP exited with $status for the ground state"
+      exit 1
+    fi
+    if [ -f OUTCAR ] && grep -qzP "$ZFS_REGEX_PATTERN" OUTCAR; then
+      : > .done
+      echo "$ID: Done! ground state (one ZFS run)"
+      exit 0
+    fi
+    echo "$ID: ground state: no ZFS block in OUTCAR"
+    exit 1
+  fi
+  if scf_reusable .; then
+    echo "$ID: ground state: SCF finished earlier -- ZFS of the sublevels left from its WAVECAR"
+  else
+    rm -f .scf_done .wavecar_aligned
+    if ! decont_scf "ground state"; then
+      [ "$STOP" = yes ] && exit 0  # the job ended: the next submission starts the SCF again
+      exit 1
+    fi
+  fi
+  decont_align "ground state" || exit 1
+  decont_sublevels "ground state"
+  [ "$STOP" = yes ] && exit 0  # the job ended: the next submission runs the sublevels left
+  [ -f .done ] && [ "$VASP_FAILED" -eq 0 ] || exit 1
+  exit 0
+fi
 
 mkdir -p runs
 
@@ -295,6 +664,7 @@ VASP_FAILED=0
 # still have theirs left. A run another task of this array has already attempted (.attempted)
 # is skipped in both passes, so one that failed is not retried by every task.
 visit() {
+  [ "$STOP" = yes ] && return 0  # the job is ending: start nothing more
   mine=no
   [ $((ITEM % NJOBS)) -eq "$ID" ] && mine=yes
   ITEM=$((ITEM + 1))
@@ -334,10 +704,13 @@ walk() {
 
 PASS=own
 walk
-if [ "$NJOBS" -gt 1 ]; then
+if [ "$NJOBS" -gt 1 ] && [ "$STOP" != yes ]; then
   echo "$ID: own share done -- taking free runs of the other tasks"
   PASS=rest
   walk
+fi
+if [ "$STOP" = yes ]; then
+  echo "$ID: stopped: $STOP_WHY -- the next submission picks up the runs left"
 fi
 
 if [ "$VASP_FAILED" -gt 0 ]; then

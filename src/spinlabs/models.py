@@ -10,6 +10,7 @@ import numpy as np
 from scipy import constants as Cn
 
 from spinlabs.constants import CONSTANTS
+from spinlabs.methods import spin_corrected
 from spinlabs.serialization import FieldSpec, SchemaError, load_npz, save_npz, _fields_from_npz, warn_unknown_keys
 
 from spinlabs.logging_utils import get_logger
@@ -78,6 +79,17 @@ def convert_energy(values: Union[float, np.ndarray], from_unit: str, to_unit: st
     else:
         raise ValueError(f"Unsupported target unit: '{to_unit}'")
 
+
+# Packaged phonon spectra, one of each per defect in data/<defect>_<cell>/: the full spectrum as the
+# phonon code gave it, and the mirror-aligned one (spinlabs symmetrize --align) that data packaged
+# with aligned=True was displaced along.
+PACKAGED_PHONON_NAME = "phonon_data.npz"
+ALIGNED_PHONON_NAME = "phonon_data_aligned.npz"
+
+
+def packaged_phonon_name(aligned: Optional[bool]) -> str:
+    """File name of the packaged full spectrum that data with this ``aligned`` tag was displaced along."""
+    return ALIGNED_PHONON_NAME if aligned else PACKAGED_PHONON_NAME
 
 # How a perturbation run displaces the atoms along mode k (e_k: unit mass-weighted eigenvector,
 # m: atomic masses, step: the tree's PERT):
@@ -240,6 +252,17 @@ class ZFSTensor:
         ref = None if self.reference is None else R @ np.asarray(self.reference, dtype=float) @ R.T
         return ZFSTensor(matrix=rotated_mat, unit=self.unit, reference=ref)
 
+    @classmethod
+    def decontaminated(cls, high_spin: ZFSTensor, flipped: Sequence[ZFSTensor], spin: float) -> ZFSTensor:
+        """The spin-decontaminated tensor (Biktagirov) from VASP's LDMATRIX output of the sublevels.
+
+        ``high_spin`` is the m_s = S run, ``flipped`` the m_s = S - 1 runs (one per flipped unpaired
+        band), each as VASP reports it; see :func:`decontaminate_tensors`. In the unit of ``high_spin``.
+        """
+        unit = high_spin.unit
+        matrix = decontaminate_tensors(high_spin.matrix, [t.to_unit(unit).matrix for t in flipped], spin)
+        return cls(matrix=matrix, unit=unit, reference=high_spin.reference)
+
 
 def check_original_indices(
     original_indices: np.ndarray,
@@ -305,6 +328,9 @@ class PhononSpectrum:
     deg_groups: Optional[list] = None  # Lists of mode indices forming complete irrep component sets
     original_indices: Optional[np.ndarray] = None  # Shape (N_modes,): mode index in the full DFT run
     n_full: Optional[int] = None  # size of the full spectrum original_indices point into
+    # Whether every degenerate E set was rotated onto one mirror plane (symmetry.align_degenerate_pairs):
+    # True for an aligned file, False for a symmetrized file whose sets are only classified, None unstated.
+    aligned: Optional[bool] = None
     frequency_unit: str = "meV"
 
     def __post_init__(self):
@@ -939,6 +965,7 @@ class PhononSpectrum:
         FieldSpec("deg_groups", "array", optional=True),
         FieldSpec("original_indices", "array", shape=("n_modes",), optional=True, save_aliases=("idx",)),
         FieldSpec("n_full", "int", optional=True),
+        FieldSpec("aligned", "bool", optional=True),
     ]
 
     def save(self, out_path: Union[str, Path]) -> str:
@@ -985,8 +1012,9 @@ def _decode_2d_array(value: Any, data: Any) -> Optional[np.ndarray]:
 
 
 def _decode_calc_method(value: str, data: Any) -> Optional[str]:
-    """Legacy files may store the string "None" or "" for an absent method."""
-    return None if value in ("None", "") else value
+    """The canonical method name (legacy all_bands / defect_band_approx read as AO / UO); legacy files
+    may store the string "None" or "" for an absent method."""
+    return normalize_calc_method(value)
 
 
 def _encode_first_order(d: dict) -> dict:
@@ -1043,7 +1071,7 @@ def _decode_order_dict(value: Any, data: Any) -> dict:
     return out
 
 
-# Scaling applied to defect_band_approx (ZFS_occup) tensors to correct the
+# Scaling applied to UO (unpaired orbitals, ZFS_UO) tensors to correct the
 # defect-band approximation. The factor depends on the defect's spin S, which the
 # parser reads from NUPDOWN (S = NUPDOWN / 2) in the runs' input/INCAR. The parser
 # applies it at intake and stores spin_correction_applied=True; legacy npz files
@@ -1075,6 +1103,54 @@ def apply_spin_correction(tensor: ZFSTensor, scale: float = SPIN_CORRECTION_SCAL
     return ZFSTensor(matrix=tensor.matrix * scale, unit=tensor.unit)
 
 
+def _group_by_sublevel(paths: Sequence[Path]) -> dict[Optional[str], list[Path]]:
+    """Package files grouped by their spin_sublevel key (None for files without one)."""
+    groups: dict[Optional[str], list[Path]] = {}
+    for path in paths:
+        with np.load(str(path), allow_pickle=True) as data:
+            name = str(data["spin_sublevel"]) if "spin_sublevel" in data.files else None
+        groups.setdefault(name, []).append(path)
+    return groups
+
+
+# --------------------------------------------------------------------------- #
+# full spin decontamination (Biktagirov): the alternative to the defect-band spin correction
+# --------------------------------------------------------------------------- #
+def vasp_dmatrix_scale(spin: float) -> float:
+    """What VASP's LDMATRIX divides the pair sum d_v by for a run whose FERWE/FERDO give spin ``spin``.
+
+    S(2S-1) for S >= 1 (the usual D = d_v / (S(2S-1))); below S = 1 VASP reports d_v unscaled
+    ("DMATRIX_CALC: WARNING: S= ... < 1/2, reporting D-matrix without 1/S/(2S-1) scaling").
+    """
+    return float(spin * (2 * spin - 1)) if spin >= 1 else 1.0
+
+
+def decontaminate_tensors(high_spin: np.ndarray, flipped: Sequence[np.ndarray], spin: float) -> np.ndarray:
+    """Spin-decontaminated D from the m_s = S and m_s = S - 1 sublevels, as VASP reports them.
+
+    Biktagirov et al.: D^SS = d / (S(S - 1/2)) for one determinant, and the decontaminated
+
+        D~ = (d(m_s = S) - mean d(m_s = S - 1)) / (2S - 1).
+
+    VASP's pair sum is d_v = 2 d (its D = d_v / (S(2S - 1)) is the same D^SS), and it reports
+    D_v = d_v / vasp_dmatrix_scale(S') with S' from the run's own FERWE/FERDO magnetization: S for
+    the m_s = S run, S - 1 for the spin flips (unscaled for S - 1 < 1). So
+
+        d(m_s) = vasp_dmatrix_scale(m_s) * D_v(m_s) / 2,
+
+    which for S = 1 and S = 3/2 gives D~ = (S(S - 1/2) D_v(S) - mean D_v(S - 1) / 2) / (2S - 1).
+    ``flipped`` are the m_s = S - 1 tensors, one per flipped unpaired band (2S of them).
+    """
+    spin = float(spin)
+    if spin < 1:
+        raise ValueError(f"spin decontamination needs S >= 1 (a zero-field splitting), got S = {spin:g}")
+    if not len(flipped):
+        raise ValueError("no m_s = S - 1 tensors to decontaminate with")
+    d_high = vasp_dmatrix_scale(spin) * np.asarray(high_spin, dtype=float) / 2
+    d_low = vasp_dmatrix_scale(spin - 1) * np.mean([np.asarray(t, dtype=float) for t in flipped], axis=0) / 2
+    return (d_high - d_low) / (2 * spin - 1)
+
+
 def _scale_correction_fields(fields: dict, scale: float = SPIN_CORRECTION_SCALE) -> dict:
     """Returns a copy of RawZFSData constructor kwargs with approx tensors scaled by ``scale``.
 
@@ -1100,14 +1176,11 @@ def _scale_correction_fields(fields: dict, scale: float = SPIN_CORRECTION_SCALE)
 
 
 def normalize_calc_method(m: Optional[str]) -> Optional[str]:
-    """Normalizes calc_method aliases ('approx' -> 'defect_band_approx', etc.)."""
-    if not m or m in ("None", ""):
-        return None
-    if m in ("all", "all_bands"):
-        return "all_bands"
-    if m in ("approx", "defect_band_approx"):
-        return "defect_band_approx"
-    return str(m)
+    """The canonical calc_method (AO, UO, full_decont) of any of its names, legacy ones included
+    (all_bands -> AO, defect_band_approx -> UO, ...; spinlabs.methods)."""
+    from spinlabs.methods import normalize_calc_method as normalize
+
+    return normalize(m)
 
 
 def _merge_vasp_settings(a: Optional[dict], b: Optional[dict]) -> Optional[dict]:
@@ -1146,6 +1219,10 @@ class RawZFSData:
     mass_weighted: bool = True
     # One of DISPLACEMENTS; None for data from before the key, read through mass_weighted.
     displacement: Optional[str] = None
+    # Whether the runs were displaced along mirror-aligned phonon modes (the trees' phonon file is an
+    # aligned one, PhononSpectrum.aligned): the analysis then needs the aligned full spectrum,
+    # phonon_data_aligned.npz. False for the classified-only spectrum; None for data from before the key.
+    aligned: Optional[bool] = None
     order: Optional[int] = None
     ground_state_zfs: Optional[ZFSTensor] = None
     eigen_rotation: Optional[np.ndarray] = None
@@ -1159,8 +1236,13 @@ class RawZFSData:
     # central differences: first order (D(Q) - D(-Q))/2Q, diagonal second order
     # (D(Q) + D(-Q) - 2 D0)/Q^2, in place of the forward pair runs in second_order.
     first_order_minus: dict[int, Union[PerturbationEntry, dict[str, Any]]] = field(default_factory=dict)
+    # Full spin decontamination (calc_method full_decont): which spin sublevel's determinant these
+    # tensors belong to, e.g. ms_1 or ms_0_127 (spinlabs.decont.sublevel_info). One file per sublevel.
+    spin_sublevel: Optional[str] = None
 
     def __post_init__(self):
+        # the canonical method (AO, UO, full_decont), whatever name it was given (legacy all_bands, ...)
+        self.calc_method = normalize_calc_method(self.calc_method)
         if self.first_order_minus and self.second_order:
             raise ValueError(
                 "Cannot mix central and forward differences: the data has both -Q first-order runs "
@@ -1275,6 +1357,10 @@ class RawZFSData:
         merged_cell = c1 or c2 or 0
         merged_scale = p1 or p2 or 0.0
         merged_method = m1 or m2 or self.calc_method or other.calc_method
+        if self.spin_sublevel != other.spin_sublevel:
+            raise ValueError(
+                f"Cannot combine RawZFSData of different spin sublevels ({self.spin_sublevel} != {other.spin_sublevel})."
+            )
         merged_rotation = self.eigen_rotation if self.eigen_rotation is not None else other.eigen_rotation
         # Never re-scale a merged dataset: if either part already carries the
         # 3/2 correction, mark the combination as corrected (see _apply_spin_correction).
@@ -1295,6 +1381,11 @@ class RawZFSData:
             raise ValueError(
                 f"Cannot combine {self.displacement_convention} and {other.displacement_convention} perturbation "
                 "datasets: their perturbation amplitudes differ per mode."
+            )
+        if bool(self.aligned) != bool(other.aligned):
+            raise ValueError(
+                "Cannot combine perturbation datasets displaced along aligned and along unaligned phonon modes: "
+                "their E modes are different vectors."
             )
 
         merged_metadata = dict(self.metadata)
@@ -1320,6 +1411,7 @@ class RawZFSData:
             spin=merged_spin,
             mass_weighted=self.mass_weighted,
             displacement=self.displacement,
+            aligned=self.aligned if self.aligned is not None else other.aligned,
             order=eff_order,
             ground_state_zfs=gs,
             eigen_rotation=merged_rotation,
@@ -1328,6 +1420,7 @@ class RawZFSData:
             metadata=merged_metadata,
             vasp_settings=_merge_vasp_settings(self.vasp_settings, other.vasp_settings),
             first_order_minus=merged_minus,
+            spin_sublevel=self.spin_sublevel,
         )
 
     def __add__(self, other: RawZFSData) -> RawZFSData:
@@ -1385,6 +1478,7 @@ class RawZFSData:
             spin=self.spin,
             mass_weighted=self.mass_weighted,
             displacement=self.displacement,
+            aligned=self.aligned,
             order=self.order,
             ground_state_zfs=new_gs,
             eigen_rotation=self.eigen_rotation.copy() if self.eigen_rotation is not None else None,
@@ -1393,6 +1487,7 @@ class RawZFSData:
             metadata=dict(self.metadata),
             vasp_settings=self.vasp_settings,
             first_order_minus=converted(self.first_order_minus),
+            spin_sublevel=self.spin_sublevel,
         )
 
     def enrich_with_spectrum(self, spectrum: PhononSpectrum) -> None:
@@ -1444,7 +1539,8 @@ class RawZFSData:
                     entry["ipr"] = (ipr_i, ipr_j)
 
     def _default_name(self):
-        return f"{self.defect}_{self.cell_size}_raw_zfs_data_{self.calc_method}_{self.order_suffix}.npz"
+        sublevel = f"_{self.spin_sublevel}" if self.spin_sublevel else ""
+        return f"{self.defect}_{self.cell_size}_raw_zfs_data_{self.calc_method}{sublevel}_{self.order_suffix}.npz"
 
     SCHEMA = [
         FieldSpec("defect", "str"),
@@ -1455,6 +1551,7 @@ class RawZFSData:
         FieldSpec("spin", "float", optional=True),
         FieldSpec("mass_weighted", "bool", optional=True),
         FieldSpec("displacement", "str", optional=True),
+        FieldSpec("aligned", "bool", optional=True),
         FieldSpec("order", "int", optional=True),
         FieldSpec("ground_state_zfs", "zfstensor", optional=True, legacy_keys=("zfs_relaxed",)),
         FieldSpec("eigen_rotation", "array", optional=True),
@@ -1475,6 +1572,7 @@ class RawZFSData:
             decode=_decode_order_dict,
         ),
         FieldSpec("first_order_minus", "dict", optional=True, encode=_encode_first_order, decode=_decode_order_dict),
+        FieldSpec("spin_sublevel", "str", optional=True),
         FieldSpec(
             "vasp_settings",
             "str",
@@ -1517,14 +1615,27 @@ class RawZFSData:
         """
         Loads RawZFSData from one or more .npz files.
         Maintains backward compatibility with legacy keys (zfs_tensors, zfs_tensors_2d, zfs_relaxed).
-        If apply_corrections is True (default), defect_band_approx tensors are scaled by the
+        If apply_corrections is True (default), UO tensors are scaled by the
         factor of their spin (spin_correction_scale) exactly once on load; files already
         carrying the correction are skipped.
+
+        A full-decontamination set loads as one dataset: given its folder (what the registry
+        returns for it), or its per-sublevel files, the files are grouped by their spin_sublevel
+        key and combined with :meth:`decontaminated`.
         """
         if isinstance(in_path, (list, tuple)):
             paths = [Path(p) for p in in_path]
         else:
             paths = [Path(in_path)]
+        paths = [f for p in paths for f in (sorted(p.glob("*.npz")) if p.is_dir() else [p])]
+        if not paths:
+            raise FileNotFoundError(f"no .npz files in {in_path}")
+        by_sublevel = _group_by_sublevel(paths)
+        if len(by_sublevel) > 1:
+            if None in by_sublevel:
+                raise ValueError(f"cannot load spin-sublevel files together with other packages: {in_path}")
+            sets = {name: cls.load(files, apply_corrections=apply_corrections) for name, files in by_sublevel.items()}
+            return cls.decontaminated(sets).to_unit("J")
 
         raw_data = [np.load(str(p), allow_pickle=True) for p in paths]
         warn_unknown_keys(raw_data[0].files, cls.SCHEMA)
@@ -1538,7 +1649,7 @@ class RawZFSData:
                 fields["spin_correction_applied"] = True
                 return fields, False
             fields["spin_correction_applied"] = False
-            if not apply_corrections or normalize_calc_method(fields.get("calc_method")) != "defect_band_approx":
+            if not apply_corrections or not spin_corrected(fields.get("calc_method")):
                 return fields, False
             scaled = _scale_correction_fields(
                 {
@@ -1576,6 +1687,13 @@ class RawZFSData:
         if len(conventions) > 1:
             raise ValueError(f"Cannot load perturbation files with different displacements together: {conventions}")
         convention = conventions.pop()
+        alignments = {bool(f.get("aligned")) for f in scaled_fields}
+        if len(alignments) > 1:
+            raise ValueError("Cannot load files displaced along aligned and along unaligned phonon modes together")
+        aligned = alignments.pop() if any(f.get("aligned") is not None for f in scaled_fields) else None
+        sublevels = {f.get("spin_sublevel") for f in scaled_fields}
+        if len(sublevels) > 1:
+            raise ValueError(f"Cannot load files of different spin sublevels together: {sorted(map(str, sublevels))}")
 
         order = base.get("order")
         if second_order or first_order_minus:
@@ -1594,33 +1712,103 @@ class RawZFSData:
             spin=_merged_spin([f.get("spin") for f in scaled_fields], paths),
             mass_weighted=convention != "unweighted",
             displacement=convention,
+            aligned=aligned,
             order=order,
             ground_state_zfs=base.get("ground_state_zfs"),
             eigen_rotation=base.get("eigen_rotation"),
             first_order=first_order,
             second_order=second_order,
             first_order_minus=first_order_minus,
+            spin_sublevel=base.get("spin_sublevel"),
         )
         for fields in scaled_fields:
             obj.vasp_settings = _merge_vasp_settings(obj.vasp_settings, fields.get("vasp_settings"))
         for p, (fields, scaled_now) in zip(paths, scaled_pairs):
             if apply_corrections and scaled_now:
                 scale = spin_correction_scale(fields.get("spin"))
-                LOGGER.info(f"applied spin correction (defect_band_approx, x{scale:.4g}): {p}")
+                LOGGER.info(f"applied spin correction (UO, x{scale:.4g}): {p}")
         return obj.to_unit("J")
 
+    @classmethod
+    def decontaminated(cls, sublevels: dict[str, RawZFSData]) -> RawZFSData:
+        """One full-decontamination dataset from a set of per-sublevel datasets (spinlabs.decont).
+
+        ``sublevels`` maps sublevel names (ms_1, ms_0_127, ...; spinlabs.decont.sublevel_info) to
+        their RawZFSData, e.g. from spinlabs.decont.load_sublevel_set. The m_s = S set is the high-spin
+        one; every m_s = S - 1 set is a spin flip. The ground state and every perturbation entry
+        present in all of them are combined with ZFSTensor.decontaminated (see decontaminate_tensors).
+        The result is calc_method "full_decont" with no spin_sublevel, in MHz, ready for the analysis
+        like any other package.
+        """
+        from spinlabs.decont import sublevel_info
+
+        if not sublevels:
+            raise ValueError("no sublevels to decontaminate")
+        ms = {name: sublevel_info(name)[0] for name in sublevels}
+        spin = max(ms.values())
+        highs = [n for n, m in ms.items() if m == spin]
+        lows = [n for n, m in ms.items() if np.isclose(m, spin - 1)]
+        if len(highs) != 1:
+            raise ValueError(f"expected one m_s = {spin:g} sublevel, got {highs}")
+        if len(lows) != round(2 * spin):
+            raise ValueError(f"expected {round(2 * spin)} m_s = {spin - 1:g} sublevels for S = {spin:g}, got {lows}")
+        sets = {n: raw.to_unit("MHz") for n, raw in sublevels.items()}
+        high = sets[highs[0]]
+        for name, raw in sets.items():
+            if bool(raw.aligned) != bool(high.aligned):
+                raise ValueError(f"sublevel {name}: aligned {raw.aligned} != {high.aligned}")
+            for attr in ("defect", "cell_size", "pert_scale", "displacement_convention"):
+                if getattr(raw, attr) != getattr(high, attr):
+                    raise ValueError(f"sublevel {name}: {attr} {getattr(raw, attr)} != {getattr(high, attr)}")
+        if high.spin is not None and not np.isclose(high.spin, spin):
+            raise ValueError(f"the high-spin set says S = {high.spin:g}, its name m_s = {spin:g}")
+
+        def tensor(entry) -> np.ndarray:
+            return entry.zfs_tensor.matrix if isinstance(entry, PerturbationEntry) else np.asarray(entry["tensor"])
+
+        def combine(attr: str) -> dict:
+            keys = set(getattr(high, attr))
+            for raw in sets.values():
+                keys &= set(getattr(raw, attr))
+            out = {}
+            for key in sorted(keys, key=str):
+                hs = getattr(high, attr)[key]
+                matrix = decontaminate_tensors(tensor(hs), [tensor(getattr(sets[n], attr)[key]) for n in lows], spin)
+                if isinstance(hs, PerturbationEntry):
+                    out[key] = PerturbationEntry(order=hs.order, mode_indices=hs.mode_indices, amplitude=hs.amplitude,
+                                                 zfs_tensor=ZFSTensor(matrix=matrix, unit="MHz"), energy=hs.energy)
+                else:
+                    out[key] = {**hs, "tensor": matrix, "unit": "MHz"}
+            return out
+
+        if any(raw.ground_state_zfs is None for raw in sets.values()):
+            raise ValueError("every sublevel needs its ground-state tensor")
+        ground = ZFSTensor.decontaminated(high.ground_state_zfs, [sets[n].ground_state_zfs for n in lows], spin)
+        return replace(
+            high,
+            calc_method="full_decont",
+            spin=spin,
+            spin_sublevel=None,
+            spin_correction_applied=False,
+            ground_state_zfs=ground,
+            first_order=combine("first_order"),
+            second_order=combine("second_order"),
+            first_order_minus=combine("first_order_minus"),
+            metadata={**high.metadata, "decontaminated_from": sorted(sublevels)},
+        )
+
     def _apply_spin_correction(self) -> None:
-        """Scales defect_band_approx tensors by the factor of ``self.spin`` exactly once.
+        """Scales UO tensors by the factor of ``self.spin`` exactly once.
 
         npz files written before the correction moved into the loader/parser
         store unscaled tensors and carry spin_correction_applied=False; they
         are scaled here. Files written after carry the flag=True and are
-        skipped (the parser applies the correction at intake). all_bands
+        skipped (the parser applies the correction at intake). AO
         data is never scaled.
         """
         if self.spin_correction_applied:
             return
-        if normalize_calc_method(self.calc_method) != "defect_band_approx":
+        if not spin_corrected(self.calc_method):
             return
         scaled = _scale_correction_fields(
             {
@@ -1636,7 +1824,7 @@ class RawZFSData:
         self.second_order = scaled["second_order"]
         self.first_order_minus = scaled["first_order_minus"]
         self.spin_correction_applied = True
-        LOGGER.info(f"applied spin correction (defect_band_approx, S = {self.spin}, x{scale:.4g})")
+        LOGGER.info(f"applied spin correction (UO, S = {self.spin}, x{scale:.4g})")
 
 
 @dataclass

@@ -21,7 +21,7 @@ from pathlib import Path
 
 from spinlabs.vasp.modes import mode_numbers, pair_numbers
 from spinlabs.vasp.slurm_logs import summarize, unfinished_reasons
-from spinlabs.vasp.trees import read_outcar_time, sbatch_time, step_sizes
+from spinlabs.vasp.trees import SUBLEVELS_DIR, decont_ground_state, read_outcar_time, sbatch_time, step_sizes
 
 PLACEHOLDER = re.compile(r"<[^<>\s]+>")
 RUNNER = "scripts/cluster/perturbation_runner.sh"  # the loop the run scripts start
@@ -58,6 +58,42 @@ def script_config(text: str) -> dict[str, str]:
         default = re.fullmatch(r"\$\{\w+:?-(.*)\}", val)
         config.setdefault(m.group(1).upper(), (default.group(1) if default else val).strip("'\""))
     return config
+
+
+def is_decont_tree(folder: Path) -> bool:
+    """Whether a tree runs the full spin decontamination (its input/ has the sublevels/ folder)."""
+    return (Path(folder) / "input" / SUBLEVELS_DIR).is_dir()
+
+
+def _check_decont_incars(folder: Path) -> list[str]:
+    """A decontamination tree's INCARs: input/INCAR the SCF that writes the WAVECAR, each
+    input/sublevels/<name>/INCAR an ALGO=None ZFS run reading it."""
+    problems: list[str] = []
+    scf = _read(folder / "input" / "INCAR")
+    if (_tag_value(scf, "LWAVE") or "").lower() != ".true.":
+        problems.append("FAIL: INCAR (the SCF) has no LWAVE = .TRUE. -- the sublevels need its WAVECAR")
+    if (_tag_value(scf, "ALGO") or "").lower() == "none":
+        problems.append("FAIL: INCAR (the SCF) has ALGO=None -- the WAVECAR would not be the perturbed state's")
+    levels = sorted(p for p in (folder / "input" / SUBLEVELS_DIR).iterdir() if p.is_dir())
+    if not levels:
+        problems.append(f"FAIL: input/{SUBLEVELS_DIR} has no spin sublevel folders")
+    for level in levels:
+        name = f"{SUBLEVELS_DIR}/{level.name}/INCAR"
+        text = _read(level / "INCAR")
+        if not text:
+            problems.append(f"FAIL: missing input/{name}")
+            continue
+        for tag, want in (("ALGO", "none"), ("ISTART", "1"), ("LDMATRIX", ".true."), ("LWAVE", ".false."),
+                          ("ISMEAR", "-2")):
+            if (_tag_value(text, tag) or "").lower() != want:
+                problems.append(f"FAIL: {name}: {tag} is {_tag_value(text, tag)}, should be {want}")
+        isym = _tag_value(text, "ISYM")
+        if isym != "0":
+            problems.append(f"WARNING: {name}: ISYM={isym if isym is not None else 'unset'}, trees are built with ISYM=0")
+        for tag in ("NUPDOWN", "FERWE", "FERDO", "DOCCUP", "DOCCDO"):
+            if _tag_value(text, tag) is None:
+                problems.append(f"FAIL: {name}: {tag} not set")
+    return problems
 
 
 def verify_setup(folder: Path, script_name: str) -> list[str]:
@@ -103,6 +139,8 @@ def verify_setup(folder: Path, script_name: str) -> list[str]:
     incar = folder / "input" / "INCAR"
     if not incar.is_file():
         problems.append(f"FAIL: missing {incar}")
+    elif is_decont_tree(folder):
+        problems.extend(_check_decont_incars(folder))
     else:
         itext = _read(incar)
         if (_tag_value(itext, "LDMATRIX") or "").lower() != ".true.":
@@ -116,6 +154,11 @@ def verify_setup(folder: Path, script_name: str) -> list[str]:
         isym = _tag_value(itext, "ISYM")
         if isym is not None and int(isym) in (1, 2) and (_tag_value(itext, "LDMATRIX") or "").lower() == ".true.":
             problems.append("FAIL: INCAR ISYM=1/2 together with LDMATRIX -- use ISYM=3")
+        elif isym != "0":
+            problems.append(
+                f"WARNING: INCAR ISYM={isym if isym is not None else 'unset'} -- perturbed structures can make VASP "
+                "fail to find inverse rotations; trees are built with ISYM=0"
+            )
         gam = "gam" in (_tag_value(_read(script), "BINARY") or "").lower()
         if gam:
             problems.append(
@@ -184,8 +227,15 @@ def median_run_seconds(folder: Path, done: list[str], sample: int = TIMING_SAMPL
     if not done:
         return None
     step = max(1, len(done) // sample)
-    times = [t for r in done[::step][:sample] if (t := read_outcar_time(Path(folder) / "runs" / r)) is not None]
+    times = [t for r in done[::step][:sample] if (t := run_seconds(Path(folder) / "runs" / r)) is not None]
     return statistics.median(times) if times else None
+
+
+def run_seconds(run: Path) -> float | None:
+    """VASP wall time (s) of one run: its OUTCAR plus, in a decontamination run, its sublevels' OUTCARs."""
+    times = [read_outcar_time(run)] + [read_outcar_time(d) for d in sorted(run.iterdir()) if d.is_dir()]
+    times = [t for t in times if t is not None]
+    return sum(times) if times else None
 
 
 def array_tasks(spec: str) -> tuple[int, int]:
@@ -269,6 +319,10 @@ def offer_rescale(folder: Path, script_name: str, ask=None) -> None:
     progress = run_progress(folder, expected)
     failed = f"; {len(progress.failed)} attempted but failed" if progress.failed else ""
     print(f"{len(progress.done)}/{len(expected)} runs done ({progress.left} left{failed}).")
+    if is_decont_tree(folder):
+        ground = decont_ground_state(folder)
+        state = "not found" if ground is None else "done" if (ground / ".done").is_file() else "not done yet"
+        print(f"Ground state {ground or 'ZFS_full'}: {state}")
     if progress.left == 0:
         print("All runs are done; nothing to update.")
         return

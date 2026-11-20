@@ -4,6 +4,7 @@ import argparse
 from itertools import product
 from pathlib import Path
 
+from spinlabs.methods import CLI_CHOICES, method_from_path
 from spinlabs.cli import add_verbosity_args
 from spinlabs.cli.coupling import build_coupling_parser
 from spinlabs.cli.production import (
@@ -19,6 +20,7 @@ from spinlabs.pipeline import DEFAULT_SIGMA_MEV, PRODUCTION_T_END, PRODUCTION_T_
 from spinlabs.registry import ensure_db, parse_orders
 
 from spinlabs.logging_utils import get_logger, section
+from spinlabs.utils import relative_to_cwd, resolve_path
 
 LOGGER = get_logger(__name__)
 
@@ -27,11 +29,11 @@ def build_run_parser(parser: argparse.ArgumentParser) -> None:
     """Configure ``parser`` as the ``run`` subcommand."""
 
     inputs = parser.add_argument_group("input mode (exactly one)")
-    inputs.add_argument("--sim-folder", nargs="+", metavar="DIR", help="Path to VASP simulation folder(s)")
-    inputs.add_argument("--raw-zfs-file", nargs="+", metavar="FILE", help="Path to raw ZFS .npz dataset file(s)")
-    inputs.add_argument("--raw-zfs-file-1d", metavar="FILE", help="Raw ZFS 1st-order .npz (combined 1d+2d mode)")
-    inputs.add_argument("--raw-zfs-file-2d", metavar="FILE", help="Raw ZFS 2nd-order .npz (combined 1d+2d mode)")
-    inputs.add_argument("--coupling-file", metavar="FILE", help="Path to pre-computed spin-phonon coupling .npz")
+    inputs.add_argument("--sim-folder", type=resolve_path, nargs="+", metavar="DIR", help="Path to VASP simulation folder(s)")
+    inputs.add_argument("--raw-zfs-file", type=resolve_path, nargs="+", metavar="FILE", help="Path to raw ZFS .npz dataset file(s)")
+    inputs.add_argument("--raw-zfs-file-1d", type=resolve_path, metavar="FILE", help="Raw ZFS 1st-order .npz (combined 1d+2d mode)")
+    inputs.add_argument("--raw-zfs-file-2d", type=resolve_path, metavar="FILE", help="Raw ZFS 2nd-order .npz (combined 1d+2d mode)")
+    inputs.add_argument("--coupling-file", type=resolve_path, metavar="FILE", help="Path to pre-computed spin-phonon coupling .npz")
     inputs.add_argument(
         "--query",
         action="store_true",
@@ -42,14 +44,15 @@ def build_run_parser(parser: argparse.ArgumentParser) -> None:
     )
 
     opt = parser.add_argument_group("options")
-    opt.add_argument("-ph", "--phonon-file", metavar="FILE", help="phonopy.yaml or phonon_data.npz")
-    opt.add_argument("--two-phonon", metavar="FILE", help="Two-phonon Raman .npz file (optional)")
+    opt.add_argument("-ph", "--phonon-file", type=resolve_path, metavar="FILE", help="phonopy.yaml or phonon_data.npz")
+    opt.add_argument("--two-phonon", type=resolve_path, metavar="FILE", help="Two-phonon Raman .npz file (optional)")
     opt.add_argument(
         "--method",
         nargs="+",
-        choices=["all", "approx"],
-        help="Calculation method: 'all' for all_bands (ZFS_hyp), 'approx' for defect_band_approx (ZFS_occup). "
-        "Inferred from the input file name when omitted. With --query, both may be given",
+        choices=CLI_CHOICES,
+        help="Calculation method: all/AO (all orbitals, ZFS_AO), unpaired/UO (unpaired orbitals, ZFS_UO), "
+        "decont (the full spin decontamination, a set of per-sublevel packages, ZFS_full). "
+        "Inferred from the input name when omitted. With --query, several may be given",
     )
     opt.add_argument(
         "--order",
@@ -89,7 +92,7 @@ def build_run_parser(parser: argparse.ArgumentParser) -> None:
         opt, "Initial spin state(s) to solve the relaxation dynamics for; all share one run directory"
     )
     opt.add_argument(
-        "-o", "--output-root", default="runs", help="Root folder for output run directories (default: runs)"
+        "-o", "--output-root", type=resolve_path, default="runs", help="Root folder for output run directories (default: runs)"
     )
     opt.add_argument(
         "--run-name",
@@ -138,21 +141,33 @@ def build_run_parser(parser: argparse.ArgumentParser) -> None:
     )
 
 
-_METHOD_MAP = {"all": ("all_bands", "ZFS_hyp"), "approx": ("defect_band_approx", "ZFS_occup")}
+class _MethodMap(dict):
+    """--method value (any name of a method, spinlabs.methods) -> (calc_method, ground-state folder).
+
+    The ground-state folder is None: the parser takes the method's folder that exists (ZFS_AO / ZFS_UO /
+    ZFS_full, or the legacy ZFS_hyp / ZFS_occup)."""
+
+    def __missing__(self, name):
+        return (normalize_calc_method(name), None)
+
+
+_METHOD_MAP = _MethodMap()
 
 
 def _infer_method_from_file(path: Path) -> str:
-    """Infer 'all' or 'approx' from a packaged filename (falls back to 'all')."""
-    name = path.name.lower()
-    return "approx" if ("approx" in name or "zfs_occup" in name) else "all"
+    """The method (AO, UO, full_decont) of a packaged file name or set folder (falls back to AO)."""
+    path = Path(path)
+    if path.is_dir():  # a set of per-sublevel packages
+        return "full_decont"
+    return method_from_path(path.name) or method_from_path(relative_to_cwd(path)) or "AO"
 
 
 def _infer_method(args: argparse.Namespace) -> str:
-    """Return 'all' or 'approx', inferring from input file/folder names when --method is omitted."""
+    """The method (AO, UO, full_decont), inferred from input file/folder names when --method is omitted."""
     if args.method:
-        return args.method[0]
+        return normalize_calc_method(args.method[0])
     names = " ".join(
-        str(p)
+        relative_to_cwd(p)  # the typed part: the absolute path's parents could name a method by accident
         for p in (
             *(args.sim_folder or []),
             *(args.raw_zfs_file or []),
@@ -162,15 +177,14 @@ def _infer_method(args: argparse.Namespace) -> str:
         )
         if p
     ).lower()
-    has_all = "all_bands" in names or "zfs_hyp" in names
-    has_approx = "defect_band_approx" in names or "approx" in names or "zfs_occup" in names
-    if has_all == has_approx:
+    found = {method_from_path(name) for name in names.split()} - {None}
+    if len(found) != 1:
         raise SystemExit(
-            "could not infer --method from input names; pass --method all or --method approx"
-            if not has_all
-            else "input names match both methods; pass --method all or --method approx explicitly"
+            "could not infer --method from input names; pass --method all, unpaired or decont"
+            if not found
+            else f"input names match {' and '.join(sorted(found))}; pass --method explicitly"
         )
-    return "all" if has_all else "approx"
+    return found.pop()
 
 
 def _validate(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None:

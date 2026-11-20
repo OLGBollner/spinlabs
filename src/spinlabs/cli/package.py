@@ -17,12 +17,13 @@ from typing import NamedTuple
 
 from spinlabs.cli import add_verbosity_args
 from spinlabs.logging_utils import attach_db_logging, section
-from spinlabs.models import RawZFSData, normalize_calc_method
-from spinlabs.vasp.trees import tree_displacement
-from spinlabs.registry import ensure_db, register_file
+from spinlabs.models import ALIGNED_PHONON_NAME, PACKAGED_PHONON_NAME, RawZFSData, normalize_calc_method
+from spinlabs.vasp.trees import full_spectrum_of, tree_displacement, tree_phonon
+from spinlabs.registry import SUBLEVEL_KINDS, ensure_db, register_file
 from spinlabs.pack_convergence import ConvergenceScan, save_convergence, scan_convergence
-from spinlabs.parsers import parse_zfs_simulation_dataset, split_defect_folder_name
-from spinlabs.vasp.run_checks import BASIS_SOURCE
+from spinlabs.decont import high_spin
+from spinlabs.parsers import decont_sublevels, parse_decont_dataset, parse_zfs_simulation_dataset, split_defect_folder_name
+from spinlabs.methods import CLI_CHOICES, METHODS, basis_dir, ground_state_dir, method_from_path
 from spinlabs.vasp.settings import (
     compare_settings,
     outcar_settings,
@@ -32,10 +33,11 @@ from spinlabs.vasp.settings import (
     tree_settings,
 )
 from spinlabs.vasp.slurm_logs import summarize
-from spinlabs.vasp.trees import default_phonon
+from spinlabs.vasp.trees import DECONT_GROUND_STATE, default_phonon
 from spinlabs.vasp.verify import unfinished_runs
 
 from spinlabs.logging_utils import get_logger
+from spinlabs.utils import resolve_path
 
 LOGGER = get_logger(__name__)
 
@@ -43,14 +45,14 @@ LOGGER = get_logger(__name__)
 def build_package_parser(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--defect-folder",
-        type=Path,
+        type=resolve_path,
         nargs="+",
         metavar="FOLDER",
         help="Root folder(s) for one defect each, e.g. ../NV_512 ../ClV_128. With --conv: exactly one folder containing runs/.",
     )
     parser.add_argument(
         "--register-only",
-        type=Path,
+        type=resolve_path,
         metavar="DATA_PATH",
         default=None,
         help="Don't package anything: scan DATA_PATH for packaged .npz files and add them to the registry.",
@@ -58,18 +60,23 @@ def build_package_parser(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--conv",
         action="store_true",
-        help="Package convergence runs (runs/<mode>_pert_<p>/OUTCAR) into one npz instead of raw simulation folders.",
+        help="Package convergence runs (runs/<mode>_pert_<p>/OUTCAR) into one npz instead of raw simulation folders. "
+        "A full-decontamination folder (convergence_test_decont) gives one npz per spin sublevel "
+        "(runs/<mode>_pert_<p>/<sublevel>/OUTCAR), in one folder.",
     )
     parser.add_argument(
         "--ground-state",
-        type=Path,
+        type=resolve_path,
         nargs="?",
         const=_GS_AUTO,
         default=None,
         metavar="OUTCAR",
         help=(
             "With --conv: ground-state OUTCAR; its ZFS tensor is stored as 'd0' (the Q=0 point) in the npz. "
-            "Flag without a path: auto-discover <defect-folder>/ZFS_hyp/OUTCAR (all) or ZFS_occup/OUTCAR (occup)."
+            "Flag without a path: auto-discover the method's <defect-folder>/ZFS_AO/OUTCAR or ZFS_UO/OUTCAR "
+            "(or the legacy ZFS_hyp / ZFS_occup). "
+            "Ignored for a full-decontamination folder: each sublevel's d0 is always "
+            "<defect-folder>/ZFS_full/<sublevel>/OUTCAR."
         ),
     )
     parser.add_argument(
@@ -96,10 +103,12 @@ def build_package_parser(parser: argparse.ArgumentParser) -> None:
         "--method",
         type=str,
         nargs="+",
-        choices=["all", "approx"],
-        default=["all", "approx"],
+        choices=CLI_CHOICES,
+        default=None,
         metavar="METHOD",
-        help="ZFS calculation method(s) to package: all and/or approx (default: both).",
+        help="ZFS calculation method(s) to package: all/AO, unpaired/UO and/or decont (full spin decontamination: one "
+        "file per spin sublevel in one folder, each with its ground state from <defect-folder>/ZFS_full/<sublevel>; "
+        "only runs with a ZFS tensor in every sublevel). Default: every method the defect has trees for.",
     )
     parser.add_argument(
         "--no-mass-weighted",
@@ -110,8 +119,8 @@ def build_package_parser(parser: argparse.ArgumentParser) -> None:
     )
     parser.add_argument(
         "--output-root",
-        type=Path,
-        default=Path("data"),
+        type=resolve_path,
+        default="data",
         help="Root folder for packaged data (default: ./data).",
     )
 
@@ -133,6 +142,16 @@ def build_package_parser(parser: argparse.ArgumentParser) -> None:
 
 
 _ORDER_DIRS = {"first": "first_order", "second": "second_order"}
+def _methods_for(defect_folder: Path, requested: list[str] | None) -> list[str]:
+    """The methods to package: the requested ones, else every one the defect has a tree for (its basis
+    folder under the new or a legacy name; AO and UO when it has none, so the scan says what is missing)."""
+    if requested:
+        return requested
+    found = [
+        key for key, m in METHODS.items()
+        if any(defect_folder.glob(f"*_order/pert_*/{name}") for name in (m.basis, *m.legacy_basis))
+    ]
+    return found or ["AO", "UO"]
 _ORDER_NUM = {"first": 1, "second": 2}
 _GS_AUTO = Path("__auto__")  # --ground-state given without a path: auto-discover
 
@@ -159,11 +178,15 @@ def _run(args: argparse.Namespace) -> None:
     scanned: list[_Scanned] = []
     phonons: dict[tuple[str, int], Path] = {}
     for defect_folder in defect_folders:
-        found = _scan_raw(args, defect_folder, args.method)
+        found = _scan_raw(args, defect_folder, _methods_for(defect_folder, args.method))
         scanned.extend(found)
         phonon = _find_phonon_npz(defect_folder)
         if found and phonon is not None:
             phonons[(found[0].defect, found[0].cell_size)] = phonon
+    try:
+        aligned_phonons = _job_script_phonons(scanned, phonons)
+    except ValueError as error:
+        raise SystemExit(f"error: {error}")
     section(LOGGER, "Summary")
     _print_scan_summary(scanned, phonons)
     _print_mass_weighting(scanned, cli_unweighted=getattr(args, "no_mass_weighted", False))
@@ -172,9 +195,68 @@ def _run(args: argparse.Namespace) -> None:
     if not getattr(args, "yes", False) and not _confirm("Save the perturbation data to file? (Y/n): "):
         LOGGER.info("nothing saved")
         return
+    try:
+        _check_packaged_aligned(aligned_phonons, args.output_root)
+    except ValueError as error:
+        raise SystemExit(f"error: {error}")
     section(LOGGER, "Save perturbation data")
     _save_raw(scanned, args.output_root, cli_unweighted=getattr(args, "no_mass_weighted", False))
     _save_phonons(phonons, args.output_root)
+    _save_phonons(aligned_phonons, args.output_root, name=ALIGNED_PHONON_NAME)
+
+
+def _same_spectrum(a: Path, b: Path) -> bool:
+    """Whether two phonon files hold the same modes (frequencies and eigenvectors)."""
+    from spinlabs.parsers import parse_phonon_data
+
+    if Path(a).resolve() == Path(b).resolve():
+        return True
+    sa, sb = parse_phonon_data(a), parse_phonon_data(b)
+    return (
+        sa.n_modes == sb.n_modes
+        and np.allclose(sa.frequencies_mev, sb.frequencies_mev)
+        and np.allclose(np.asarray(sa.eigenvectors), np.asarray(sb.eigenvectors), atol=1e-8)
+    )
+
+
+def _job_script_phonons(scanned: list["_Scanned"], phonons: dict) -> dict[tuple[str, int], Path]:
+    """The defects' aligned full spectra, from the datasets' job scripts; updates ``phonons`` (unaligned) too.
+
+    Each dataset is tagged with the alignment of the spectrum its trees displaced along (_Scanned.aligned);
+    the analysis picks the packaged phonon_data.npz or phonon_data_aligned.npz of the defect by that tag,
+    so one of each per defect must hold for all its datasets. Raises ValueError on a conflict.
+    """
+    named: dict[bool, dict[tuple[str, int], Path]] = {True: {}, False: {}}
+    for s in scanned:
+        if s.phonon is None:
+            continue
+        key, group = (s.defect, s.cell_size), named[bool(s.aligned)]
+        if key in group and not _same_spectrum(group[key], s.phonon):
+            kind = "aligned" if s.aligned else "unaligned"
+            raise ValueError(
+                f"{s.defect}_{s.cell_size}: datasets displaced along different {kind} spectra "
+                f"({group[key]} and {s.phonon}); package them separately"
+            )
+        group[key] = s.phonon
+    for key, path in named[False].items():  # the job scripts' spectrum wins over the one found by name
+        if key in phonons and not _same_spectrum(phonons[key], path):
+            LOGGER.warning(
+                f"{key[0]}_{key[1]}: the job scripts displace along {path}, not {phonons[key]}; "
+                f"packaging {path} as the defect's spectrum"
+            )
+        phonons[key] = path
+    return named[True]
+
+
+def _check_packaged_aligned(aligned: dict[tuple[str, int], Path], output_root: Path) -> None:
+    """Refuse to replace a packaged aligned spectrum by a different one: earlier aligned data needs it."""
+    for (defect, cell_size), src in aligned.items():
+        dest = output_root / f"{defect}_{cell_size}" / ALIGNED_PHONON_NAME
+        if dest.is_file() and not _same_spectrum(dest, src):
+            raise ValueError(
+                f"{dest} holds other aligned modes than {src}; data packaged before was displaced along it. "
+                "Keep the earlier spectrum (rebuild the trees from it) or package into another --output-root"
+            )
 
 
 class _Scanned(NamedTuple):
@@ -187,6 +269,13 @@ class _Scanned(NamedTuple):
     raw: RawZFSData
     # Displacement convention of the trees' job scripts (DISPLACEMENTS), None when they do not say
     displacement: str | None = None
+    # Full spin decontamination: {sublevel: data}, one file each; raw is the high-spin (ms = S) one
+    sublevels: dict[str, RawZFSData] | None = None
+    # Full phonon spectrum of the file the trees' job scripts displace along (PHONON_PATH); None when the
+    # scripts name none (older trees: the defect's phonon file is used)
+    phonon: Path | None = None
+    # Whether that spectrum is mirror-aligned; saved as the packaged files' aligned tag (None: not known)
+    aligned: bool | None = None
 
 
 _DISPLACEMENT_TEXT = {
@@ -287,11 +376,15 @@ def _scan_raw(args: argparse.Namespace, defect_folder: Path, methods: list[str])
         if not pert_scales:
             LOGGER.warning(f"{defect_folder.name} {calc_method}: no perturbation data found; skipped")
             continue
+        if calc_method == "full_decont":
+            found.extend(_scan_decont(defect_folder, datasets, orders, pert_scales, central, _minus_folder))
+            continue
         ground = _ground_state_settings(defect_folder, calc_method)
         for pert_scale in pert_scales:
             raw = None
             trees = {}
             weighting: set[bool] = set()
+            phonons: set[Path] = set()
             for o in orders:
                 if pert_scale not in datasets[o]:
                     continue
@@ -299,15 +392,7 @@ def _scan_raw(args: argparse.Namespace, defect_folder: Path, methods: list[str])
                     sim_folder=datasets[o][pert_scale], order=_ORDER_NUM[o], calc_method=method, verbose=True
                 )
                 raw = data if raw is None else raw.combine(data)
-                basis = datasets[o][pert_scale] / calc_method
-                if basis.is_dir():
-                    trees[_ORDER_DIRS[o]] = tree_settings(basis)
-                    unfinished = unfinished_runs(basis)
-                    if unfinished is not None:
-                        trees[_ORDER_DIRS[o]]["unfinished"] = unfinished
-                    convention = tree_displacement(basis)
-                    if convention is not None:
-                        weighting.add(convention)
+                _note_tree(basis_dir(datasets[o][pert_scale], calc_method), _ORDER_DIRS[o], trees, weighting, phonons)
             if central and raw is not None:
                 minus_dir = _minus_folder(pert_scale)
                 if minus_dir is None:
@@ -318,15 +403,7 @@ def _scan_raw(args: argparse.Namespace, defect_folder: Path, methods: list[str])
                     continue
                 minus = parse_zfs_simulation_dataset(sim_folder=minus_dir, order=1, calc_method=method, verbose=True)
                 raw = raw.with_minus(minus)
-                basis = minus_dir / calc_method
-                if basis.is_dir():
-                    trees["first_order_minus"] = tree_settings(basis)
-                    unfinished = unfinished_runs(basis)
-                    if unfinished is not None:
-                        trees["first_order_minus"]["unfinished"] = unfinished
-                    convention = tree_displacement(basis)
-                    if convention is not None:
-                        weighting.add(convention)
+                _note_tree(basis_dir(minus_dir, calc_method), "first_order_minus", trees, weighting, phonons)
             if raw is None or not (raw.first_order or raw.second_order):
                 LOGGER.warning(f"{defect_folder.name} {calc_method} pert {pert_scale:g}: no ZFS data parsed; skipped")
                 continue
@@ -337,13 +414,123 @@ def _scan_raw(args: argparse.Namespace, defect_folder: Path, methods: list[str])
                     f"different displacements ({', '.join(sorted(weighting))}); they are not consistent"
                 )
             convention = weighting.pop() if len(weighting) == 1 else None
-            found.append(_Scanned(defect, cell_size, calc_method, pert_scale, raw, convention))
+            phonon, problem = _dataset_phonon(phonons)
+            if problem:
+                LOGGER.error(f"{defect_folder.name} {calc_method} pert {pert_scale:g}: {problem}; skipped")
+                continue
+            found.append(_Scanned(defect, cell_size, calc_method, pert_scale, raw, convention,
+                                  phonon=phonon, aligned=_aligned_of(phonon)))
+    return found
+
+
+def _aligned_of(phonon: Path | None) -> bool | None:
+    """The spectrum's aligned flag (False for one that does not say), None without a spectrum."""
+    if phonon is None:
+        return None
+    from spinlabs.parsers import parse_phonon_data
+
+    return bool(parse_phonon_data(phonon).aligned)
+
+
+def _dataset_phonon(named: set[Path]) -> tuple[Path | None, str | None]:
+    """(full spectrum, None) of the phonon file the dataset's trees name; (None, reason) when it cannot be paired.
+
+    (None, None) when no job script names one (older trees: the defect's phonon file is used). Every tree
+    of a dataset must name the same file, and its full spectrum must match it (vasp.trees.full_spectrum_of).
+    """
+    if not named:
+        return None, None
+    if len(named) > 1:
+        return None, "the trees' job scripts name different phonon files (" + ", ".join(sorted(map(str, named))) + ")"
+    try:
+        return full_spectrum_of(next(iter(named))), None
+    except ValueError as error:
+        return None, f"cannot pair the data with its phonon spectrum: {error}"
+
+
+def _note_tree(basis: Path, key: str, trees: dict, weighting: set, phonons: set | None = None) -> None:
+    """Record a tree's VASP settings, unfinished runs, displacement convention and phonon file."""
+    if not basis.is_dir():
+        return
+    if phonons is not None:
+        named = tree_phonon(basis)
+        if named is not None:
+            phonons.add(named)
+    trees[key] = tree_settings(basis)
+    unfinished = unfinished_runs(basis)
+    if unfinished is not None:
+        trees[key]["unfinished"] = unfinished
+    convention = tree_displacement(basis)
+    if convention is not None:
+        weighting.add(convention)
+
+
+def _scan_decont(
+    defect_folder: Path, datasets: dict[str, dict[float, Path]], orders: list[str], pert_scales: list[float],
+    central: bool, minus_folder,
+) -> list[_Scanned]:
+    """The full-decontamination sets of one defect: per pert scale one RawZFSData per spin sublevel."""
+    defect, cell_size = split_defect_folder_name(defect_folder.name)
+    ground = _ground_state_settings(defect_folder, "full_decont")
+    found = []
+    for pert_scale in pert_scales:
+        sets: dict[str, RawZFSData] | None = None
+        trees: dict = {}
+        weighting: set = set()
+        phonons: set[Path] = set()
+        name = f"{defect_folder.name} full_decont pert {pert_scale:g}"
+
+        def merge(sets, parsed):
+            if sets is None:
+                return parsed
+            if set(sets) != set(parsed):
+                raise ValueError(f"the trees have different spin sublevels: {sorted(sets)} vs {sorted(parsed)}")
+            return {lv: sets[lv].combine(parsed[lv]) for lv in sets}
+
+        try:
+            for o in orders:
+                folder = datasets[o].get(pert_scale)
+                if folder is None or not (folder / "full_decont").is_dir():
+                    continue
+                sets = merge(sets, parse_decont_dataset(folder, order=_ORDER_NUM[o], verbose=True))
+                _note_tree(folder / "full_decont", _ORDER_DIRS[o], trees, weighting, phonons)
+            if central and sets is not None:
+                minus_dir = minus_folder(pert_scale)
+                if minus_dir is None or not (minus_dir / "full_decont").is_dir():
+                    LOGGER.warning(f"{name}: --central but no first_order/pert_-{pert_scale:g}/full_decont; skipped")
+                    continue
+                minus = parse_decont_dataset(minus_dir, order=1, verbose=True)
+                if set(minus) != set(sets):
+                    raise ValueError(f"the -Q tree has spin sublevels {sorted(minus)}, the +Q tree {sorted(sets)}")
+                sets = {lv: sets[lv].with_minus(minus[lv]) for lv in sets}
+                _note_tree(minus_dir / "full_decont", "first_order_minus", trees, weighting, phonons)
+        except ValueError as error:
+            LOGGER.warning(f"{name}: {error}; skipped")
+            continue
+        if not sets or not any(r.first_order or r.second_order for r in sets.values()):
+            LOGGER.warning(f"{name}: no complete runs (every spin sublevel with a ZFS tensor); skipped")
+            continue
+        settings = _vasp_settings(ground, trees)
+        for raw in sets.values():
+            raw.vasp_settings = settings
+        if len(weighting) > 1:
+            LOGGER.warning(f"{name}: the trees use different displacements ({', '.join(sorted(weighting))})")
+        convention = weighting.pop() if len(weighting) == 1 else None
+        phonon, problem = _dataset_phonon(phonons)
+        if problem:
+            LOGGER.error(f"{name}: {problem}; skipped")
+            continue
+        found.append(
+            _Scanned(defect, cell_size, "full_decont", pert_scale, sets[high_spin(sets)], convention, sets, phonon,
+                     _aligned_of(phonon))
+        )
     return found
 
 
 def _ground_state_settings(defect_folder: Path, calc_method: str) -> dict[str, str] | None:
-    """VASP settings of the ground-state ZFS run (<defect>/ZFS_hyp or ZFS_occup), or None if absent."""
-    return _run_folder_settings(defect_folder / BASIS_SOURCE[calc_method])
+    """VASP settings of the method's ground-state ZFS run (<defect>/ZFS_AO, ZFS_UO, ZFS_full, or a legacy
+    name), or None if absent."""
+    return _run_folder_settings(ground_state_dir(defect_folder, calc_method))
 
 
 def _run_folder_settings(folder: Path) -> dict[str, str] | None:
@@ -358,7 +545,6 @@ def _run_folder_settings(folder: Path) -> dict[str, str] | None:
 # Full-spectrum phonon files, most preferred first. Symmetry-reduced spectra
 # (``*sym*``) are skipped: packaged mode indices refer to the full spectrum.
 _PHONON_NAMES = ("phonon_data.npz", "phonons.npz")
-PACKAGED_PHONON_NAME = "phonon_data.npz"
 
 
 def _find_phonon_npz(defect_folder: Path) -> Path | None:
@@ -390,10 +576,14 @@ def _find_phonon_npz(defect_folder: Path) -> Path | None:
     return None
 
 
-def _save_phonons(phonons: dict[tuple[str, int], Path], output_root: Path) -> None:
-    """Copy each phonon file to <output_root>/<defect>_<cell>/phonon_data.npz and register it."""
+def _save_phonons(phonons: dict[tuple[str, int], Path], output_root: Path, name: str = PACKAGED_PHONON_NAME) -> None:
+    """Copy each phonon file to <output_root>/<defect>_<cell>/<name> and register it.
+
+    ``name`` is phonon_data.npz, or phonon_data_aligned.npz for the aligned full spectrum that data
+    packaged with aligned=True was displaced along (the analysis picks it by that tag).
+    """
     for (defect, cell_size), src in phonons.items():
-        dest = output_root / f"{defect}_{cell_size}" / PACKAGED_PHONON_NAME
+        dest = output_root / f"{defect}_{cell_size}" / name
         dest.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(src, dest)
         register_file(ensure_db(), dest, "phonon", defect=defect, cell_size=cell_size)
@@ -415,6 +605,11 @@ def _print_scan_summary(scanned: list[_Scanned], phonons: dict[tuple[str, int], 
             f"{f'{s.defect}_{s.cell_size}':<12} {s.calc_method:<20} {s.pert_scale:>8g} "
             f"{len(s.raw.first_order):>16} {second:>16}"
         )
+        if s.sublevels:
+            print(f"{'':<12} one file per spin sublevel: {', '.join(s.sublevels)}")
+        if s.phonon is not None:
+            tag = "aligned" if s.aligned else "not aligned"
+            print(f"{'':<12} phonon spectrum (from the job scripts, {tag}): {s.phonon}")
     if phonons:
         print("\nPhonon data:")
         for (defect, cell_size), path in phonons.items():
@@ -509,22 +704,27 @@ def _save_raw(scanned: list[_Scanned], output_root: Path, cli_unweighted: bool =
     """Write each scanned dataset to <output_root>/<defect>_<cell>/pert_<p>/<method>/<date>/ and register it."""
     date_dir = date.today().strftime("%Y%m%d")
     for s in scanned:
-        s.raw.displacement = _displacement_of(s, cli_unweighted)
-        s.raw.mass_weighted = s.raw.displacement != "unweighted"
         pert_folder = output_root / f"{s.defect}_{s.cell_size}" / f"pert_{s.pert_scale:g}" / s.calc_method / date_dir
         pert_folder.mkdir(parents=True, exist_ok=True)
-        save_path = s.raw.save(pert_folder / s.raw._default_name())
-        register_file(
-            ensure_db(),
-            save_path,
-            "packaged_zfs",
-            defect=s.defect,
-            cell_size=s.cell_size,
-            calc_method=s.calc_method,
-            pert_order=([1] if s.raw.has_first_order else []) + ([2] if s.raw.has_second_order else []),
-            pert_scale=s.pert_scale,
-        )
-        LOGGER.info(f"saved raw ZFS data: {save_path}")
+        # a full-decontamination set is one file per spin sublevel, all in this folder
+        for raw in (s.sublevels or {None: s.raw}).values():
+            raw.displacement = _displacement_of(s, cli_unweighted)
+            if s.aligned is not None:  # which packaged spectrum the analysis must use (models.packaged_phonon_name)
+                raw.aligned = s.aligned
+            raw.mass_weighted = raw.displacement != "unweighted"
+            save_path = raw.save(pert_folder / raw._default_name())
+            register_file(
+                ensure_db(),
+                save_path,
+                SUBLEVEL_KINDS["packaged_zfs"] if raw.spin_sublevel else "packaged_zfs",
+                defect=s.defect,
+                cell_size=s.cell_size,
+                calc_method=s.calc_method,
+                pert_order=([1] if raw.has_first_order else []) + ([2] if raw.has_second_order else []),
+                pert_scale=s.pert_scale,
+                spin_sublevel=raw.spin_sublevel,
+            )
+            LOGGER.info(f"saved raw ZFS data: {save_path}")
 
 
 _DICT_ORDER_SUFFIXES = {
@@ -559,7 +759,7 @@ def _register_only(data_path: Path) -> None:
     conn = ensure_db()
     registered, skipped = 0, 0
     for npz_path in sorted(data_path.rglob("*.npz")):
-        if npz_path.name == PACKAGED_PHONON_NAME:
+        if npz_path.name in (PACKAGED_PHONON_NAME, ALIGNED_PHONON_NAME):
             defect, cell_size = split_defect_folder_name(npz_path.parent.name)
             if cell_size is None:
                 LOGGER.warning(f"phonon file outside a <defect>_<cell> folder, not registered: {npz_path}")
@@ -591,6 +791,7 @@ def _register_only(data_path: Path) -> None:
                 cell_size = int(data["cell_size"])
                 pert_scale = float(data["pert_scale"])
                 calc_method = normalize_calc_method(str(data["calc_method"]))
+                spin_sublevel = str(data["spin_sublevel"]) if "spin_sublevel" in keys else None
                 # Derive orders from the npz content itself: a non-empty
                 # first_order / second_order mapping means that perturbation
                 # order is present in the file. Fall back to the filename
@@ -615,12 +816,13 @@ def _register_only(data_path: Path) -> None:
         register_file(
             conn,
             npz_path,
-            "packaged_zfs",
+            SUBLEVEL_KINDS["packaged_zfs"] if spin_sublevel else "packaged_zfs",
             defect=defect,
             cell_size=cell_size,
             calc_method=calc_method,
             pert_order=orders,
             pert_scale=pert_scale,
+            spin_sublevel=spin_sublevel,
         )
         LOGGER.debug(
             f"registered packaged ZFS data ({defect}_{cell_size} {calc_method} order {orders} pert {pert_scale:g}): "
@@ -652,38 +854,38 @@ def _register_conv(conn, npz_path: Path, data) -> bool:
         return False
     method = meta.get("method") or _conv_method(meta.get("method_key") or suffix)
     calc_method = normalize_calc_method(method) if method else None
-    register_file(conn, npz_path, "convergence", defect=defect, cell_size=int(cell), calc_method=calc_method)
+    sublevel = meta.get("spin_sublevel") or (str(data["spin_sublevel"]) if "spin_sublevel" in data.files else None)
+    register_file(
+        conn, npz_path, SUBLEVEL_KINDS["convergence"] if sublevel else "convergence", defect=defect,
+        cell_size=int(cell), calc_method=calc_method, spin_sublevel=sublevel,
+    )
     LOGGER.debug(f"registered convergence data ({defect}_{cell} {calc_method}): {npz_path}")
     return True
 
 
 def _conv_method(suffix: str) -> str | None:
-    """'all' or 'approx' from a convergence folder suffix, None when it says neither.
+    """The method (AO, UO, full_decont) a convergence folder suffix names, None when it names none.
 
-    test_all / test_occup, or AE (all electrons) / UE (unpaired electrons) as a token,
-    e.g. AE_mass_weighted.
+    test_AO / test_UO / test_decont, the legacy test_all / test_occup, or AE (all electrons) / UE
+    (unpaired electrons) as a token, e.g. AE_mass_weighted.
     """
     tokens = {t.lower() for t in re.split(r"[_.\-]", suffix)}
-    if "all" in suffix or "ae" in tokens:
-        return "all"
-    if "occup" in suffix or "ue" in tokens:
-        return "approx"
-    return None
+    if "ae" in tokens:
+        return "AO"
+    if "ue" in tokens:
+        return "UO"
+    return method_from_path(f"test_{suffix}" if not suffix.startswith("test") else suffix)
 
 
 def _auto_ground_state(defect_folder: Path, method: str | None) -> Path | None:
-    """Flag-only --ground-state: pick ZFS_hyp (all) or ZFS_occup (occup) OUTCAR."""
-    if method == "all":
-        zfs_folder = "ZFS_hyp"
-    elif method in ("occup", "approx"):
-        zfs_folder = "ZFS_occup"
-    else:
+    """Flag-only --ground-state: the method's ground-state OUTCAR (ZFS_AO / ZFS_UO or a legacy name)."""
+    if method not in ("AO", "UO"):
         LOGGER.warning(
-            f"{defect_folder.name}: convergence folder name says neither 'all'/'AE' nor 'occup'/'UE'; "
-            "d0 not stored (pass --ground-state OUTCAR)"
+            f"{defect_folder.name}: convergence folder name says neither AO ('AO'/'all'/'AE') nor UO "
+            "('UO'/'occup'/'UE'); d0 not stored (pass --ground-state OUTCAR)"
         )
         return None
-    candidate = defect_folder / zfs_folder / "OUTCAR"
+    candidate = ground_state_dir(defect_folder, method) / "OUTCAR"
     if candidate.exists():
         LOGGER.debug(f"ground state: {candidate}")
         return candidate
@@ -696,7 +898,7 @@ def _run_conv(args: argparse.Namespace, defect_folder: Path) -> None:
     # packaging. These defaults MUST mirror the argparse defaults below; if
     # one changes, change both, or a matching user value silently skips the
     # warning.
-    defaults = {"orders": "first,second", "pert": None, "method": ["all", "approx"]}
+    defaults = {"orders": "first,second", "pert": None, "method": None}
     for opt in ("orders", "pert", "method"):
         if getattr(args, opt, defaults[opt]) != defaults[opt]:
             LOGGER.warning(f"--{opt.replace('_', '-')} is ignored with --conv")
@@ -705,7 +907,7 @@ def _run_conv(args: argparse.Namespace, defect_folder: Path) -> None:
     conv_roots = sorted(p for p in defect_folder.glob("convergence*") if p.is_dir())
     if not conv_roots:
         raise SystemExit(f"No convergence* folders found under {defect_folder}")
-    scanned = [s for s in (_scan_conv(args, defect_folder, root) for root in conv_roots) if s is not None]
+    scanned = [s for root in conv_roots for s in _scan_conv(args, defect_folder, root)]
     section(LOGGER, "Summary")
     _print_conv_summary(scanned)
     if getattr(args, "scan", False) or not scanned:
@@ -718,12 +920,16 @@ def _run_conv(args: argparse.Namespace, defect_folder: Path) -> None:
     for s in scanned:
         leaf = args.output_root / f"{s.defect}_{s.cell}" / (s.calc_method or "conv") / date_dir
         leaf.mkdir(parents=True, exist_ok=True)
-        output = leaf / f"{s.defect}_{s.cell}_{date_dir}_conv_{s.suffix}.npz"
+        sublevel = f"_{s.spin_sublevel}" if s.spin_sublevel else ""
+        output = leaf / f"{s.defect}_{s.cell}_{date_dir}_conv_{s.suffix}{sublevel}.npz"
         save_convergence(
             s.scan, output, ground_state=s.ground_state, defect=s.defect, cell=s.cell, method=s.method,
-            method_key=s.suffix,
+            method_key=s.suffix, spin_sublevel=s.spin_sublevel,
         )
-        register_file(ensure_db(), output, "convergence", defect=s.defect, cell_size=s.cell, calc_method=s.calc_method)
+        register_file(
+            ensure_db(), output, SUBLEVEL_KINDS["convergence"] if s.spin_sublevel else "convergence",
+            defect=s.defect, cell_size=s.cell, calc_method=s.calc_method, spin_sublevel=s.spin_sublevel,
+        )
 
 
 class _ConvScanned(NamedTuple):
@@ -732,38 +938,87 @@ class _ConvScanned(NamedTuple):
     defect: str
     cell: int
     suffix: str  # folder name without 'convergence', e.g. 'test_all'; names the output file
-    method: str | None  # 'all' or 'approx' from the suffix, None when it says neither
+    method: str | None  # the method the suffix names (AO, UO, full_decont), None when it names none
     calc_method: str | None
     ground_state: Path | None  # OUTCAR stored as d0
     scan: ConvergenceScan
     vasp_settings: dict
+    spin_sublevel: str | None = None  # full spin decontamination: one file per sublevel
 
 
-def _scan_conv(args: argparse.Namespace, defect_folder: Path, root: Path) -> _ConvScanned | None:
-    """Parse one convergence* folder and check its settings against the ground state; None if it has no runs."""
+def _scan_conv(args: argparse.Namespace, defect_folder: Path, root: Path) -> list[_ConvScanned]:
+    """Parse one convergence* folder and check its settings against the ground state; empty if it has no runs.
+
+    A full-decontamination folder (input/sublevels/) gives one entry per spin sublevel, each with
+    its d0 from the defect's ZFS_full/<sublevel>/OUTCAR.
+    """
     section(LOGGER, f"Scan convergence folder {defect_folder.name}/{root.name}")
     suffix = re.sub(r"^convergence[._-]*", "", root.name).lstrip("_-") or "conv"
+    sublevels = decont_sublevels(root)
+    if sublevels:
+        if getattr(args, "ground_state", None) not in (None, _GS_AUTO):
+            LOGGER.warning(
+                f"{root.name}: --ground-state {args.ground_state} ignored; each sublevel's d0 is "
+                f"{defect_folder.name}/ZFS_full/<sublevel>/OUTCAR"
+            )
+        return _scan_conv_decont(defect_folder, root, suffix, sublevels)
     method = _conv_method(suffix)
-    calc_method = normalize_calc_method(method) if method else None
+    calc_method = method
     defect, cell = split_defect_folder_name(defect_folder.name)
     try:
         scan = scan_convergence(root)
     except ValueError as exc:
         LOGGER.warning(f"{defect_folder.name}/{root.name}: {exc}; not packaged")
-        return None
+        return []
     LOGGER.info(f"{scan.n_runs} run folder(s), {scan.n_finished} with a ZFS tensor")
     ground_state = args.ground_state
     if ground_state == _GS_AUTO:
         ground_state = _auto_ground_state(defect_folder, method)
-    # Settings are checked against the stored d0's run, else the method's ZFS_hyp/ZFS_occup.
+    # Settings are checked against the stored d0's run, else the method's ground-state folder.
     if ground_state is not None:
         ground = _run_folder_settings(Path(ground_state).parent)
-    elif calc_method in BASIS_SOURCE:
+    elif calc_method is not None:
         ground = _ground_state_settings(defect_folder, calc_method)
     else:
         ground = None
     settings = _vasp_settings(ground, {"runs": tree_settings(root)})
-    return _ConvScanned(defect, cell, suffix, method, calc_method, ground_state, scan, settings)
+    return [_ConvScanned(defect, cell, suffix, method, calc_method, ground_state, scan, settings)]
+
+
+def _scan_conv_decont(defect_folder: Path, root: Path, suffix: str, sublevels: list[str]) -> list[_ConvScanned]:
+    """One _ConvScanned per spin sublevel of a full-decontamination convergence folder.
+
+    Only runs with a ZFS tensor in every sublevel keep their tensors (the others become NaN in
+    every sublevel's grid), so all files of the set hold the same points.
+    """
+    defect, cell = split_defect_folder_name(defect_folder.name)
+    ground_dir = defect_folder / DECONT_GROUND_STATE
+    settings = _vasp_settings(_run_folder_settings(ground_dir), {"runs": tree_settings(root)})
+    scans = {}
+    for lv in sublevels:
+        try:
+            scans[lv] = scan_convergence(root, sublevel=lv)
+        except ValueError as exc:
+            LOGGER.warning(f"{defect_folder.name}/{root.name} sublevel {lv}: {exc}; not packaged")
+            return []
+    grids = {(tuple(s.modes), tuple(s.perts)) for s in scans.values()}
+    if len(grids) > 1:
+        LOGGER.warning(f"{defect_folder.name}/{root.name}: the sublevels ran different modes/steps; not packaged")
+        return []
+    incomplete = np.zeros(next(iter(scans.values())).tensors.shape[:2], dtype=bool)
+    for scan in scans.values():
+        incomplete |= np.isnan(scan.tensors).any(axis=(2, 3))
+    out = []
+    for lv, scan in scans.items():
+        scan.tensors[incomplete] = np.nan
+        scan.energies[incomplete] = np.nan
+        outcar = ground_dir / lv / "OUTCAR"
+        ground = outcar if outcar.is_file() else None
+        if ground is None:
+            LOGGER.warning(f"{defect_folder.name}: no {outcar}; d0 of sublevel {lv} not stored")
+        out.append(_ConvScanned(defect, cell, suffix, "full_decont", "full_decont", ground, scan, settings, lv))
+    LOGGER.info(f"{root.name}: sublevels {', '.join(sublevels)}; {int(incomplete.sum())} grid point(s) not complete")
+    return out
 
 
 def _format_steps(perts: list[float]) -> str:
@@ -785,7 +1040,7 @@ def _print_conv_summary(scanned: list[_ConvScanned]) -> None:
     columns = ("defect", "folder", "method", "modes", "steps", "finished")
     rows = [
         (
-            f"{s.defect}_{s.cell}", s.suffix, s.calc_method or "-", " ".join(map(str, s.scan.modes)),
+            f"{s.defect}_{s.cell}", f"{s.suffix} {s.spin_sublevel}" if s.spin_sublevel else s.suffix, s.calc_method or "-", " ".join(map(str, s.scan.modes)),
             _format_steps(s.scan.perts), f"{s.scan.n_finished}/{s.scan.n_grid}",
         )
         for s in scanned
@@ -807,7 +1062,8 @@ def _print_conv_summary(scanned: list[_ConvScanned]) -> None:
 
     print("\nGround state (stored as d0):")
     for s in scanned:
-        print(f"  {s.suffix}: {s.ground_state or 'none (d0 not stored)'}")
+        name = f"{s.suffix} {s.spin_sublevel}" if s.spin_sublevel else s.suffix
+        print(f"  {name}: {s.ground_state or 'none (d0 not stored)'}")
 
     print("\nDisplacements:")
     for s in scanned:

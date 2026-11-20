@@ -7,7 +7,7 @@ dependence on that choice can be seen and justified. Everything else is as in
 ``spinlabs run``, production defaults included (spinlabs.cli.production): Debye
 direct rate, zero-gap pairs left out of the two-phonon rates, T1 from the direct
 and two-phonon rates (no first-order Raman), inconsistent second-order entries
-excluded and the off-diagonal fill on; at the run's sigma the scan gives the
+excluded, the off-diagonal fill and the mirror projection on; at the run's sigma the scan gives the
 run's T1. Nothing is written to the registry or the run folders.
 """
 
@@ -21,6 +21,7 @@ from spinlabs.cli import add_verbosity_args
 from spinlabs.cli.coupling import add_input_args, load_manager
 from spinlabs.cli.production import add_init_state_arg, add_rate_args, rate_options, resolve_init_states
 from spinlabs.logging_utils import get_logger, section
+from spinlabs.utils import resolve_path
 
 LOGGER = get_logger(__name__)
 
@@ -48,10 +49,10 @@ def build_sigma_scan_parser(parser: argparse.ArgumentParser) -> None:
         help="Temperatures to report T1 at (default: 300)",
     )
     add_init_state_arg(opt, "Initial spin state(s)")
-    opt.add_argument("--plot", type=Path, metavar="FILE", help="Also save a T1-vs-sigma figure to FILE")
+    opt.add_argument("--plot", type=resolve_path, metavar="FILE", help="Also save a T1-vs-sigma figure to FILE")
     opt.add_argument(
         "--plot-temperature",
-        type=Path,
+        type=resolve_path,
         metavar="FILE",
         help="Also save a T1-vs-temperature figure to FILE: one line per sigma, coloured by sigma",
     )
@@ -179,7 +180,8 @@ def _table(manager, t1, temps, states, has_second, default_sigma, rates) -> str:
         f"  second order: {'yes' if has_second else 'no (one-phonon processes only)'}; "
         f"inconsistent second-order entries "
         f"{'excluded' if manager.exclude_inconsistent_pairs else 'kept'}: {len(manager.inconsistent_pairs)}; "
-        f"off-diagonal fill {'on' if manager.offdiag_from_diagonal else 'off'}",
+        f"off-diagonal fill {'on' if manager.offdiag_from_diagonal else 'off'}; "
+        f"mirror projection {'on' if manager.mirror_projection else 'off'}",
         f"  direct rate {rates['direct']}, zero-gap pairs {'left out' if rates['nogap'] else 'kept'}, "
         f"T1 from {' + '.join(rates['processes'])}",
         "  T1 in ms:",

@@ -118,9 +118,9 @@ def test_tree_creation_requires_a_step_and_convergence_modes(tmp_path):
     made = _run("python", create, defect, "--pert", STEP, "--conv-modes", 2, 7, "--vasp-binary", "/bin/true",
                 cwd=tmp_path)
     assert made.returncode == 0, made.stdout + made.stderr
-    assert _config(defect / "first_order" / f"pert_{STEP}" / "all_bands" / "run_perturbation_first_order.sh",
+    assert _config(defect / "first_order" / f"pert_{STEP}" / "AO" / "run_perturbation_first_order.sh",
                    "DISPLACEMENT") == "normalized"
-    assert (defect / "convergence_test_all" / "run_convergence.sh").is_file()
+    assert (defect / "convergence_test_AO" / "run_convergence.sh").is_file()
 
 
 def _fake_slurm(tmp_path: Path) -> Path:
@@ -146,7 +146,7 @@ def _convergence_folder(tmp_path: Path) -> Path:
     defect = _defect(tmp_path)
     assert build_convergence_tree(defect, defect / "data" / "phonon_data.npz", [2, 7], [STEP],
                                   displacement="normalized", vasp_binary=Path("/bin/true")) == []
-    return defect / "convergence_test_all"
+    return defect / "convergence_test_AO"
 
 
 def _run_convergence(tmp_path: Path, folder: Path, perts: str, task: int = 0, tasks: int = 1, **extra_env):
@@ -244,12 +244,12 @@ def test_normalized_structure_passes_only_its_own_check(tmp_path):
 
 def test_add_convergence_to_an_existing_defect_takes_its_trees_displacement(tmp_path):
     defect = _defect(tmp_path)
-    tree = defect / "first_order" / "pert_0.1" / "all_bands"
+    tree = defect / "first_order" / "pert_0.1" / "AO"
     tree.mkdir(parents=True)
     (tree / "run_perturbation_first_order.sh").write_text("binary=/opt/vasp_std\nMASS_WEIGHTED=${MASS_WEIGHTED:-1}\n")
     r = _run("python", SCRIPTS / "add_convergence_tree.py", defect, "--modes", 2, 7, "--pert", 0.1, cwd=tmp_path)
     assert r.returncode == 0, r.stdout + r.stderr
-    script = defect / "convergence_test_occup" / "run_convergence.sh"
+    script = defect / "convergence_test_UO" / "run_convergence.sh"
     assert _config(script, "DISPLACEMENT") == "mass_weighted"
     assert _config(script, "binary") == "/opt/vasp_std"
     assert _config(script, "PERTS") == '"0.05 0.1 0.2 0.4"'  # --pert 0.1: p/2, p, 2p and the 2Q helper 4p

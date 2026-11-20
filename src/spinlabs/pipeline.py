@@ -19,7 +19,13 @@ from spinlabs.logging_utils import (
 )
 
 from spinlabs.constants import CONSTANTS
-from spinlabs.models import PhononSpectrum, RawZFSData, SpinPhononCouplingData
+from spinlabs.models import (
+    PhononSpectrum,
+    RawZFSData,
+    SpinPhononCouplingData,
+    normalize_calc_method,
+    packaged_phonon_name,
+)
 from spinlabs.registry import ensure_db, find_phonon, finish_run, parse_orders, register_file, register_run
 from spinlabs.parsers import (
     parse_phonon_data,
@@ -75,7 +81,7 @@ def get_unique_run_dir(
     output_root: str | Path = "runs",
     defect: str = "defect",
     cell_size: str | int = "",
-    calc_method: str = "all_bands",
+    calc_method: str = "AO",
     order: int = 1,
     pert_scale: float | None = None,
     run_name: str | None = None,
@@ -104,7 +110,7 @@ def get_unique_run_dir(
     now_str = datetime.now().strftime("%Y%m%d_%H%M%S")
     leaf = (
         base / f"{defect}_{cell_size}" / _pert_dir_name(pert_scale)
-        / calc_method / now_str
+        / (normalize_calc_method(calc_method) or "unknown") / now_str
     )
     if not leaf.exists():
         leaf.mkdir(parents=True, exist_ok=True)
@@ -137,11 +143,14 @@ def find_default_phonon_file(sim_folder: Path | None) -> Path | None:
     return None
 
 
-def find_default_phonon_file_for_raw(raw_zfs_file: str | Path | Sequence[str | Path]) -> Path | None:
+def find_default_phonon_file_for_raw(
+    raw_zfs_file: str | Path | Sequence[str | Path], aligned: bool = False
+) -> Path | None:
     """Search next to the raw ZFS .npz file(s) for phonon_data.npz / phonopy.yaml.
 
     Looks from the file's folder up to the defect folder of the packaged layout
-    ``data/<defect>/pert_<x>/<method>/<date>/<file>.npz``, nearest first.
+    ``data/<defect>/pert_<x>/<method>/<date>/<file>.npz``, nearest first. With ``aligned``
+    (data displaced along mirror-aligned modes) the file is phonon_data_aligned.npz instead.
     """
     if raw_zfs_file is None:
         return None
@@ -151,16 +160,21 @@ def find_default_phonon_file_for_raw(raw_zfs_file: str | Path | Sequence[str | P
         anchor = Path(raw_zfs_file[0])
     else:
         anchor = Path(raw_zfs_file)
+    if anchor.is_dir():  # a full-decontamination set folder: look from a file inside it
+        anchor = anchor / "set.npz"
     anchor_dir = anchor.parent
+    name = packaged_phonon_name(aligned)
     candidates = [
-        anchor_dir / "phonon_data.npz",
+        anchor_dir / name,
         anchor_dir / "phonopy.yaml",
-        anchor_dir.parent / "phonon_data.npz",
+        anchor_dir.parent / name,
         anchor_dir.parent / "phonopy.yaml",
-        anchor_dir.parent.parent / "phonon_data.npz",
-        anchor_dir.parent.parent / "data" / "phonon_data.npz",
-        anchor_dir.parent.parent.parent / "phonon_data.npz",
+        anchor_dir.parent.parent / name,
+        anchor_dir.parent.parent / "data" / name,
+        anchor_dir.parent.parent.parent / name,
     ]
+    if aligned:  # a phonopy yaml holds the phonon code's modes, never aligned ones
+        candidates = [c for c in candidates if c.name == name]
     for cand in candidates:
         if cand.exists():
             return cand
@@ -200,7 +214,7 @@ def load_raw_inputs(
     raw_zfs_file_1d: str | Path | None = None,
     raw_zfs_file_2d: str | Path | None = None,
     phonon_file: str | Path | None = None,
-    calc_method: str = "all_bands",
+    calc_method: str = "AO",
     zfs_folder: str | None = None,
     order: int | None = None,
     pert_scale: float | None = None,
@@ -273,6 +287,22 @@ def load_raw_inputs(
     cell_size = raw_data.cell_size or cell_size or 0
     n_needed = raw_mode_count(raw_data)
 
+    # Data displaced along mirror-aligned modes (aligned=True, spinlabs package) needs the aligned full
+    # spectrum: its E modes are other vectors than the phonon code's. A spectrum of the other kind is never used.
+    aligned = bool(raw_data.aligned)
+    if spectrum is not None and bool(spectrum.aligned) != aligned:
+        if phonon_file is not None:
+            raise ValueError(
+                f"the raw data was displaced along {'aligned' if aligned else 'unaligned'} phonon modes, but "
+                f"{ph_path} is {'aligned' if spectrum.aligned else 'not aligned'}; pass the matching spectrum "
+                f"({packaged_phonon_name(aligned)})"
+            )
+        spectrum, ph_path = None, None
+    if spectrum is None and aligned and phonon_file is None and raw_zfs_file is not None:
+        found = find_default_phonon_file_for_raw(raw_zfs_file, aligned=True)
+        if found is not None:
+            ph_path, spectrum = found, parse_phonon_data(found)
+
     # A phonon file found by searching (not passed explicitly) must hold the raw data's modes;
     # otherwise it belongs to another cell and the registry is asked instead.
     if spectrum is not None and phonon_file is None and not _covers(spectrum, n_needed):
@@ -287,6 +317,7 @@ def load_raw_inputs(
         reg = ensure_db()
         reg_hits = find_phonon(reg, str(defect), cell_size)
         candidates = [(p, parse_phonon_data(p)) for p in reg_hits]
+        candidates = [(p, s) for p, s in candidates if bool(s.aligned) == aligned]  # the data's kind only
         fitting = [(p, s) for p, s in candidates if _covers(s, n_needed)]
         for p, s in candidates:
             if not _covers(s, n_needed):
@@ -304,7 +335,12 @@ def load_raw_inputs(
         elif candidates:
             LOGGER.warning(f"no registry phonon file for {defect}_{cell_size} covers the raw data's modes")
     if spectrum is not None:
-        LOGGER.info(f"phonon data: {ph_path}")
+        LOGGER.info(f"phonon data: {ph_path}" + (" (aligned modes)" if aligned else ""))
+    elif aligned:
+        raise FileNotFoundError(
+            f"the raw data of {defect}_{cell_size} was displaced along mirror-aligned phonon modes, and no "
+            f"{packaged_phonon_name(True)} was found next to it or in the registry; pass it with --phonon-file"
+        )
     else:
         LOGGER.warning(f"no phonon data for {defect}_{cell_size}; mode frequencies and symmetries are unknown")
 
@@ -437,7 +473,7 @@ def run_full_pipeline(
     coupling_file: str | Path | None = None,
     phonon_file: str | Path | None = None,
     two_phonon_file: str | Path | None = None,
-    calc_method: str = "all_bands",
+    calc_method: str = "AO",
     zfs_folder: str | None = None,
     order: list[int] | int | None = None,
     pert_scale: float | None = None,
@@ -455,6 +491,7 @@ def run_full_pipeline(
     exclude_inconsistent_pairs: bool = False,
     degenerate_pairs_from_symmetry: bool = False,
     offdiag_from_diagonal: bool = False,
+    mirror_projection: bool = False,
     sigma: float = DEFAULT_SIGMA_MEV,
     b_field_mt: float = 0.0,
     direct: str = "gaussian",
@@ -508,6 +545,7 @@ def run_full_pipeline(
             exclude_inconsistent_pairs=exclude_inconsistent_pairs,
             degenerate_pairs_from_symmetry=degenerate_pairs_from_symmetry,
             offdiag_from_diagonal=offdiag_from_diagonal,
+            mirror_projection=mirror_projection,
             sigma=sigma,
             b_field_mt=b_field_mt,
             direct=direct,
@@ -528,7 +566,7 @@ def _execute_pipeline(
     coupling_file: str | Path | None = None,
     phonon_file: str | Path | None = None,
     two_phonon_file: str | Path | None = None,
-    calc_method: str = "all_bands",
+    calc_method: str = "AO",
     zfs_folder: str | None = None,
     order: int | None = None,
     pert_scale: float | None = None,
@@ -546,6 +584,7 @@ def _execute_pipeline(
     exclude_inconsistent_pairs: bool = False,
     degenerate_pairs_from_symmetry: bool = False,
     offdiag_from_diagonal: bool = False,
+    mirror_projection: bool = False,
     sigma: float = DEFAULT_SIGMA_MEV,
     b_field_mt: float = 0.0,
     direct: str = "gaussian",
@@ -586,8 +625,8 @@ def _execute_pipeline(
         # A single explicitly requested order pins the parsing/branch scalar.
         order = user_orders[0]
 
-    if zfs_folder is None:
-        zfs_folder = "ZFS_hyp" if calc_method == "all_bands" else "ZFS_occup"
+    # zfs_folder None: the parser takes the method's ground-state folder (ZFS_AO / ZFS_UO, or a legacy name)
+    calc_method = normalize_calc_method(calc_method) or calc_method
 
     raw_data: RawZFSData | None = None
     spectrum: PhononSpectrum | None = None
@@ -637,10 +676,11 @@ def _execute_pipeline(
             if raw_data.calc_method not in (None, "None", ""):
                 calc_method = raw_data.calc_method
             elif raw_zfs_file:
-                for cm in ("all_bands", "defect_band_approx", "approx"):
-                    if cm in str(raw_zfs_file):
-                        calc_method = "all_bands" if cm == "all_bands" else "defect_band_approx"
-                        break
+                from spinlabs.methods import method_from_path
+                from spinlabs.utils import relative_to_cwd
+
+                paths = raw_zfs_file if isinstance(raw_zfs_file, (list, tuple)) else [raw_zfs_file]
+                calc_method = method_from_path(" ".join(relative_to_cwd(p) for p in paths)) or calc_method
 
         # Orders actually present in the input data; ``dims`` is the single
         # source of truth for what the data contains, ``order`` keeps the
@@ -729,6 +769,9 @@ def _execute_pipeline(
     coupling_path = run_dir / "spin_phonon_coupling.npz"
     inconsistent_pairs: list[tuple[int, int, float, float]] = []
     symmetry_derived_pairs: list[tuple[int, int]] = []
+    mirror_projected: list[int] = []
+    mirror_inherited: list[tuple[int, int]] = []
+    mirror_uncorrected: list[int] = []
     offdiag_filled = offdiag_filled_a_x_e = 0
     if coupling_data is not None:
         coupling_data.save(coupling_path)
@@ -740,6 +783,7 @@ def _execute_pipeline(
             exclude_inconsistent_pairs=exclude_inconsistent_pairs,
             degenerate_pairs_from_symmetry=degenerate_pairs_from_symmetry,
             offdiag_from_diagonal=offdiag_from_diagonal,
+            mirror_projection=mirror_projection,
         )
         if calc_method:
             manager.calc_method = calc_method
@@ -764,6 +808,9 @@ def _execute_pipeline(
         symmetry_derived_pairs = manager.symmetry_derived_pairs
         offdiag_filled = manager.n_offdiag_filled
         offdiag_filled_a_x_e = manager.n_offdiag_filled_a_x_e
+        mirror_projected = manager.mirror_projected
+        mirror_inherited = manager.mirror_inherited
+        mirror_uncorrected = manager.mirror_uncorrected
 
     # ── 6. Transition Rates Calculation ──────────────────────────────────────
     # Initial states against the spin of the couplings, for every spin (S = 1 included), before any rates
@@ -912,6 +959,15 @@ def _execute_pipeline(
             "enabled": offdiag_from_diagonal,
             "pairs_filled": offdiag_filled,
             "a_x_e_pairs_filled": offdiag_filled_a_x_e,
+        },
+        # Forward diagonal second differences with their odd-in-Q error removed by mirror symmetry
+        # (1-based modes): projected (mirror-odd), even partners given their odd twin's couplings,
+        # and E diagonals that could not be corrected.
+        "mirror_projection": {
+            "enabled": mirror_projection,
+            "projected": [i + 1 for i in mirror_projected],
+            "inherited": [f"{i + 1}<-{t + 1}" for i, t in mirror_inherited],
+            "uncorrected": [i + 1 for i in mirror_uncorrected],
         },
     }
 

@@ -7,7 +7,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from spinlabs.vasp import build_zfs_tree, default_phonon, resolve_sym_phonon, sbatch_time
+from spinlabs.vasp import default_phonon, resolve_sym_phonon, sbatch_time
 
 
 @pytest.fixture
@@ -70,31 +70,6 @@ def test_default_phonon_in_data_folder(defect):
 def test_sbatch_time_rounds_up():
     assert sbatch_time(0.1) == "0:01:00"
     assert sbatch_time(3661) == "1:02:00"
-
-
-def test_build_zfs_tree(tmp_path):
-    inp = tmp_path / "NV_512"
-    (inp / "data").mkdir(parents=True)
-    (inp / "template" / "relax").mkdir(parents=True)
-    (inp / "data" / "POSCAR").write_text("poscar\n")
-    (inp / "template" / "relax" / "INCAR").write_text("INCAR\n")
-
-    out = build_zfs_tree(inp, out=tmp_path / "tree")
-    assert (out / "data" / "POSCAR").is_file()
-    for stage in ("relaxation_data", "ZFS_hyp", "ZFS_occup"):
-        assert (out / stage / "POSCAR").is_file()
-        assert (out / stage / "INCAR").is_file()
-
-
-def test_build_zfs_tree_refuses_overwrite(tmp_path):
-    inp = tmp_path / "NV_512"
-    (inp / "data").mkdir(parents=True)
-    (inp / "template" / "relax").mkdir(parents=True)
-    (inp / "data" / "POSCAR").write_text("poscar\n")
-    (inp / "template" / "relax" / "INCAR").write_text("INCAR\n")
-    build_zfs_tree(inp, out=tmp_path / "tree")
-    with pytest.raises(FileExistsError):
-        build_zfs_tree(inp, out=tmp_path / "tree")
 
 
 def test_patch_restart_incar_rewrites_flags():
@@ -167,33 +142,21 @@ def test_perturbation_input_incar_is_restart_ready(tmp_path):
         vasp_binary=Path("/bin/true"),
     )
     assert failures == []
-    incar = (defect / "first_order" / "pert_0.0001" / "all_bands" / "input" / "INCAR").read_text()
+    incar = (defect / "first_order" / "pert_0.0001" / "AO" / "input" / "INCAR").read_text()
     for name, value in (("ISTART", "0"), ("ICHARG", "1"), ("LWAVE", ".TRUE."), ("LCHARG", ".TRUE.")):
         vals = re.findall(rf"^\s*{name}\s*=\s*(.+?)\s*(?:!|#|$)", incar, re.M | re.I)
         assert vals, name
         assert vals[-1] == value, name
 
 
-def test_forbid_sym_ldmatrix_corrects_isym_12():
-    from spinlabs.vasp.trees import forbid_sym_ldmatrix
+def test_symmetry_off_sets_isym_0():
+    from spinlabs.vasp.trees import symmetry_off
 
-    for isym in ("1", "2"):
-        out, warning = forbid_sym_ldmatrix(f"ISYM = {isym}\nLDMATRIX = .TRUE.\n")
-        assert re.search(r"^\s*ISYM\s*=\s*3\b", out, re.M | re.I)
-        assert warning is not None and f"ISYM={isym}" in warning
-
-
-def test_forbid_sym_ldmatrix_leaves_valid_incars_alone():
-    from spinlabs.vasp.trees import forbid_sym_ldmatrix
-
-    cases = (
-        "ISYM = 3\nLDMATRIX = .TRUE.\n",  # already safe
-        "LDMATRIX = .TRUE.\n",  # no ISYM tag
-        "ISYM = 2\nENCUT = 520\n",
-    )  # no LDMATRIX
-    for incar in cases:
-        out, warning = forbid_sym_ldmatrix(incar)
-        assert warning is None and out == incar
+    for incar in ("ISYM = 3\nLDMATRIX = .TRUE.\n", "ISYM = 2  # sym\n", "LDMATRIX = .TRUE.\n"):
+        out, note = symmetry_off(incar)
+        assert re.findall(r"^\s*ISYM\s*=\s*(-?\d+)", out, re.M) == ["0"]
+        assert note is not None and "ISYM=0" in note
+    assert symmetry_off("ISYM = 0\n") == ("ISYM = 0\n", None)
 
 
 def test_perturbation_input_incar_corrects_algo_none(tmp_path, caplog):
@@ -221,15 +184,19 @@ def test_perturbation_input_incar_corrects_algo_none(tmp_path, caplog):
         vasp_binary=Path("/bin/true"),
     )
     assert failures == []
-    incar = (defect / "first_order" / "pert_0.0001" / "all_bands" / "input" / "INCAR").read_text()
+    incar = (defect / "first_order" / "pert_0.0001" / "AO" / "input" / "INCAR").read_text()
     assert re.search(r"^\s*ALGO\s*=\s*Normal\b", incar, re.M | re.I)
     assert "ALGO=None" not in incar
     out = caplog.text
     assert "WARN" in out and "ALGO=Normal" in out
 
 
-def test_perturbation_input_incar_corrects_isym_with_ldmatrix(tmp_path, caplog):
-    """ISYM=1/2 with LDMATRIX in the source INCAR is corrected to 3."""
+@pytest.mark.parametrize("isym_line", ["ISYM = 2\n", "ISYM = 3\n", ""])
+def test_perturbation_input_incar_turns_symmetry_off(tmp_path, caplog, isym_line):
+    """Perturbed runs use ISYM=0 whatever the ZFS run had (ISYM=3 failed on inverse rotations)."""
+    import logging
+
+    caplog.set_level(logging.INFO, logger="spinlabs")
     from spinlabs.vasp import build_perturbation_tree
 
     defect = tmp_path / "NV_512"
@@ -238,7 +205,7 @@ def test_perturbation_input_incar_corrects_isym_with_ldmatrix(tmp_path, caplog):
     for stage in ("ZFS_hyp", "ZFS_occup"):
         d = defect / stage
         d.mkdir()
-        (d / "INCAR").write_text("ENCUT = 520\nISYM = 2\nLDMATRIX = .TRUE.\n")
+        (d / "INCAR").write_text(f"ENCUT = 520\n{isym_line}LDMATRIX = .TRUE.\n")
         for name in ("POSCAR", "KPOINTS", "POTCAR"):
             (d / name).write_text(name + "\n")
         (d / "OUTCAR").write_text("Elapsed time (sec):   100.000\n")
@@ -253,10 +220,9 @@ def test_perturbation_input_incar_corrects_isym_with_ldmatrix(tmp_path, caplog):
         vasp_binary=Path("/bin/true"),
     )
     assert failures == []
-    incar = (defect / "first_order" / "pert_0.0001" / "all_bands" / "input" / "INCAR").read_text()
-    assert re.search(r"^\s*ISYM\s*=\s*3\b", incar, re.M | re.I)
-    out = caplog.text
-    assert "WARN" in out and "ISYM=2" in out and "LDMATRIX" in out
+    incar = (defect / "first_order" / "pert_0.0001" / "AO" / "input" / "INCAR").read_text()
+    assert re.findall(r"^\s*ISYM\s*=\s*(\S+)", incar, re.M | re.I) == ["0"]
+    assert "ISYM=0" in caplog.text
 
 
 def test_forbid_relaxation_corrects_ibrion():
@@ -290,7 +256,7 @@ def _verify_folder(
     tmp_path,
     script="DEFECT=NV_512\nBINARY={bin}\n"
     "PHONON_PATH={phon}\nSPINLABS_REPO={repo}\nPERT=0.025\n",
-    incar="LDMATRIX = .TRUE.\nALGO = Normal\nIBRION = -1\n",
+    incar="LDMATRIX = .TRUE.\nALGO = Normal\nIBRION = -1\nISYM = 0\n",
 ):
     from spinlabs.vasp.verify import verify_setup
 

@@ -128,7 +128,7 @@ def test_unweighted_tree_keeps_q_times_e_through_generation_structures_and_packa
         capture_output=True, text=True, cwd=tmp_path, env=env,
     )
     assert r.returncode == 0, r.stdout + r.stderr
-    basis = defect / "first_order" / "pert_0.1" / "all_bands"
+    basis = defect / "first_order" / "pert_0.1" / "AO"
     assert re.search(r"^DISPLACEMENT=unweighted\b", (basis / "run_perturbation_first_order.sh").read_text(), re.M)
     assert tree_displacement(basis) == "unweighted"
 

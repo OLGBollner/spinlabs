@@ -202,7 +202,7 @@ def test_analyse_measures_the_linear_and_quadratic_terms(tmp_path):
     report = rows[1][-1]
     assert report.b_resolved and report.c_resolved
     assert sigma < 0.1 and offset < 0.1
-    assert column_title(tmp_path / "NV.npz") == "NV_512 all bands"
+    assert column_title(tmp_path / "NV.npz") == "NV_512 AO"
 
 
 def test_the_2q_helper_is_no_first_order_point_but_completes_the_pair_scheme(tmp_path):

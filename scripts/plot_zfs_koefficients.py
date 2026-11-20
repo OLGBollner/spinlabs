@@ -1,3 +1,4 @@
+from spinlabs.methods import method_from_path
 from argparse import ArgumentParser as Parser
 import numpy as np
 import matplotlib.pyplot as plt
@@ -62,7 +63,7 @@ if __name__ == "__main__":
             if args.difference:
                 filename += ":diff"
             else:
-                sim_type = "all_bands" if "all" in zfs_files[i] else "defect_band_approx"
+                sim_type = method_from_path(zfs_files[i]) or "AO"
 
                 filename += ":{}".format(sim_type)
         filename += args.format if args.format else ".png"

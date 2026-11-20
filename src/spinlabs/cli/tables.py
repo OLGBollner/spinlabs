@@ -5,9 +5,10 @@ from itertools import product
 import sys
 from pathlib import Path
 
+from spinlabs.methods import CLI_CHOICES, normalize_calc_method
 from spinlabs.cli import add_verbosity_args
 from spinlabs.logging_utils import get_logger
-from spinlabs.registry import ensure_db, find_packaged, more_complete, parse_orders, stored_orders
+from spinlabs.registry import ensure_db, find_packaged, more_complete, package_info, parse_orders, stored_orders
 from spinlabs.tables import (
     collect_d_rows,
     collect_t1_rows,
@@ -16,6 +17,7 @@ from spinlabs.tables import (
     render_defect_table,
     run_packages,
 )
+from spinlabs.utils import resolve_path
 
 LOGGER = get_logger(__name__)
 
@@ -46,8 +48,8 @@ def build_table_parser(subparsers: argparse._SubParsersAction) -> None:  # noqa:
         "and get a superscript letter explained in the caption.",
     )
     defects.add_argument(
-        "inputs", nargs="*", type=Path,
-        help="Defect folders (searched for packaged npz and ZFS_hyp/ZFS_occup OUTCARs) or packaged ZFS npz "
+        "inputs", nargs="*", type=resolve_path,
+        help="Defect folders (searched for packaged npz and ZFS_AO/ZFS_UO (or legacy ZFS_hyp/ZFS_occup) OUTCARs) or packaged ZFS npz "
         "files to read D from (default: every packaged ZFS file in the registry)",
     )
     _add_run_filter_args(defects)
@@ -64,8 +66,8 @@ def _add_run_filter_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--method",
         nargs="+",
-        choices=["all", "approx"],
-        help="Only 'all' (all_bands) and/or 'approx' (defect_band_approx) runs",
+        choices=CLI_CHOICES,
+        help="Only all/AO (all orbitals), unpaired/UO (unpaired orbitals) and/or decont (full decontamination) runs",
     )
     parser.add_argument(
         "--order", nargs="+", type=int, choices=[1, 2, 12], help="Only runs containing these perturbation orders"
@@ -75,14 +77,14 @@ def _add_run_filter_args(parser: argparse.ArgumentParser) -> None:
 
 def _add_output_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
-        "-r", "--output-root", default="runs",
+        "-r", "--output-root", type=resolve_path, default="runs",
         help="Root folder holding run directories (default: runs); used to resolve runs stored from another host",
     )
-    parser.add_argument("-o", "--output", type=Path, help="Write the table to this .tex file (default: print to stdout)")
+    parser.add_argument("-o", "--output", type=resolve_path, help="Write the table to this .tex file (default: print to stdout)")
     add_verbosity_args(parser)
 
 
-_METHODS = {"all": "all_bands", "approx": "defect_band_approx"}
+_METHODS = {name: normalize_calc_method(name) for name in CLI_CHOICES}  # --method value -> calc_method
 
 
 def _filters(args: argparse.Namespace) -> list[tuple[str, object]]:
@@ -140,12 +142,11 @@ def _latest_package_per_method(conn, args: argparse.Namespace) -> list[Path]:
     best: dict[tuple, tuple[frozenset[int], Path, int]] = {}
     for defect, cell, method in product(args.defect or [None], args.cell_size or [None], args.method or [None]):
         for path in find_packaged(conn, defect=defect, cell_size=cell, calc_method=_METHODS.get(method), latest=True):
-            row = conn.execute(
-                "SELECT defect, cell_size, calc_method, pert_order, id FROM files WHERE path = ?", (str(path),)
-            ).fetchone()
-            if row is None:
+            info = package_info(conn, path)
+            if info is None:
                 continue
-            key, orders, rid = tuple(row[:3]), stored_orders(row[3]), row[4]
+            key = (info["defect"], info["cell_size"], info["calc_method"])
+            orders, rid = stored_orders(info["pert_order"]), info["id"]
             previous = best.get(key)
             if previous is None or more_complete(orders, previous[0]) and (
                 len(orders) > len(previous[0]) or rid > previous[2]

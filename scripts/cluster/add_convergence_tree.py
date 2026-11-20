@@ -2,7 +2,7 @@
 """add_convergence_tree.py -- add step-size convergence folders to an existing defect folder.
 
 Creates <defect>/convergence_test_all/ and convergence_test_occup/ (input/ from ZFS_hyp and
-ZFS_occup, and run_convergence.sh) next to the perturbation trees, as create_perturbation_tree.py
+ZFS_occup, and run_convergence.sh; with --full-decont convergence_test_decont/ from ZFS_hyp) next to the perturbation trees, as create_perturbation_tree.py
 does for a new defect. The displacement defaults to the one the defect's trees use, so the
 convergence runs match them, and the VASP binary to the one their job scripts name.
 
@@ -43,6 +43,12 @@ def main() -> int:
     ap.add_argument("--array-jobs", type=int, default=5, help="SLURM array jobs per convergence folder (default: 5)")
     ap.add_argument("--max-hours", type=float, default=None, help="cap on the per-job time limit in hours")
     ap.add_argument("--force", action="store_true", help="recreate existing convergence folders")
+    ap.add_argument(
+        "--full-decont",
+        action="store_true",
+        help="convergence_test_decont/ from ZFS_hyp, running the full spin decontamination (see "
+        "create_perturbation_tree.py --full-decont)",
+    )
     args = ap.parse_args()
 
     out = args.output.resolve()
@@ -72,6 +78,7 @@ def main() -> int:
             max_hours=args.max_hours,
             vasp_binary=args.vasp_binary.resolve() if args.vasp_binary else defect_vasp_binary(out),
             force=args.force,
+            decont=args.full_decont,
         )
     except (FileNotFoundError, ValueError) as e:
         sys.exit(f"Error: {e}")

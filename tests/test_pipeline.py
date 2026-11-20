@@ -199,7 +199,7 @@ def test_raw_zfs_file_with_both_orders_computes_order_2(tmp_path):
     cdata = SpinPhononCouplingData.load(coupling_file)
     assert cdata.has_second_order
     assert cdata.V2_0_0 is not None
-    assert cdata.calc_method == "all_bands"
+    assert cdata.calc_method == "AO"
 
     # Test 2: User passes order=None, pipeline should detect and analyze both orders
     res2 = run_full_pipeline(

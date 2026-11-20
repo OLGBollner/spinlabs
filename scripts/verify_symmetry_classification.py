@@ -1,7 +1,7 @@
 """Verify general symmetry classification against previously labeled npz files.
 
 Loads one or more phonon npz files (raw phonon_data.npz or previously
-sym-labeled phonon_data_sym_n*.npz), runs the general classify_modes, and
+sym-labeled phonon_data_sym<n>.npz, n = modes kept), runs the general classify_modes, and
 compares labels against any stored reference labels.
 
 Usage:
@@ -63,7 +63,7 @@ def main() -> int:
         help="use the legacy PhononSpectrum.analyze_c3v_symmetry instead of the general classify_modes",
     )
     args = ap.parse_args()
-    files = args.files or sorted(glob.glob("*/phonon_data.npz") + glob.glob("*/phonon_data_sym_*.npz"))
+    files = args.files or sorted(glob.glob("*/phonon_data.npz") + glob.glob("*/phonon_data_sym*.npz"))
     rc = 0
     for path in files:
         try:
