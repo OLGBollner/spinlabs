@@ -640,13 +640,13 @@ def build_perturbation_tree(
     return failures
 
 
-def zfs_sources(out: Path, decont: bool = False) -> dict[str, Path]:
+def zfs_sources(out: Path, decont: bool = False, methods: list[str] | None = None) -> dict[str, Path]:
     """method -> the defect's ground-state ZFS folder its trees take their input from: AO -> ZFS_AO and
     UO -> ZFS_UO (or their legacy names ZFS_hyp, ZFS_occup); with ``decont`` only full_decont -> ZFS_AO.
-    Each must hold the VASP input.
+    ``methods`` (AO, UO) limits the first to those. Each must hold the VASP input.
     """
     sources: dict[str, Path] = {}
-    wanted = {DECONT_BASIS: "AO"} if decont else {m: m for m in TREE_METHODS}
+    wanted = {DECONT_BASIS: "AO"} if decont else {m: m for m in (methods or TREE_METHODS)}
     for basis, source in wanted.items():
         src = ground_state_dir(out, source)
         if not src.is_dir():
@@ -674,6 +674,17 @@ def _make_room(dst: Path, force: bool) -> bool:
 def defect_trees(out: Path) -> list[Path]:
     """A defect's perturbation tree folders (first_order/pert_*/<basis>, then second_order)."""
     return sorted(out.glob("first_order/pert_*/*")) + sorted(out.glob("second_order/pert_*/*"))
+
+
+def defect_steps(out: Path) -> list[float]:
+    """The steps p of a defect's perturbation trees (<order>/pert_<p>/), sorted by size; empty without trees."""
+    steps: set[float] = set()
+    for tree in defect_trees(out):
+        try:
+            steps.add(abs(float(tree.parent.name.removeprefix("pert_"))))
+        except ValueError:
+            continue
+    return sorted(steps)
 
 
 def defect_displacement(out: Path) -> str | None:
@@ -731,6 +742,7 @@ def build_convergence_tree(
     force: bool = False,
     decont: bool = False,
     ground_state: bool = True,
+    methods: list[str] | None = None,
 ) -> list[str]:
     """Step-size convergence folders of a defect: <out>/convergence_test_<AO|UO>/ (or the legacy test_all/occup).
 
@@ -741,7 +753,8 @@ def build_convergence_tree(
     defect folder and on one that already has its perturbation trees; existing convergence
     folders are kept unless `force`. With `decont`, one folder convergence_test_decont/ that runs
     the full spin decontamination (see prepare_basis), plus the defect's ground state ZFS_full
-    unless ``ground_state`` is False. Returns the list of failure messages.
+    unless ``ground_state`` is False. ``methods`` (AO, UO) builds only those folders. Returns the list of
+    failure messages.
     """
     steps = step_sizes(steps)
     if not modes or not steps:
@@ -755,7 +768,7 @@ def build_convergence_tree(
     section(LOGGER, f"Convergence folders {out.name}: modes {modes}, steps {steps}, {displacement} displacements")
     if decont and ground_state:
         failures.extend(build_decont_ground_state(out, vasp_binary=vasp_binary, max_hours=max_hours, force=force))
-    for basis, src in zfs_sources(out, decont=decont).items():
+    for basis, src in zfs_sources(out, decont=decont, methods=methods).items():
         dst = convergence_dir(out, basis)  # an existing legacy-named folder is kept
         if not _make_room(dst, force):
             continue

@@ -9,7 +9,18 @@ spinlabs init tree NV_64 <inputs>     # NV_64/relax/ (POSCAR, INCAR, KPOINTS, PO
 spinlabs init zfs NV_64/relax --method all        # ZFS_AO: the ZFS run with the EIGENVAL occupations
 spinlabs init zfs NV_64/relax --method unpaired   # ZFS_UO: only the unpaired orbitals occupied
 spinlabs init zfs NV_64/relax --method decont     # ZFS_full: SCF + one ALGO=None run per spin sublevel
+spinlabs init convergence NV_64 --pert 0.025      # pick convergence modes, show them, ask, then build
+                                                  # convergence_test_AO/ and convergence_test_UO/
 ```
+
+`spinlabs init convergence` symmetrizes the phonons (as for the trees), then picks `-n` (default 6)
+varied modes: the most localized (largest IPR), the lowest- and highest-frequency, the mode of each
+irrep nearest the defect (P_2bond), the most bulk-like (smallest IPR) and the most defect-centred,
+filling the rest by the widest gap in (frequency, log IPR, P_2bond). It prints each with its mode
+number, frequency, irrep, IPR, P_2bond, <r> and why it was picked, then asks
+`create convergence runs of modes? [Y/n]:` (`-y` skips the question; `--modes` runs given modes
+instead). `--method` takes all, unpaired and/or decont (default all unpaired); the step defaults to
+that of the defect's trees and the displacement to theirs (normalized without trees).
 
 Each ground-state folder gets `run_ground_state.sh` (submit with `sh run_ground_state.sh`): ZFS_AO and
 ZFS_UO are one self-consistent ZFS run (ALGO from the relaxation, NSW = 0, IBRION = -1, ISYM = 0,
@@ -119,7 +130,7 @@ from that snapshot.
   (.done) are flagged, since their results keep the old value; --skip-done leaves them out.
 - `add_convergence_tree.py`: add the convergence folders to an existing defect folder
   (`--modes`, and `--steps` or `--pert`); the displacement and VASP binary default to the
-  ones its trees use.
+  ones its trees use. `spinlabs init convergence` does the same and picks the modes for you.
 - `update_tree_scripts.sh`: put the current templates into existing trees and convergence
   folders, keeping each script's `#SBATCH` lines, config and displacement (an older
   convergence script becomes `run_convergence.sh`), and copy in the current
