@@ -491,7 +491,7 @@ def test_package_copies_full_phonon_spectrum(tmp_path, monkeypatch):
     _tree(tmp_path)
     db = _registry(monkeypatch, tmp_path)
     (tmp_path / "NV_512" / "phonon_data.npz").write_bytes(b"full")
-    (tmp_path / "NV_512" / "phonon_data_sym_n1022.npz").write_bytes(b"sym")
+    (tmp_path / "NV_512" / "phonon_data_sym1022.npz").write_bytes(b"sym")
     with _patch(lambda **kw: _raw(order=kw["order"])):
         _run(_make_args(tmp_path))
 
