@@ -17,8 +17,8 @@ from typing import NamedTuple
 
 from spinlabs.cli import add_verbosity_args
 from spinlabs.logging_utils import attach_db_logging, section
-from spinlabs.models import RawZFSData, normalize_calc_method
-from spinlabs.vasp.trees import tree_displacement
+from spinlabs.models import PACKAGED_PHONON_NAME, RawZFSData, normalize_calc_method
+from spinlabs.vasp.trees import full_spectrum_of, tree_displacement, tree_phonon
 from spinlabs.registry import SUBLEVEL_KINDS, ensure_db, register_file
 from spinlabs.pack_convergence import ConvergenceScan, save_convergence, scan_convergence
 from spinlabs.decont import high_spin
@@ -208,6 +208,9 @@ class _Scanned(NamedTuple):
     displacement: str | None = None
     # Full spin decontamination: {sublevel: data}, one file each; raw is the high-spin (ms = S) one
     sublevels: dict[str, RawZFSData] | None = None
+    # Full phonon spectrum of the file the trees' job scripts displace along (PHONON_PATH), saved next
+    # to the dataset; None when the scripts name none (older trees: the defect's phonon file is used)
+    phonon: Path | None = None
 
 
 _DISPLACEMENT_TEXT = {
@@ -316,6 +319,7 @@ def _scan_raw(args: argparse.Namespace, defect_folder: Path, methods: list[str])
             raw = None
             trees = {}
             weighting: set[bool] = set()
+            phonons: set[Path] = set()
             for o in orders:
                 if pert_scale not in datasets[o]:
                     continue
@@ -323,7 +327,7 @@ def _scan_raw(args: argparse.Namespace, defect_folder: Path, methods: list[str])
                     sim_folder=datasets[o][pert_scale], order=_ORDER_NUM[o], calc_method=method, verbose=True
                 )
                 raw = data if raw is None else raw.combine(data)
-                _note_tree(basis_dir(datasets[o][pert_scale], calc_method), _ORDER_DIRS[o], trees, weighting)
+                _note_tree(basis_dir(datasets[o][pert_scale], calc_method), _ORDER_DIRS[o], trees, weighting, phonons)
             if central and raw is not None:
                 minus_dir = _minus_folder(pert_scale)
                 if minus_dir is None:
@@ -334,7 +338,7 @@ def _scan_raw(args: argparse.Namespace, defect_folder: Path, methods: list[str])
                     continue
                 minus = parse_zfs_simulation_dataset(sim_folder=minus_dir, order=1, calc_method=method, verbose=True)
                 raw = raw.with_minus(minus)
-                _note_tree(basis_dir(minus_dir, calc_method), "first_order_minus", trees, weighting)
+                _note_tree(basis_dir(minus_dir, calc_method), "first_order_minus", trees, weighting, phonons)
             if raw is None or not (raw.first_order or raw.second_order):
                 LOGGER.warning(f"{defect_folder.name} {calc_method} pert {pert_scale:g}: no ZFS data parsed; skipped")
                 continue
@@ -345,14 +349,38 @@ def _scan_raw(args: argparse.Namespace, defect_folder: Path, methods: list[str])
                     f"different displacements ({', '.join(sorted(weighting))}); they are not consistent"
                 )
             convention = weighting.pop() if len(weighting) == 1 else None
-            found.append(_Scanned(defect, cell_size, calc_method, pert_scale, raw, convention))
+            phonon, problem = _dataset_phonon(phonons)
+            if problem:
+                LOGGER.error(f"{defect_folder.name} {calc_method} pert {pert_scale:g}: {problem}; skipped")
+                continue
+            found.append(_Scanned(defect, cell_size, calc_method, pert_scale, raw, convention, phonon=phonon))
     return found
 
 
-def _note_tree(basis: Path, key: str, trees: dict, weighting: set) -> None:
-    """Record a tree's VASP settings, unfinished runs and displacement convention."""
+def _dataset_phonon(named: set[Path]) -> tuple[Path | None, str | None]:
+    """(full spectrum, None) of the phonon file the dataset's trees name; (None, reason) when it cannot be paired.
+
+    (None, None) when no job script names one (older trees: the defect's phonon file is used). Every tree
+    of a dataset must name the same file, and its full spectrum must match it (vasp.trees.full_spectrum_of).
+    """
+    if not named:
+        return None, None
+    if len(named) > 1:
+        return None, "the trees' job scripts name different phonon files (" + ", ".join(sorted(map(str, named))) + ")"
+    try:
+        return full_spectrum_of(next(iter(named))), None
+    except ValueError as error:
+        return None, f"cannot pair the data with its phonon spectrum: {error}"
+
+
+def _note_tree(basis: Path, key: str, trees: dict, weighting: set, phonons: set | None = None) -> None:
+    """Record a tree's VASP settings, unfinished runs, displacement convention and phonon file."""
     if not basis.is_dir():
         return
+    if phonons is not None:
+        named = tree_phonon(basis)
+        if named is not None:
+            phonons.add(named)
     trees[key] = tree_settings(basis)
     unfinished = unfinished_runs(basis)
     if unfinished is not None:
@@ -374,6 +402,7 @@ def _scan_decont(
         sets: dict[str, RawZFSData] | None = None
         trees: dict = {}
         weighting: set = set()
+        phonons: set[Path] = set()
         name = f"{defect_folder.name} full_decont pert {pert_scale:g}"
 
         def merge(sets, parsed):
@@ -389,7 +418,7 @@ def _scan_decont(
                 if folder is None or not (folder / "full_decont").is_dir():
                     continue
                 sets = merge(sets, parse_decont_dataset(folder, order=_ORDER_NUM[o], verbose=True))
-                _note_tree(folder / "full_decont", _ORDER_DIRS[o], trees, weighting)
+                _note_tree(folder / "full_decont", _ORDER_DIRS[o], trees, weighting, phonons)
             if central and sets is not None:
                 minus_dir = minus_folder(pert_scale)
                 if minus_dir is None or not (minus_dir / "full_decont").is_dir():
@@ -399,7 +428,7 @@ def _scan_decont(
                 if set(minus) != set(sets):
                     raise ValueError(f"the -Q tree has spin sublevels {sorted(minus)}, the +Q tree {sorted(sets)}")
                 sets = {lv: sets[lv].with_minus(minus[lv]) for lv in sets}
-                _note_tree(minus_dir / "full_decont", "first_order_minus", trees, weighting)
+                _note_tree(minus_dir / "full_decont", "first_order_minus", trees, weighting, phonons)
         except ValueError as error:
             LOGGER.warning(f"{name}: {error}; skipped")
             continue
@@ -412,8 +441,12 @@ def _scan_decont(
         if len(weighting) > 1:
             LOGGER.warning(f"{name}: the trees use different displacements ({', '.join(sorted(weighting))})")
         convention = weighting.pop() if len(weighting) == 1 else None
+        phonon, problem = _dataset_phonon(phonons)
+        if problem:
+            LOGGER.error(f"{name}: {problem}; skipped")
+            continue
         found.append(
-            _Scanned(defect, cell_size, "full_decont", pert_scale, sets[high_spin(sets)], convention, sets)
+            _Scanned(defect, cell_size, "full_decont", pert_scale, sets[high_spin(sets)], convention, sets, phonon)
         )
     return found
 
@@ -436,7 +469,6 @@ def _run_folder_settings(folder: Path) -> dict[str, str] | None:
 # Full-spectrum phonon files, most preferred first. Symmetry-reduced spectra
 # (``*sym*``) are skipped: packaged mode indices refer to the full spectrum.
 _PHONON_NAMES = ("phonon_data.npz", "phonons.npz")
-PACKAGED_PHONON_NAME = "phonon_data.npz"
 
 
 def _find_phonon_npz(defect_folder: Path) -> Path | None:
@@ -495,6 +527,8 @@ def _print_scan_summary(scanned: list[_Scanned], phonons: dict[tuple[str, int], 
         )
         if s.sublevels:
             print(f"{'':<12} one file per spin sublevel: {', '.join(s.sublevels)}")
+        if s.phonon is not None:
+            print(f"{'':<12} phonon spectrum (from the job scripts): {s.phonon}")
     if phonons:
         print("\nPhonon data:")
         for (defect, cell_size), path in phonons.items():
@@ -608,6 +642,12 @@ def _save_raw(scanned: list[_Scanned], output_root: Path, cli_unweighted: bool =
                 spin_sublevel=raw.spin_sublevel,
             )
             LOGGER.info(f"saved raw ZFS data: {save_path}")
+        if s.phonon is not None:
+            # The spectrum the runs were displaced along, where the analysis looks first
+            # (pipeline.find_default_phonon_file_for_raw); found by location, not registered.
+            dest = pert_folder / PACKAGED_PHONON_NAME
+            shutil.copy2(s.phonon, dest)
+            LOGGER.info(f"saved phonon data with the dataset: {dest} (copied from {s.phonon})")
 
 
 _DICT_ORDER_SUFFIXES = {
@@ -644,6 +684,10 @@ def _register_only(data_path: Path) -> None:
     for npz_path in sorted(data_path.rglob("*.npz")):
         if npz_path.name == PACKAGED_PHONON_NAME:
             defect, cell_size = split_defect_folder_name(npz_path.parent.name)
+            if cell_size is None and any(p.name != PACKAGED_PHONON_NAME for p in npz_path.parent.glob("*.npz")):
+                # the spectrum kept with a dataset: found by location (next to its data), not registered
+                LOGGER.debug(f"phonon data kept with its dataset, not registered: {npz_path}")
+                continue
             if cell_size is None:
                 LOGGER.warning(f"phonon file outside a <defect>_<cell> folder, not registered: {npz_path}")
                 skipped += 1

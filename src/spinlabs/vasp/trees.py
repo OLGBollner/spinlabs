@@ -11,7 +11,13 @@ from pathlib import Path
 
 from spinlabs.parsers import parse_phonon_data, save_phonon_npz
 from spinlabs.vasp.modes import mode_numbers
-from spinlabs.symmetry import classify_and_pair, filter_degenerate_partners, symmetrize_degenerate_groups
+from spinlabs.symmetry import (
+    SymmetryDetectionError,
+    align_degenerate_pairs,
+    classify_and_pair,
+    filter_degenerate_partners,
+    symmetrize_degenerate_groups,
+)
 
 from spinlabs.logging_utils import get_logger, section
 from spinlabs.utils import resolve_path
@@ -41,6 +47,9 @@ SUBLEVEL_TIME_FRACTION = 0.1  # time of one ALGO=None sublevel run, as a fractio
 
 _DISPLACEMENT_LINE = re.compile(r"^\s*DISPLACEMENT\s*=\s*(\S+)", re.M)
 _MASS_WEIGHTED_LINE = re.compile(r"^\s*MASS_WEIGHTED\s*=\s*(\S+)", re.M)
+_PHONON_PATH_LINE = re.compile(r"^\s*PHONON_PATH\s*=\s*(\S+)", re.M)
+# A symmetry-reduced phonon file: <stem>_sym<n>[_aligned].npz (older files: <stem>_sym_n<n>.npz).
+_SYM_PART = re.compile(r"_sym(?:_n)?\d+")
 
 
 def tree_displacement(folder: Path) -> str | None:
@@ -383,26 +392,90 @@ def default_phonon(out: Path) -> Path:
     return out / "data" / "phonon_data.npz"
 
 
-def resolve_sym_phonon(out: Path, phonon: Path) -> Path:
+def resolve_sym_phonon(out: Path, phonon: Path, align: bool = True) -> Path:
     """Return the symmetrised phonon file for the perturbation runs.
 
-    Looks in <defect>/data for phonon_data_sym<n>.npz (n = filtered mode
-    count); if missing, classifies, symmetrises and filters `phonon` and
-    saves the reduced set there first.
+    Classifies, symmetrises and filters `phonon` (one mode per degenerate set). With ``align``
+    (the default) every degenerate E set is first rotated onto one mirror plane
+    (symmetry.align_degenerate_pairs): the runs use <defect>/data/phonon_data_sym<n>_aligned.npz
+    and the analysis the aligned full spectrum phonon_data_aligned.npz next to it (``spinlabs
+    package`` pairs each dataset with the full spectrum of the file its job script names). A
+    structure that cannot be aligned (no C3v, or a set off +-1) falls back to the classified-only
+    phonon_data_sym<n>.npz. An existing file of that name is reused.
     """
     data = out / "data"
     spectrum = parse_phonon_data(phonon)
     classify_and_pair(spectrum)
     symmetrized = symmetrize_degenerate_groups(spectrum)
-    symmetrized.aligned = False  # classified only; spinlabs symmetrize --align writes aligned files
+    symmetrized.aligned = False  # classified only, unless aligned below
+    if align:
+        try:
+            aligned = align_degenerate_pairs(symmetrized)
+        except (SymmetryDetectionError, NotImplementedError, ValueError) as error:
+            LOGGER.info(f"phonon modes not aligned to a mirror plane ({error}); the runs use the symmetrised file")
+        else:
+            if aligned.aligned:
+                symmetrized = aligned
+            else:
+                LOGGER.warning("not every degenerate E set could be aligned; the runs use the symmetrised file")
     filtered = filter_degenerate_partners(symmetrized)
-    target = data / f"phonon_data_sym{filtered.n_modes}.npz"
+    stub = "_aligned" if symmetrized.aligned else ""
+    target = data / f"phonon_data_sym{filtered.n_modes}{stub}.npz"
+    full = data / f"phonon_data{stub}.npz"
+    if symmetrized.aligned and not full.is_file():
+        save_phonon_npz(symmetrized, full)
+        LOGGER.info(f"saved the aligned full phonon spectrum: {full} ({symmetrized.n_modes} modes)")
     if target.is_file():
         LOGGER.info(f"symmetrised phonon data (existing file): {target}")
         return target
     save_phonon_npz(filtered, target)
     LOGGER.info(f"saved symmetrised phonon data: {target} ({filtered.n_modes} of {spectrum.n_modes} modes)")
     return target
+
+
+def tree_phonon(folder: Path) -> Path | None:
+    """The phonon file a tree's job script in ``folder`` displaces along (its PHONON_PATH), or None.
+
+    A ${PHONON_PATH:-x} default counts as x; None when no run_*.sh sets it (older scripts).
+    """
+    for script in sorted(Path(folder).glob("run_*.sh")):
+        match = _PHONON_PATH_LINE.search(script.read_text(errors="replace"))
+        if match:
+            value = re.sub(r"^\$\{PHONON_PATH:?-(.*)\}$", r"\1", match.group(1).strip("'\""))
+            return Path(value.strip("'\""))
+    return None
+
+
+def full_spectrum_of(phonon: Path) -> Path:
+    """The full phonon spectrum (every mode) that belongs to the phonon file a tree displaced along.
+
+    A full spectrum is its own. A symmetry-reduced <stem>_sym<n>[_aligned].npz belongs to
+    <stem>[_aligned].npz next to it (spinlabs symmetrize and resolve_sym_phonon write that pair); it
+    counts only when it has the reduced file's n_full modes and holds each kept vector at the kept
+    mode's index, so data displaced along aligned vectors is never paired with the original spectrum.
+    Raises ValueError (with the reason) otherwise.
+    """
+    import numpy as np
+
+    phonon = Path(phonon)
+    if not phonon.is_file():
+        raise ValueError(f"phonon file not found: {phonon}")
+    reduced = parse_phonon_data(phonon)
+    idx = None if reduced.original_indices is None else np.asarray(reduced.original_indices, dtype=int)
+    if idx is None or np.array_equal(idx, np.arange(reduced.n_modes)):
+        return phonon  # every mode in its own place: a full spectrum
+    full_path = phonon.with_name(_SYM_PART.sub("", phonon.stem, count=1) + phonon.suffix)
+    if full_path == phonon or not full_path.is_file():
+        raise ValueError(f"no full spectrum {full_path.name} next to the symmetry-reduced {phonon}")
+    full = parse_phonon_data(full_path)
+    n_full = reduced.n_full if reduced.n_full is not None else full.n_modes
+    if full.n_modes != n_full:
+        raise ValueError(f"{full_path} has {full.n_modes} modes, {phonon.name} was reduced from {n_full}")
+    if idx.max() >= full.n_modes or not np.allclose(
+        np.asarray(full.eigenvectors)[idx], np.asarray(reduced.eigenvectors), atol=1e-8
+    ):
+        raise ValueError(f"the modes of {phonon.name} are not those of {full_path.name} (different vectors)")
+    return full_path
 
 
 def n_modes_from_phonon(phonon: Path) -> int:

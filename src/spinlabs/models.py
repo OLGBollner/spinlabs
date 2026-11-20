@@ -80,6 +80,10 @@ def convert_energy(values: Union[float, np.ndarray], from_unit: str, to_unit: st
         raise ValueError(f"Unsupported target unit: '{to_unit}'")
 
 
+# Name of a packaged phonon spectrum: data/<defect>_<cell>/phonon_data.npz, and the copy that spinlabs
+# package keeps with a dataset (the spectrum its runs were displaced along) in the dataset's folder.
+PACKAGED_PHONON_NAME = "phonon_data.npz"
+
 # How a perturbation run displaces the atoms along mode k (e_k: unit mass-weighted eigenvector,
 # m: atomic masses, step: the tree's PERT):
 #   normalized:    step * u_k / |u_k| with u_k = e_k / sqrt(m) -- every mode moves the atoms by the
@@ -1605,6 +1609,9 @@ class RawZFSData:
         else:
             paths = [Path(in_path)]
         paths = [f for p in paths for f in (sorted(p.glob("*.npz")) if p.is_dir() else [p])]
+        # A dataset folder also holds the phonon spectrum its runs were displaced along (spinlabs package):
+        # not a ZFS package, so left out of a folder or a glob of it (kept when it is all that was given).
+        paths = [p for p in paths if p.name != PACKAGED_PHONON_NAME] or paths
         if not paths:
             raise FileNotFoundError(f"no .npz files in {in_path}")
         by_sublevel = _group_by_sublevel(paths)
