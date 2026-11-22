@@ -8,7 +8,8 @@ import pytest
 from spinlabs.cli import main
 from spinlabs.vasp.init import init_tree, init_zfs
 
-INCAR = "ENCUT = 520\nALGO = Normal\nISMEAR = 0\nIBRION = 2\nNSW = 50\nISYM = 3\nNELECT = 8\nISPIN = 2\n"
+# NCORE = 128: two band groups on the template's 2 x 128 ranks, so the 6 bands of _relaxed are kept
+INCAR = "ENCUT = 520\nALGO = Normal\nISMEAR = 0\nIBRION = 2\nNSW = 50\nISYM = 3\nNELECT = 8\nISPIN = 2\nNCORE = 128\n"
 
 
 def _tag(text, tag):
@@ -151,3 +152,40 @@ def test_init_zfs_resolves_a_relative_binary(tmp_path, monkeypatch):
     assert relax.is_dir()
     assert _tag((tmp_path / "NV_8" / "ZFS_UO" / "run_ground_state.sh").read_text(), "binary") == str(
         tmp_path / "bin" / "vasp_std")
+
+
+# -- NBANDS fitted to the ground-state job, so VASP keeps it and DOCCUP/DOCCDO fit -----------------------
+
+
+def test_zfs_rounds_nbands_up_to_the_band_groups_of_the_job(tmp_path):
+    out = init_tree("NV_8", _inputs(tmp_path), parent=tmp_path)
+    relax = _relaxed(out)
+    (relax / "INCAR").write_text(INCAR.replace("NCORE = 128", "NCORE = 32"))  # 256 ranks / 32 = 8 band groups
+    assert init_zfs(relax, "all") == [] and init_zfs(relax, "unpaired") == []
+    ao, uo = (out / "ZFS_AO" / "INCAR").read_text(), (out / "ZFS_UO" / "INCAR").read_text()
+    assert _tag(ao, "NBANDS") == "8" and _tag(uo, "NBANDS") == "8"  # the relaxation's 6, up to a multiple of 8
+    assert (_tag(ao, "DOCCUP"), _tag(ao, "DOCCDO")) == ("5*1.0 3*0.0", "3*1.0 5*0.0")  # the extra bands empty
+    assert (_tag(uo, "DOCCUP"), _tag(uo, "DOCCDO")) == ("3*0.0 2*1.0 3*0.0", "8*0.0")
+
+
+def test_zfs_decont_sublevels_follow_the_rounded_nbands(tmp_path):
+    from spinlabs.vasp.occupations import nbands_problems
+
+    out = init_tree("NV_8", _inputs(tmp_path), parent=tmp_path)
+    relax = _relaxed(out)
+    (relax / "INCAR").write_text(INCAR.replace("NCORE = 128", "NCORE = 32"))
+    assert init_zfs(relax, "decont") == []
+    for incar in [out / "ZFS_full" / "INCAR", *sorted((out / "ZFS_full").glob("ms_*/INCAR"))]:
+        text = incar.read_text()
+        assert _tag(text, "NBANDS") == "8", incar
+        assert nbands_problems(text, 256) == [], incar
+
+
+def test_zfs_replaces_a_finer_relaxation_grid_by_gamma(tmp_path, caplog):
+    out = init_tree("NV_8", _inputs(tmp_path), parent=tmp_path)
+    relax = _relaxed(out)
+    (relax / "KPOINTS").write_text("relax grid\n0\nGamma\n3 3 3\n0 0 0\n")
+    assert init_zfs(relax, "all") == []
+    kpoints = (out / "ZFS_AO" / "KPOINTS").read_text().split("\n")
+    assert kpoints[1:4] == ["0", "Gamma", "1 1 1"]
+    assert "Gamma 3 3 3, not Gamma 1 1 1" in caplog.text

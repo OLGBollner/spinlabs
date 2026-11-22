@@ -360,6 +360,25 @@ def repo_root(path: Path = TEMPLATES) -> Path:
         return next((d for d in path.parents if (d / "scripts" / "cluster").is_dir()), path.parents[-1])
 
 
+def script_ranks(text: str) -> int | None:
+    """MPI ranks a SLURM job script runs VASP on: -n/--ntasks, else nodes (-N/--nodes) x --ntasks-per-node.
+
+    None when the script says neither (VASP's band count cannot be fitted to it).
+    """
+    def sbatch(*names: str) -> int | None:
+        for name in names:
+            m = re.search(rf"^#SBATCH\s+{re.escape(name)}(?:\s+|=)(\d+)\b", text, re.M)
+            if m:
+                return int(m.group(1))
+        return None
+
+    ntasks = sbatch("-n", "--ntasks")
+    if ntasks:
+        return ntasks
+    nodes, per_node = sbatch("-N", "--nodes"), sbatch("--ntasks-per-node")
+    return nodes * per_node if nodes and per_node else None
+
+
 def replace_sbatch(text: str, directive: str, value: str) -> str:
     """Replace the value of an #SBATCH directive (e.g. -J, -t, -a)."""
     return re.sub(rf"(#SBATCH\s+{re.escape(directive)}\s+).*", rf"\g<1>{value}", text, flags=re.M)

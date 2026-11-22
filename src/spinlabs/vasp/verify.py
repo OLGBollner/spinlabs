@@ -21,7 +21,10 @@ from pathlib import Path
 
 from spinlabs.vasp.modes import mode_numbers, pair_numbers
 from spinlabs.vasp.slurm_logs import summarize, unfinished_reasons
-from spinlabs.vasp.trees import SUBLEVELS_DIR, decont_ground_state, read_outcar_time, sbatch_time, step_sizes
+from spinlabs.vasp.occupations import describe_kpoints, kpoints_is_gamma_only, nbands_problems
+from spinlabs.vasp.trees import (
+    SUBLEVELS_DIR, decont_ground_state, read_outcar_time, sbatch_time, script_ranks, step_sizes,
+)
 
 PLACEHOLDER = re.compile(r"<[^<>\s]+>")
 RUNNER = "scripts/cluster/perturbation_runner.sh"  # the loop the run scripts start
@@ -137,6 +140,16 @@ def verify_setup(folder: Path, script_name: str) -> list[str]:
 
     # --- INCAR: policy checks ---------------------------------------------
     incar = folder / "input" / "INCAR"
+    ranks = script_ranks(_read(script)) if script.is_file() else None
+    if incar.is_file():
+        # NBANDS fitted to the job and occupations listing NBANDS bands, or VASP changes NBANDS and stops
+        problems.extend(f"FAIL: INCAR {p}" for p in nbands_problems(_read(incar), ranks))
+    kpoints = folder / "input" / "KPOINTS"
+    if kpoints.is_file() and not kpoints_is_gamma_only(ktext := _read(kpoints)):
+        problems.append(
+            f"FAIL: KPOINTS is {describe_kpoints(ktext)}, not Gamma 1 1 1 -- the ZFS runs are far too slow "
+            "or fail on a finer grid"
+        )
     if not incar.is_file():
         problems.append(f"FAIL: missing {incar}")
     elif is_decont_tree(folder):
