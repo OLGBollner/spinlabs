@@ -119,7 +119,8 @@ def init_zfs(
     """
     from spinlabs.vasp.occupations import prepare_relax_to_zfs
     from spinlabs.vasp.trees import (
-        guarded_incar, read_outcar_time, write_decont_inputs, write_ground_state_script, SUBLEVEL_TIME_FRACTION,
+        GROUND_STATE_SCRIPT, TEMPLATES, guarded_incar, read_outcar_time, script_ranks, write_decont_inputs,
+        write_ground_state_script, SUBLEVEL_TIME_FRACTION,
     )
 
     relax = resolve_path(relax)
@@ -133,7 +134,10 @@ def init_zfs(
         return []
     if dst.exists() and force:
         shutil.rmtree(dst)
-    failures = prepare_relax_to_zfs(relax, dst, unpaired_only=METHODS[key].spin_corrected)
+    # NBANDS is fitted to the job run_ground_state.sh submits (its template's node and task counts), so
+    # VASP keeps it and the occupations fit; the trees' jobs use the same counts.
+    ranks = script_ranks((TEMPLATES / GROUND_STATE_SCRIPT).read_text())
+    failures = prepare_relax_to_zfs(relax, dst, unpaired_only=METHODS[key].spin_corrected, ranks=ranks)
     if failures:
         return failures
     seconds = read_outcar_time(relax)  # an upper bound: the relaxation ran several ionic steps

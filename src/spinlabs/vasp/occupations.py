@@ -43,6 +43,58 @@ def all_tag_occurrences(incar: str, tag: str) -> list[str]:
     return re.findall(rf"^\s*{tag}\s*=\s*(.+?)\s*(?:!|#|$)", incar, re.M | re.I)
 
 
+def band_groups(incar: str, ranks: int) -> int:
+    """VASP's number of band groups for an INCAR run on ``ranks`` MPI ranks: NBANDS must be a multiple of it.
+
+    NPAR when the INCAR sets it, else ranks / (NCORE x KPAR) (NCORE and KPAR default to 1). VASP raises
+    any other NBANDS to the next multiple, and occupations written for the old count (DOCCUP/DOCCDO,
+    FERWE/FERDO) then no longer fit ("Error reading item 'DOCCUP' from file INCAR"). NSIM does not enter.
+    """
+    npar = parse_tag(incar, "NPAR")
+    if npar is not None:
+        return max(1, int(float(npar)))
+    ncore = int(float(parse_tag(incar, "NCORE") or 1))
+    kpar = int(float(parse_tag(incar, "KPAR") or 1))
+    if ranks % (ncore * kpar):
+        raise ValueError(f"{ranks} MPI ranks are not a multiple of NCORE x KPAR = {ncore} x {kpar}")
+    return max(1, ranks // (ncore * kpar))
+
+
+def nbands_for_ranks(nbands: int, incar: str, ranks: int) -> int:
+    """``nbands`` raised to the next multiple of the band groups (band_groups), the count VASP keeps."""
+    groups = band_groups(incar, ranks)
+    return -(-nbands // groups) * groups
+
+
+def nbands_problems(incar: str, ranks: int | None = None) -> list[str]:
+    """Problems with an INCAR's NBANDS and its occupation lists (verify).
+
+    Each of DOCCUP/DOCCDO/FERWE/FERDO must list NBANDS bands, and with ``ranks`` NBANDS must be a
+    multiple of the band groups, or VASP changes NBANDS and fails to read the occupations.
+    """
+    nbands = parse_tag(incar, "NBANDS")
+    if nbands is None:
+        return []
+    nbands = int(float(nbands))
+    problems = []
+    for tag in ("DOCCUP", "DOCCDO", "FERWE", "FERDO"):
+        value = parse_tag(incar, tag)
+        if value is not None and (n := len(expand_occupations(value))) != nbands:
+            problems.append(f"{tag} lists {n} bands, NBANDS = {nbands}")
+    if ranks:
+        try:
+            groups = band_groups(incar, ranks)
+        except ValueError as error:
+            problems.append(str(error))
+        else:
+            if nbands % groups:
+                problems.append(
+                    f"NBANDS = {nbands} is not a multiple of the {groups} band groups ({ranks} MPI ranks); VASP "
+                    f"raises it to {nbands_for_ranks(nbands, incar, ranks)} and cannot read the occupations"
+                )
+    return problems
+
+
 def occupied_bands_from_eigenval(eigenval: Path) -> tuple[int, int, int, set[int], set[int]]:
     """Parse EIGENVAL (ISPIN=2).
 
@@ -73,17 +125,45 @@ def occupied_bands_from_eigenval(eigenval: Path) -> tuple[int, int, int, set[int
     return n_up, n_dn, nbands, unpaired_up, unpaired_dn
 
 
-def kpoints_is_gamma_only(text: str) -> bool:
-    """True if a KPOINTS file describes a Gamma-only mesh."""
+def kpoint_mesh(text: str) -> tuple[str, list[int], list[float]] | None:
+    """(``"Gamma"`` or ``"Monkhorst-Pack"``, divisions, shift) of an automatic-mesh KPOINTS, else None.
+
+    The automatic mesh: a comment, ``0``, the mesh type (G... or M...), three divisions and an optional
+    shift. Explicit k-point lists, line mode and the fully automatic length mode give None.
+    """
     lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
-    if len(lines) < 4:
-        return False
-    if lines[1].startswith("0"):
-        return lines[2].lower().startswith("g")
-    div = lines[3].split()
-    shift = lines[4].split() if len(lines) > 4 else ["0"] * 3
-    gamma = lines[2].lower().startswith("g")
-    return gamma and all(int(d) == 1 for d in div[:3]) and all(float(s) == 0 for s in shift[:3])
+    if len(lines) < 4 or lines[1].split()[0] != "0":
+        return None
+    kind = lines[2][:1].lower()
+    if kind not in ("g", "m"):
+        return None
+    try:
+        div = [int(x) for x in lines[3].split()[:3]]
+        shift = [float(x) for x in lines[4].split()[:3]] if len(lines) > 4 else [0.0, 0.0, 0.0]
+    except ValueError:
+        return None
+    if len(div) != 3:
+        return None
+    return ("Gamma" if kind == "g" else "Monkhorst-Pack"), div, shift
+
+
+def describe_kpoints(text: str) -> str:
+    """A KPOINTS file in a few words, e.g. ``Gamma 4 4 4`` (for logs)."""
+    mesh = kpoint_mesh(text)
+    if mesh is None:
+        return "not an automatic mesh (" + " / ".join(ln.strip() for ln in text.splitlines()[1:3]) + ")"
+    kind, div, shift = mesh
+    return f"{kind} {' '.join(map(str, div))}" + (f" shifted {' '.join(f'{s:g}' for s in shift)}" if any(shift) else "")
+
+
+def kpoints_is_gamma_only(text: str) -> bool:
+    """True if a KPOINTS file is the Gamma point alone: a Gamma-centred 1 1 1 mesh without shift.
+
+    The ZFS runs (ground state and perturbations) need exactly this: a finer grid multiplies the cost
+    of a supercell ZFS calculation and the LDMATRIX evaluation is set up for the Gamma point.
+    """
+    mesh = kpoint_mesh(text)
+    return mesh is not None and mesh[0] == "Gamma" and mesh[1] == [1, 1, 1] and not any(mesh[2])
 
 
 def patch_incar(
@@ -146,10 +226,14 @@ DOCCDO = {doccdo}
     return "\n".join(body_lines).rstrip() + "\n" + additions
 
 
-def prepare_relax_to_zfs(relax: Path, zfs: Path, unpaired_only: bool = False) -> list[str]:
+def prepare_relax_to_zfs(relax: Path, zfs: Path, unpaired_only: bool = False, ranks: int | None = None) -> list[str]:
     """Prepare one ZFS run directory from a finished relaxation directory.
 
     ``unpaired_only``: the UO scheme's occupations, only the unpaired orbitals (see patch_incar).
+    ``ranks``: the MPI ranks the ZFS job runs on. NBANDS (the relaxation's, from its EIGENVAL) is then
+    raised to the next multiple of VASP's band groups for that job (nbands_for_ranks, from the INCAR's
+    NCORE/KPAR/NPAR), and the occupations list the extra bands as empty; otherwise VASP would change
+    NBANDS itself and fail to read DOCCUP.
 
     Copies CONTCAR -> POSCAR, CHGCAR, POTCAR and (Gamma-only) KPOINTS,
     derives DOCCUP/DOCCDO from the EIGENVAL and patches the INCAR.  Nothing
@@ -182,15 +266,16 @@ def prepare_relax_to_zfs(relax: Path, zfs: Path, unpaired_only: bool = False) ->
     kpts_text = (relax / "KPOINTS").read_text()
     if kpoints_is_gamma_only(kpts_text):
         shutil.copy2(relax / "KPOINTS", zfs / "KPOINTS")
-        LOGGER.debug("KPOINTS already Gamma-only; copied as-is")
+        LOGGER.debug("KPOINTS is Gamma 1 1 1; copied as-is")
     else:
+        # The ZFS runs (and the trees copied from them) run at the Gamma point only: a finer grid
+        # multiplies the cost of the supercell ZFS calculation, or the run does not work at all.
         (zfs / "KPOINTS").write_text(GAMMA_KPOINTS)
         warn(
-            "KPOINTS was not Gamma-only; ZFS run needs the full k-point grid "
-            "of the relaxation -- wrote a Gamma-only KPOINTS into the ZFS dir "
-            "instead of copying"
+            f"the relaxation's KPOINTS is {describe_kpoints(kpts_text)}, not Gamma 1 1 1; the ZFS run uses "
+            "Gamma 1 1 1 (written into the ZFS dir instead of copying)"
         )
-    LOGGER.info("copied CONTCAR -> POSCAR, CHGCAR, POTCAR, KPOINTS (Gamma-only)")
+    LOGGER.info("copied CONTCAR -> POSCAR, CHGCAR, POTCAR; KPOINTS Gamma 1 1 1")
 
     if (zfs / "WAVECAR").exists():
         warn(
@@ -224,6 +309,20 @@ def prepare_relax_to_zfs(relax: Path, zfs: Path, unpaired_only: bool = False) ->
         fail(f"NUPDOWN = {nupdown} inconsistent with occupied difference {n_up} - {n_dn} = {n_up - n_dn}")
 
     incar = patch_incar(incar_text, n_up, n_dn, nbands, unp_up, unp_dn, unpaired_only=unpaired_only)
+    if ranks:
+        # the band groups of the ZFS INCAR itself (patch_incar drops KPAR, for one)
+        try:
+            run_nbands = nbands_for_ranks(nbands, incar, ranks)
+        except ValueError as error:
+            fail(f"cannot fit NBANDS to the job: {error}")
+            run_nbands = nbands
+        if run_nbands != nbands:
+            LOGGER.info(
+                f"NBANDS {nbands} -> {run_nbands}: a multiple of the {band_groups(incar, ranks)} band groups "
+                f"of the {ranks}-rank job (NCORE {parse_tag(incar, 'NCORE') or 1}, KPAR "
+                f"{parse_tag(incar, 'KPAR') or 1}); the {run_nbands - nbands} extra bands are empty"
+            )
+            incar = patch_incar(incar_text, n_up, n_dn, run_nbands, unp_up, unp_dn, unpaired_only=unpaired_only)
     (zfs / "INCAR").write_text(incar)
     LOGGER.info(
         f"wrote INCAR with NUPDOWN={n_up - n_dn}, DOCCUP={parse_tag(incar, 'DOCCUP')}, "
