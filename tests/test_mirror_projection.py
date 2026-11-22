@@ -145,19 +145,54 @@ def test_even_partner_without_a_projected_twin_is_reported_and_kept(manager, cap
     assert np.array_equal(V0pm_on, V0pm) and np.array_equal(Vpm_on, Vpm) and np.array_equal(V00_on, V00)
 
 
-def test_weakly_aligned_and_central_entries_are_left_alone(manager):
+def test_weakly_aligned_forward_entries_are_left_alone(manager):
     manager.mirror_projection = True
-    entry = _forward_entry(1, "Ex")
     manager._mirror_parity[1] = (MIRROR, -0.5)  # below MIRROR_MIN_OVERLAP: not taken as mirror-odd
-    _, _, _, V0pm_weak = _run(manager, {(1, 1): dict(entry)}, _first_order())
-    assert manager.mirror_projected == []
+    _run(manager, {(1, 1): _forward_entry(1, "Ex")}, _first_order())
+    assert manager.mirror_projected == [] and manager.mirror_projected_central == []
 
-    manager._mirror_parity[1] = (MIRROR, -1.0)
-    central = {"tensor": _D(1.0), "tensor_minus": _D(-1.0), "central": True,
-               "pert": (Q, Q), "symmetry": ("Ex", "Ex"), "ipr": (0.5, 0.5)}
-    _, _, _, V0pm_c = _run(manager, {(1, 1): central}, _first_order())
-    assert manager.mirror_projected == []  # central differences have no odd terms
-    assert np.isclose(V0pm_c[1, 1], _couplings(2.0 * C * MHZ / Q**2)[2], rtol=1e-9)
+
+# -- central differences: the noise in the mirror-forbidden part --------------------------------------------
+
+NOISE = _sym([[0.0, 0.004, 0.0], [0.0, 0.0, 0.003], [0.0, 0.0, 0.0]])  # M-antisymmetric (xy, yz), MHz
+assert np.allclose(MIRROR @ NOISE @ MIRROR, -NOISE)
+
+
+def _central_entry(sym, noise=0.0):
+    """+-Q runs of D(q) (odd terms cancel in the central difference), with ``noise`` added to the +Q run."""
+    return {"tensor": _D(1.0) + noise * NOISE * MHZ, "tensor_minus": _D(-1.0), "central": True,
+            "pert": (Q, Q), "symmetry": (sym, sym), "ipr": (0.5, 0.5)}
+
+
+def test_central_projection_removes_the_forbidden_noise_for_either_parity(manager):
+    exact = _couplings(2.0 * C * MHZ / Q**2)
+    entries = {(1, 1): _central_entry("Ex", noise=1.0), (2, 2): _central_entry("Ey", noise=1.0)}
+    _, V00, Vpm, V0pm = _run(manager, entries, _first_order())  # default: off, the noise adds in quadrature
+    assert manager.mirror_projected_central == []
+    assert V0pm[1, 1] > exact[2] and Vpm[1, 1] > exact[1]
+
+    manager.mirror_projection = True
+    _, V00, Vpm, V0pm = _run(manager, entries, _first_order())
+    # mode 1 is mirror-odd, mode 2 mirror-even: both central diagonals are projected
+    assert manager.mirror_projected_central == [1, 2]
+    assert manager.mirror_projected == [] and manager.mirror_inherited == []  # the forward scheme's lists
+    for k in (1, 2):
+        assert np.allclose([V00[k, k], Vpm[k, k], V0pm[k, k]], exact, rtol=1e-9)
+
+
+def test_central_projection_needs_a_well_aligned_mode(manager):
+    manager.mirror_projection = True
+    manager._mirror_parity[1] = (MIRROR, -0.95)  # enough for the forward scheme, not for central data
+    _, _, _, V0pm = _run(manager, {(1, 1): _central_entry("Ex", noise=1.0)}, _first_order())
+    assert manager.mirror_projected_central == []
+    assert V0pm[1, 1] > _couplings(2.0 * C * MHZ / Q**2)[2]  # left as measured
+
+
+def test_noise_free_central_data_is_unchanged_by_the_projection(manager):
+    manager.mirror_projection = True
+    _, _, _, V0pm = _run(manager, {(1, 1): _central_entry("Ex")}, _first_order())
+    assert manager.mirror_projected_central == [1]
+    assert np.isclose(V0pm[1, 1], _couplings(2.0 * C * MHZ / Q**2)[2], rtol=1e-9)
 
 
 def test_non_c3v_structure_skips_the_projection_with_a_warning(manager, caplog):

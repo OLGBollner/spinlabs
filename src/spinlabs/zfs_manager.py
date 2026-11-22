@@ -35,6 +35,10 @@ MIN_EXPECTED_MHZ = 0.05
 # counts as mirror-odd when its overlap with its best sigma_v (symmetry.mirror_parities) is at most
 # minus this. Every E partner reaches |chi| >= 0.866 with one of the three planes, A modes +-1.
 MIRROR_MIN_OVERLAP = 0.8
+# Central second differences are projected for every mode aligned with its mirror to at least this
+# |overlap|, whatever its parity (see _mirror_project_central). For a mode rotated inside its degenerate
+# pair the projection also cuts real coupling, by about 1 - |overlap|; the threshold keeps that below 1 %.
+MIRROR_MIN_OVERLAP_CENTRAL = 0.99
 
 
 class ZFSManager:
@@ -142,6 +146,7 @@ class ZFSManager:
         # symmetry; see calculate_second_order_derivatives. 0-based modes, filled per call:
         self.mirror_projection = mirror_projection
         self.mirror_projected: list[int] = []  # mirror-odd modes whose d2D was projected
+        self.mirror_projected_central: list[int] = []  # aligned modes whose central d2D was projected
         self.mirror_inherited: list[tuple[int, int]] = []  # (even partner, odd twin) taking the twin's couplings
         self.mirror_uncorrected: list[int] = []  # forward E diagonals neither projected nor inherited
         # {mode: (mirror matrix in the cell frame, overlap)}, computed on first use; None until then.
@@ -531,6 +536,7 @@ class ZFSManager:
 
         no_first_order = []
         self.mirror_projected, self.mirror_inherited, self.mirror_uncorrected = [], [], []
+        self.mirror_projected_central = []
         forward_diagonal: set[int] = set()  # modes whose (i, i) came from a forward (pair) run
         diagonal_done: set[int] = set()  # modes whose own (i, i) coupling was computed
         computed_pairs: set[tuple[int, int]] = set()  # (i, j), i <= j, whose coupling came from a run
@@ -600,6 +606,8 @@ class ZFSManager:
                 forward_diagonal.add(i)
                 if self.mirror_projection:
                     d2D_dqidqj = self._mirror_project(i, d2D_dqidqj)
+            elif i == j and self.mirror_projection:
+                d2D_dqidqj = self._mirror_project_central(i, d2D_dqidqj)
 
             zfs_2nd_derivs[i, j] = d2D_dqidqj
             zfs_2nd_derivs[j, i] = d2D_dqidqj
@@ -653,6 +661,18 @@ class ZFSManager:
 
         if self.mirror_projection:
             self._mirror_inherit(forward_diagonal, V_0_0_2nd, V_p_m_2nd, V_0_pm_2nd)
+            central_e = [
+                i for i in diagonal_done - forward_diagonal
+                if self.spectrum is not None and str(self.spectrum.symmetries[i]) in ("Ex", "Ey")
+            ]
+            if central_e:
+                skipped = len(set(central_e) - set(self.mirror_projected_central))
+                LOGGER.info(
+                    f"mirror projection: {len(self.mirror_projected_central)} central diagonals projected "
+                    f"(the noise in their mirror-forbidden part removed)"
+                    + (f"; {skipped} central E diagonals not aligned with a mirror "
+                       f"(|overlap| < {MIRROR_MIN_OVERLAP_CENTRAL}) left as they are" if skipped else "")
+                )
 
         # A degenerate twin without its own diagonal run inherits its partner's diagonal
         # coupling (the spectrum owns the pairing). Fill-only, as for first order: a twin
@@ -754,6 +774,25 @@ class ZFSManager:
         rot = self.eigen_rotation if self.eigen_rotation is not None else np.eye(3)
         M = rot.T @ parity[0] @ rot  # the stored tensors are in the D0 principal frame (R.T D R)
         self.mirror_projected.append(i)
+        return 0.5 * (d2D + M @ d2D @ M.T)
+
+    def _mirror_project_central(self, i: int, d2D: np.ndarray) -> np.ndarray:
+        """The central diagonal second derivative of mode i without the noise in its mirror-forbidden part.
+
+        A mode aligned with a mirror M (|overlap| >= MIRROR_MIN_OVERLAP_CENTRAL) is mapped by it onto +Q
+        or -Q, so its true second derivative obeys D'' = M D'' M whatever its parity. The central
+        difference (D(Q) + D(-Q) - 2 D0) / Q^2 has no odd terms, so its M-antisymmetric part is the
+        SCF noise of the runs alone (for E modes, one of the two components of Delta1 and of Delta2,
+        which the magnitudes |p|, |w| would otherwise add in quadrature); (d2D + M d2D M) / 2 drops it.
+        Modes rotated inside their degenerate pair (phonon files that are not mirror-aligned) are left
+        as they are: there the projection would also cut real coupling.
+        """
+        parity = self._mirror_parities().get(i)
+        if parity is None or abs(parity[1]) < MIRROR_MIN_OVERLAP_CENTRAL:
+            return d2D
+        rot = self.eigen_rotation if self.eigen_rotation is not None else np.eye(3)
+        M = rot.T @ parity[0] @ rot
+        self.mirror_projected_central.append(i)
         return 0.5 * (d2D + M @ d2D @ M.T)
 
     def _mirror_inherit(

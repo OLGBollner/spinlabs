@@ -45,11 +45,13 @@ def add_coupling_args(opt: argparse._ArgumentGroup) -> None:
         "--mirror-projection",
         action=argparse.BooleanOptionalAction,
         default=True,
-        help="Remove the odd-in-Q error of forward diagonal second differences (D(2Q) - 2 D(Q) + D0) by mirror "
-        "symmetry (C3v): a mode that a sigma_v maps onto -Q keeps the mirror-symmetric part of its d2D, and its "
-        "mirror-even E partner takes its couplings. Central (+-Q) data is unaffected; A1 modes and E partners "
-        "without a computed odd twin cannot be corrected and are listed (default: on; --no-mirror-projection "
-        "turns it off)",
+        help="Use mirror symmetry (C3v) on the diagonal second differences, whose true value is symmetric under "
+        "the mode's sigma_v. Forward (D(2Q) - 2 D(Q) + D0): a mode that the mirror maps onto -Q keeps the "
+        "mirror-symmetric part of its d2D (its odd-in-Q error removed) and its mirror-even E partner takes its "
+        "couplings; A1 modes and E partners without a computed odd twin cannot be corrected and are listed. "
+        "Central (D(Q) + D(-Q) - 2 D0): every mode aligned with a mirror keeps the mirror-symmetric part (the noise "
+        "in the forbidden part removed); modes rotated inside their pair are left as they are "
+        "(default: on; --no-mirror-projection turns it off)",
     )
 
 

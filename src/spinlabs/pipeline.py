@@ -770,6 +770,7 @@ def _execute_pipeline(
     inconsistent_pairs: list[tuple[int, int, float, float]] = []
     symmetry_derived_pairs: list[tuple[int, int]] = []
     mirror_projected: list[int] = []
+    mirror_projected_central: list[int] = []
     mirror_inherited: list[tuple[int, int]] = []
     mirror_uncorrected: list[int] = []
     offdiag_filled = offdiag_filled_a_x_e = 0
@@ -809,6 +810,7 @@ def _execute_pipeline(
         offdiag_filled = manager.n_offdiag_filled
         offdiag_filled_a_x_e = manager.n_offdiag_filled_a_x_e
         mirror_projected = manager.mirror_projected
+        mirror_projected_central = manager.mirror_projected_central
         mirror_inherited = manager.mirror_inherited
         mirror_uncorrected = manager.mirror_uncorrected
 
@@ -966,6 +968,8 @@ def _execute_pipeline(
         "mirror_projection": {
             "enabled": mirror_projection,
             "projected": [i + 1 for i in mirror_projected],
+            # central diagonals of mirror-aligned modes, the noise in their forbidden part removed
+            "projected_central": [i + 1 for i in mirror_projected_central],
             "inherited": [f"{i + 1}<-{t + 1}" for i, t in mirror_inherited],
             "uncorrected": [i + 1 for i in mirror_uncorrected],
         },

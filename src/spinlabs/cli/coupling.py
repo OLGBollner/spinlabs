@@ -197,7 +197,8 @@ def _summary(manager, ph_path, first, second, top: int, modes: list[int]) -> str
         )
         if manager.mirror_projection:
             lines.append(
-                f"  mirror projection: {len(manager.mirror_projected)} forward diagonals projected, "
+                f"  mirror projection: {len(manager.mirror_projected)} forward and "
+                f"{len(manager.mirror_projected_central)} central diagonals projected, "
                 f"{len(manager.mirror_inherited)} even partners from their odd twin, "
                 f"{len(manager.mirror_uncorrected)} E diagonals uncorrected"
             )
