@@ -262,6 +262,61 @@ def test_package_without_phonon_path_keeps_the_old_behaviour(tmp_path, monkeypat
     assert _tag(raw_file) is None
 
 
+# -- a symmetry-reduced file is never packaged as the defect's full spectrum --------------------------------------
+
+
+def _reduced_defect_spectrum(folder, name="phonon_data.npz"):
+    """A reduced spectrum (modes 0 and 2 of 3) under the name of the defect's full one."""
+    folder.mkdir(parents=True, exist_ok=True)
+    _spectrum(FULL[[0, 2]], original=[0, 2], n_full=3).save(folder / name)
+    return folder / name
+
+
+def test_package_passes_over_a_reduced_phonon_data_npz(tmp_path, monkeypatch, caplog):
+    _reduced_defect_spectrum(tmp_path / "NV_512" / "data")
+    _package(tmp_path, monkeypatch, "BINARY=/x/vasp")  # no PHONON_PATH: the defect's file is found by name
+    assert not (tmp_path / "data" / "NV_512" / "phonon_data.npz").exists()
+    assert "symmetry-reduced phonon .npz not packaged" in caplog.text and "2 of 3 modes" in caplog.text
+
+
+def test_package_takes_the_full_spectrum_next_to_a_reduced_one(tmp_path, monkeypatch):
+    _reduced_defect_spectrum(tmp_path / "NV_512" / "data")
+    full = tmp_path / "NV_512" / "data" / "phonons.npz"
+    _spectrum(FULL).save(full)
+    _package(tmp_path, monkeypatch, "BINARY=/x/vasp")
+    assert (tmp_path / "data" / "NV_512" / "phonon_data.npz").read_bytes() == full.read_bytes()
+
+
+def test_conv_passes_over_a_reduced_phonon_data_npz(tmp_path, monkeypatch, caplog):
+    _reduced_defect_spectrum(tmp_path / "NV_512" / "data")
+    packs, registered = _conv_package(tmp_path, monkeypatch, {"convergence_test_all": "BINARY=/x/vasp"})
+    assert len(packs) == 1  # the convergence data itself is packaged
+    assert not (tmp_path / "data" / "NV_512" / "phonon_data.npz").exists()
+    assert not any(kind == "phonon" for kind, _ in registered)
+    assert "symmetry-reduced phonon .npz not packaged" in caplog.text
+
+
+def test_older_reduced_files_are_recognised_from_their_keys(tmp_path):
+    from spinlabs.cli.package import _npz_reduced_reason
+
+    legacy = tmp_path / "phonon_data.npz"  # the legacy key names: freqs, idx, no n_full
+    np.savez(legacy, freqs=np.array([10.0, 30.0]), eigs=np.zeros((2, 1, 3)), atoms=np.zeros((1, 3)),
+             atom_symbols=np.array(["C"]), lattice=np.eye(3), idx=np.array([0, 2]))
+    assert "indices into a larger spectrum" in _npz_reduced_reason(legacy)
+    no_indices = tmp_path / "phonons.npz"
+    np.savez(no_indices, freqs=np.array([10.0, 30.0]), atom_symbols=np.array(["C"]))
+    assert "a full spectrum has 3" in _npz_reduced_reason(no_indices)
+    _spectrum(FULL).save(tmp_path / "full.npz")
+    assert _npz_reduced_reason(tmp_path / "full.npz") is None
+
+
+def test_full_spectrum_of_refuses_a_reduced_file_without_indices(tmp_path):
+    path = tmp_path / "phonon_data_sym2.npz"
+    _spectrum(FULL[:2]).save(path)  # 2 modes of a 1-atom cell, indices 0, 1: looks like its own full spectrum
+    with pytest.raises(ValueError, match="symmetry-reduced"):
+        full_spectrum_of(path)
+
+
 # -- spinlabs package --conv: the same pairing for the convergence runs ------------------------------------------
 
 

@@ -17,7 +17,13 @@ from typing import NamedTuple
 
 from spinlabs.cli import add_verbosity_args
 from spinlabs.logging_utils import attach_db_logging, section
-from spinlabs.models import ALIGNED_PHONON_NAME, PACKAGED_PHONON_NAME, RawZFSData, normalize_calc_method
+from spinlabs.models import (
+    ALIGNED_PHONON_NAME,
+    PACKAGED_PHONON_NAME,
+    RawZFSData,
+    normalize_calc_method,
+    reduced_reason,
+)
 from spinlabs.vasp.trees import full_spectrum_of, tree_displacement, tree_phonon
 from spinlabs.registry import SUBLEVEL_KINDS, ensure_db, register_file
 from spinlabs.pack_convergence import ConvergenceScan, save_convergence, scan_convergence
@@ -548,26 +554,74 @@ def _run_folder_settings(folder: Path) -> dict[str, str] | None:
 _PHONON_NAMES = ("phonon_data.npz", "phonons.npz")
 
 
+def _npz_reduced_reason(path: Path) -> str | None:
+    """models.reduced_reason of a phonon .npz from its keys alone (loading the spectrum would classify its
+    modes, minutes for a large cell); None when the file does not say (no mode count, or not readable as
+    an npz: it is copied as before, and loading it for the analysis reports the problem)."""
+    def value(data, *keys):
+        for key in keys:
+            if key in data.files:
+                item = data[key]
+                return None if item.dtype == object and item.ndim == 0 and item.item() is None else item
+        return None
+
+    try:
+        with np.load(path, allow_pickle=True) as data:
+            freqs = value(data, "frequencies", "frequencies_mev", "freqs")
+            symbols = value(data, "atom_symbols")
+            n_full = value(data, "n_full")
+            indices = value(data, "original_indices", "idx")
+            if freqs is None:
+                return None
+            return reduced_reason(
+                len(np.atleast_1d(freqs)),
+                len(symbols) if symbols is not None else None,
+                int(n_full) if n_full is not None else None,
+                np.asarray(indices, dtype=int) if indices is not None and np.ndim(indices) == 1 else None,
+            )
+    except Exception:  # noqa: BLE001 -- np.load raises pickle and zip errors of its own on a non-npz file
+        return None
+
+
 def _find_phonon_npz(defect_folder: Path) -> Path | None:
     """The full-spectrum phonon .npz of a defect, or None (with a warning).
 
-    Looks in <defect>/data/ (where the VASP trees keep it) before the defect folder itself.
+    Looks in <defect>/data/ (where the VASP trees keep it) before the defect folder itself. A
+    symmetry-reduced file is never taken, whatever its name (models.reduced_reason): it would be packaged
+    as the defect's full spectrum.
     """
     search_dirs = [default_phonon(defect_folder).parent, defect_folder]
+    reduced: list[str] = []
+
+    def is_full(path: Path) -> bool:
+        reason = _npz_reduced_reason(path)
+        if reason is not None:
+            reduced.append(f"{path.name} ({reason})")
+        return reason is None
+
+    tried = []
     for folder in search_dirs:
         for name in _PHONON_NAMES:
-            if (folder / name).is_file():
-                return folder / name
+            path = folder / name
+            if path.is_file():
+                tried.append(path)
+                if is_full(path):
+                    return path
     candidates = sorted(p for folder in search_dirs for p in folder.glob("*phonon*.npz"))
     # Mirror-aligned spectra (spinlabs symmetrize --align, resolve_sym_phonon) are other vectors than the
     # phonon code's: they are packaged as phonon_data_aligned.npz from the job scripts, never as the defect's.
-    full = [p for p in candidates if "sym" not in p.stem and "aligned" not in p.stem]
+    full = [p for p in candidates if "sym" not in p.stem and "aligned" not in p.stem and p not in tried and is_full(p)]
     if len(full) == 1:
         return full[0]
     if full:
         LOGGER.warning(
             f"{defect_folder.name}: several phonon .npz files ({', '.join(p.name for p in full)}); "
             f"rename the full spectrum to {PACKAGED_PHONON_NAME} to package it"
+        )
+    elif reduced:
+        LOGGER.warning(
+            f"{defect_folder.name}: symmetry-reduced phonon .npz not packaged as the defect's spectrum: "
+            f"{', '.join(reduced)}; put the full spectrum (every mode) in data/{PACKAGED_PHONON_NAME}"
         )
     elif candidates:
         LOGGER.warning(

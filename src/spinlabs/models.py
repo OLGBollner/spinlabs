@@ -300,14 +300,21 @@ def reduced_spectrum_reason(spectrum) -> Optional[str]:
     ``original_indices`` into the full spectrum it was reduced from (``n_full`` modes); older reduced
     files carry only the indices, or nothing but the lower mode count.
     """
-    n, n_atoms = spectrum.n_modes, spectrum.n_atoms
-    full = spectrum.n_full if spectrum.n_full is not None else 3 * n_atoms
-    if spectrum.n_full is not None and spectrum.n_full > n:
-        return f"{n} of {spectrum.n_full} modes"
-    oi = spectrum.original_indices
-    if oi is not None and not np.array_equal(np.asarray(oi), np.arange(n)):
+    return reduced_reason(spectrum.n_modes, spectrum.n_atoms, spectrum.n_full, spectrum.original_indices)
+
+
+def reduced_reason(
+    n_modes: int, n_atoms: Optional[int], n_full: Optional[int] = None, original_indices=None
+) -> Optional[str]:
+    """reduced_spectrum_reason from the numbers alone (a phonon file's keys, without loading it):
+    the mode count, the atom count (None: unknown), the recorded full size and the mode indices."""
+    n = n_modes
+    if n_full is not None and n_full > n:
+        return f"{n} of {n_full} modes"
+    if original_indices is not None and not np.array_equal(np.asarray(original_indices), np.arange(n)):
+        full = n_full if n_full is not None else (3 * n_atoms if n_atoms else "more")
         return f"{n} modes, at indices into a larger spectrum of {full} modes"
-    if n < 3 * n_atoms:
+    if n_atoms and n < 3 * n_atoms:
         return f"{n} modes for {n_atoms} atoms (a full spectrum has {3 * n_atoms})"
     return None
 

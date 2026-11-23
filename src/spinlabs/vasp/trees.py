@@ -491,7 +491,11 @@ def full_spectrum_of(phonon: Path) -> Path:
     reduced = parse_phonon_data(phonon)
     idx = None if reduced.original_indices is None else np.asarray(reduced.original_indices, dtype=int)
     if idx is None or np.array_equal(idx, np.arange(reduced.n_modes)):
-        return phonon  # every mode in its own place: a full spectrum
+        # every mode in its own place: a full spectrum, unless modes are missing (a reduced file without indices)
+        reason = reduced_spectrum_reason(reduced)
+        if reason is not None:
+            raise ValueError(f"{phonon} is symmetry-reduced ({reason}) and does not say which full spectrum it is from")
+        return phonon
     full_path = phonon.with_name(_SYM_PART.sub("", phonon.stem, count=1) + phonon.suffix)
     if full_path == phonon or not full_path.is_file():
         raise ValueError(f"no full spectrum {full_path.name} next to the symmetry-reduced {phonon}")
