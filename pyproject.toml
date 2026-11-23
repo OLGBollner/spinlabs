@@ -13,6 +13,7 @@ dependencies = [
     "pymatgen",
     "matplotlib",
     "pyyaml",
+    "sv-ttk>=2.6",
 ]
 
 [project.optional-dependencies]

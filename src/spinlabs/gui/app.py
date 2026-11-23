@@ -187,7 +187,7 @@ class PackTab(ttk.Frame):
         self._last_render_keys: dict[int, tuple | None] = {0: None, 1: None}
         self._last_report_key: tuple | None = None
 
-        self.nested = ttk.Notebook(self, style="Sub.TNotebook")
+        self.nested = ttk.Notebook(self)
         # Ttk notebook pages must be children of the notebook, not of PackTab.
         self.summary_view = FigureHost(self.nested)
         self.mode_page = ttk.Frame(self.nested, style="Card.TFrame")
@@ -784,17 +784,17 @@ class ConvergenceApp:
         ttk.Button(bar, text="Open…", command=self.open_files, style="Accent.TButton").pack(
             side=tk.LEFT, padx=(0, 6)
         )
-        ttk.Button(bar, text="Refresh", command=self.refresh_registry, style="Toolbar.TButton").pack(
+        ttk.Button(bar, text="Refresh", command=self.refresh_registry).pack(
             side=tk.LEFT, padx=(0, 2)
         )
-        ttk.Button(bar, text="Save figure", command=self.save_figure, style="Toolbar.TButton").pack(
+        ttk.Button(bar, text="Save figure", command=self.save_figure).pack(
             side=tk.LEFT, padx=(0, 2)
         )
-        ttk.Button(bar, text="Export CSV", command=self.export_csv, style="Toolbar.TButton").pack(
+        ttk.Button(bar, text="Export CSV", command=self.export_csv).pack(
             side=tk.LEFT, padx=(0, 2)
         )
         ttk.Separator(bar, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y, padx=8, pady=2)
-        ttk.Button(bar, text="Close tab", command=self.close_tab, style="Ghost.TButton").pack(side=tk.LEFT)
+        ttk.Button(bar, text="Close tab", command=self.close_tab).pack(side=tk.LEFT)
         ttk.Label(
             bar, text="Convergence data, fits and spin–phonon channels", style="CardMuted.TLabel",
         ).pack(side=tk.RIGHT, padx=(8, 0))
@@ -823,7 +823,7 @@ class ConvergenceApp:
         self.main_paned.add(self.sidebar, minsize=300, width=360)
         self.content = ttk.Frame(self.main_paned, style="Card.TFrame")
         self.main_paned.add(self.content, stretch="always")
-        self.side_notebook = ttk.Notebook(self.sidebar, style="Side.TNotebook")
+        self.side_notebook = ttk.Notebook(self.sidebar)
         self.side_notebook.pack(fill=tk.BOTH, expand=True, padx=(8, 4), pady=(4, 4))
         self.registry_tab = ttk.Frame(self.side_notebook, style="Card.TFrame", padding=(8, 8))
         self.view_tab = ttk.Frame(self.side_notebook, style="Card.TFrame", padding=(8, 8))
@@ -843,13 +843,13 @@ class ConvergenceApp:
             justify=tk.CENTER, style="CardMuted.TLabel", font=(self.family, 10),
         )
         self.welcome_label.pack(expand=True)
-        self.notebook = ttk.Notebook(self.content, style="Main.TNotebook")
+        self.notebook = ttk.Notebook(self.content)
         self.notebook.bind("<<NotebookTabChanged>>", self._on_tab_changed)
         self.welcome.pack(fill=tk.BOTH, expand=True)
 
     def _build_registry_tab(self) -> None:
         pad = {"padx": 4, "pady": 3}
-        box = ttk.LabelFrame(self.registry_tab, text="Filters", style="Card.TLabelframe")
+        box = ttk.LabelFrame(self.registry_tab, text="Filters")
         box.pack(fill=tk.X, padx=6, pady=4)
         self._filter_row(box, "Defect", self.filter_defect, 0)
         self._filter_row(box, "Cell", self.filter_cell, 1)
@@ -857,7 +857,7 @@ class ConvergenceApp:
         self._filter_row(box, "Displacement", self.filter_displacement, 3)
         ttk.Checkbutton(box, text="Latest only", variable=self.latest_only,
                         command=self.refresh_registry).grid(row=4, column=0, columnspan=2, sticky="w", **pad)
-        ttk.Button(box, text="Refresh", command=self.refresh_registry, style="Toolbar.TButton").grid(
+        ttk.Button(box, text="Refresh", command=self.refresh_registry).grid(
             row=5, column=0, columnspan=2, sticky="ew", **pad
         )
         self.group_tree = ttk.Treeview(
@@ -871,7 +871,7 @@ class ConvergenceApp:
         self.group_tree.pack(fill=tk.BOTH, expand=True, padx=6, pady=4)
         self.group_tree.bind("<<TreeviewSelect>>", lambda _e: self._show_group_schemes())
         self.group_tree.bind("<Double-1>", lambda _e: self.open_selected_group())
-        self.schemes_frame = ttk.LabelFrame(self.registry_tab, text="Schemes", style="Card.TLabelframe")
+        self.schemes_frame = ttk.LabelFrame(self.registry_tab, text="Schemes")
         self.schemes_frame.pack(fill=tk.BOTH, expand=True, padx=6, pady=4)
         ttk.Button(
             self.registry_tab, text="Open / update tab", command=self.open_selected_group,
@@ -879,10 +879,10 @@ class ConvergenceApp:
         ).pack(fill=tk.X, padx=0, pady=(6, 6))
         buttons = ttk.Frame(self.registry_tab)
         buttons.pack(fill=tk.X, padx=6, pady=(0, 6))
-        ttk.Button(buttons, text="Open file…", command=self.open_files, style="Toolbar.TButton").pack(
+        ttk.Button(buttons, text="Open file…", command=self.open_files).pack(
             side=tk.LEFT, expand=True, fill=tk.X
         )
-        ttk.Button(buttons, text="Open folder…", command=self.open_folder, style="Toolbar.TButton").pack(
+        ttk.Button(buttons, text="Open folder…", command=self.open_folder).pack(
             side=tk.LEFT, expand=True, fill=tk.X, padx=(4, 0)
         )
 
@@ -895,16 +895,16 @@ class ConvergenceApp:
         parent.columnconfigure(1, weight=1)
 
     def _build_view_tab(self) -> None:
-        box = ttk.LabelFrame(self.view_tab, text="Difference scheme", style="Card.TLabelframe")
+        box = ttk.LabelFrame(self.view_tab, text="Difference scheme")
         box.pack(fill=tk.X, padx=6, pady=4)
         ttk.Checkbutton(box, text="Forward", variable=self.forward_var).pack(anchor=tk.W, padx=6, pady=2)
         self.central_check = ttk.Checkbutton(box, text="Central (−Q runs)", variable=self.central_var)
         self.central_check.pack(anchor=tk.W, padx=6, pady=2)
-        quality = ttk.LabelFrame(self.view_tab, text="Summary quantity", style="Card.TLabelframe")
+        quality = ttk.LabelFrame(self.view_tab, text="Summary quantity")
         quality.pack(fill=tk.X, padx=6, pady=4)
         ttk.Combobox(quality, textvariable=self.display_var, values=("Norm", "Coupling channels"),
                      state="readonly").pack(fill=tk.X, padx=6, pady=4)
-        columns = ttk.LabelFrame(self.view_tab, text="Columns and dates", style="Card.TLabelframe")
+        columns = ttk.LabelFrame(self.view_tab, text="Columns and dates")
         columns.pack(fill=tk.BOTH, expand=True, padx=6, pady=4)
         self.columns_frame = ttk.Frame(columns, style="Card.TFrame")
         self.columns_frame.pack(fill=tk.X, padx=4, pady=4)
@@ -934,13 +934,13 @@ class ConvergenceApp:
         self.mode_tree.bind("<ButtonRelease-1>", self._on_mode_click)
         buttons = ttk.Frame(self.modes_tab, style="Card.TFrame")
         buttons.pack(fill=tk.X, pady=(0, 4))
-        ttk.Button(buttons, text="All", command=lambda: self._mode_bulk(True), style="Toolbar.TButton").pack(
+        ttk.Button(buttons, text="All", command=lambda: self._mode_bulk(True)).pack(
             side=tk.LEFT, expand=True, fill=tk.X
         )
-        ttk.Button(buttons, text="None", command=lambda: self._mode_bulk(False), style="Toolbar.TButton").pack(
+        ttk.Button(buttons, text="None", command=lambda: self._mode_bulk(False)).pack(
             side=tk.LEFT, expand=True, fill=tk.X, padx=4
         )
-        ttk.Button(buttons, text="Invert", command=self._mode_invert, style="Toolbar.TButton").pack(
+        ttk.Button(buttons, text="Invert", command=self._mode_invert).pack(
             side=tk.LEFT, expand=True, fill=tk.X
         )
         ttk.Label(
@@ -949,7 +949,7 @@ class ConvergenceApp:
         ).pack(anchor=tk.W, pady=(0, 4))
 
     def _build_advanced_tab(self) -> None:
-        box = ttk.LabelFrame(self.advanced_tab, text="Analysis parameters", style="Card.TLabelframe")
+        box = ttk.LabelFrame(self.advanced_tab, text="Analysis parameters")
         box.pack(fill=tk.X, padx=6, pady=4)
         rows = [
             ("Noise σ / MHz", self.noise_var, "auto"),
@@ -967,7 +967,7 @@ class ConvergenceApp:
                 )
                 self.noise_entry = entry
         box.columnconfigure(1, weight=1)
-        flags = ttk.LabelFrame(self.advanced_tab, text="Mode detail", style="Card.TLabelframe")
+        flags = ttk.LabelFrame(self.advanced_tab, text="Mode detail")
         flags.pack(fill=tk.X, padx=6, pady=4)
         ttk.Checkbutton(flags, text="Drop Q=0 anchor from fits", variable=self.drop_anchor_var).pack(
             anchor=tk.W, padx=6, pady=2
@@ -976,7 +976,7 @@ class ConvergenceApp:
             anchor=tk.W, padx=6, pady=2
         )
         ttk.Checkbutton(flags, text="Quadratic fit", variable=self.quad_var).pack(anchor=tk.W, padx=6, pady=2)
-        phonon = ttk.LabelFrame(self.advanced_tab, text="Phonon symmetry", style="Card.TLabelframe")
+        phonon = ttk.LabelFrame(self.advanced_tab, text="Phonon symmetry")
         phonon.pack(fill=tk.X, padx=0, pady=(8, 0))
         ttk.Label(
             phonon, text="Full spectrum for labels and frequencies", style="CardMuted.TLabel",
@@ -995,7 +995,7 @@ class ConvergenceApp:
         self._update_noise_sensitivity()
 
     def _build_report(self) -> None:
-        self.report_notebook = ttk.Notebook(self.report_frame, style="Sub.TNotebook")
+        self.report_notebook = ttk.Notebook(self.report_frame)
         self.report_notebook.pack(fill=tk.BOTH, expand=True)
         table_tab = ttk.Frame(self.report_notebook, style="Card.TFrame", padding=(8, 8))
         details_tab = ttk.Frame(self.report_notebook, style="Card.TFrame", padding=(8, 8))
@@ -1341,7 +1341,9 @@ class ConvergenceApp:
         for child in self.columns_frame.winfo_children():
             child.destroy()
         for row, column in enumerate(tab.columns):
-            ttk.Label(self.columns_frame, text=column.label).grid(row=row, column=0, sticky="w", padx=2, pady=1)
+            ttk.Label(self.columns_frame, text=column.label, style="Card.TLabel").grid(
+                row=row, column=0, sticky="w", padx=2, pady=1
+            )
             var = tk.StringVar(value=column.date)
             combo = ttk.Combobox(
                 self.columns_frame, textvariable=var, state="readonly", width=12,

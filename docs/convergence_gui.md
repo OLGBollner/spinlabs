@@ -168,8 +168,10 @@ Each tab has nested **Summary** and **Mode detail** views.
 
 ## Appearance
 
-The window uses a light card theme (white panels on a soft grey background,
-dark header, one blue accent) with flat controls, generous padding, larger
-treeview rows and a consistent type scale.  `src/spinlabs/gui/theme.py` owns the
-palette and ttk styles; it has no extra dependencies.  Matplotlib's on-screen
-figures use the same surface colours, muted axes and typography.
+The window uses the Sun Valley ttk theme (the Windows 11-style `sv-ttk`), with a
+dark header, white cards on a soft grey surface, one blue accent and a
+consistent type scale.  `src/spinlabs/gui/theme.py` owns the small custom layer
+and falls back to the previous dependency-free clam theme if `sv-ttk` is not
+installed.  `sv-ttk` is a declared dependency; reinstall with
+`pip install -e .` after pulling this change.  Matplotlib's on-screen figures
+use matching surface colours, muted axes and typography.
