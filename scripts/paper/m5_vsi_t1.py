@@ -7,6 +7,8 @@ difference between the two doublets relaxes, the Kramers-partner rates are zero)
 Experiment, only datasets in experimental_data/V_Si, never interpolated: Simin et al. (2017), 1/T1 (Hz) against
 temperature, drawn as T1 = 1/rate. The dashed line marks the onset of the phonon-limited regime from their fit
 (phonon_limited.py): 42.5 K, an upper limit since their temperature-independent term is given only as A0 <= 0.1 1/s.
+Shaded: the effect of the mirror projection (central data: the mirror-forbidden SCF noise), from each curve to the T1
+without it (dotted; config.projection_band).
 """
 
 import numpy as np
@@ -37,7 +39,7 @@ def main():
     plt = C.style()
     rec = Record("M5", "V_Si- (128) T1 vs temperature against experiment", "scripts/paper/m5_vsi_t1.py", "main")
     T = C.TEMPERATURES
-    res, debye = {}, {}
+    res, debye, band = {}, {}, {}
     for sch in C.SCHEMES:
         r = rates(SYSTEM, sch)
         spin = float(r["spin"])
@@ -47,6 +49,7 @@ def main():
         t1, eig, src = t1_details(T, directional(r), STATE, spin=spin)
         rec.t1_curve(f"{SYSTEM} {sch} {STATE}", T, t1, eig, src)
         res[sch] = t1
+        band[sch] = t1_details(T, directional(rates(SYSTEM, sch, mirror_projection=False)), STATE, spin=spin)[0]
     rec.check_fallbacks()
     exp = experiment()
 
@@ -55,6 +58,7 @@ def main():
         t1 = res[sch]
         ok = np.isfinite(t1) & (t1 > 0)
         ax.plot(T[ok], t1[ok], color=C.COLORS[sch], label=f"{sch}, {STATE_LABEL}")
+        C.projection_band(ax, T, t1, band[sch], C.COLORS[sch])
     for source, label, text, x, y in exp:
         color, marker = C.EXPERIMENT_STYLES[(source, label)]
         ax.plot(x, y, ls="none", marker=marker, ms=3.5, mfc=color, mec=C.EXP_EDGE, mew=0.5, label=text, zorder=3)
@@ -62,7 +66,7 @@ def main():
     C.phonon_limited_line(ax, t_c, "phonon-limited\n(upper limit)")
     ax.set_yscale("log")
     ax.set_xlim(0, 605)
-    lo = min(np.nanmin(res[sch][np.isfinite(res[sch]) & (res[sch] > 0)]) for sch in C.SCHEMES)
+    lo = min(np.nanmin(d[sch][np.isfinite(d[sch]) & (d[sch] > 0)]) for d in (res, band) for sch in C.SCHEMES)
     ax.set_ylim(lo / 3, 1e3)
     ax.set_xlabel("Temperature (K)")
     ax.set_ylabel(r"$T_1$ (s)")
@@ -77,7 +81,7 @@ def main():
         "spin": "S = 3/2 (NUPDOWN = 3); UO tensors x2/3 (spin correction)",
         "sigma_meV": C.SIGMA, "direct": C.DIRECT, "zero-gap pairs": "excluded by symmetry",
         "pairs": "diagonal from central differences + geometric-mean fill for all off-diagonal pairs",
-        "first-order Raman": "excluded",
+        "first-order Raman": "excluded", "mirror projection": C.MIRROR_PROJECTION, "band": C.BAND_NOTE,
         "initial state": "{+-1/2} doublet, T1 fitted to its summed population ({+-3/2} gives the same T1)",
         "temperatures": f"{T[0]:g}-{T[-1]:g} K, step {T[1] - T[0]:g} K",
         "T1 extraction": "rate matrix, population fit a exp(-t/T1) + c (eigenvalue only as fallback)",
@@ -86,6 +90,7 @@ def main():
                        "used as": "1/T1 in Hz, drawn as T1 = 1/rate"},
     }
     nums = {f"T1 {sch} {STATE} (s)": at(T, res[sch], C.QUOTE_T) for sch in C.SCHEMES}
+    nums.update({f"T1 {sch} {STATE}, no mirror projection (s)": at(T, band[sch], C.QUOTE_T) for sch in C.SCHEMES})
     # model / experiment at each measured temperature (model on its 5 K grid, log-interpolated to the point)
     for source, label, text, x, y in exp:
         nums[f"experiment {text}, all points (T K, T1 s)"] = [[float(a), float(b)] for a, b in zip(x, y)]

@@ -12,7 +12,8 @@ Experiment, only datasets in experimental_data/NV, never interpolated:
 
 Curves: production couplings with the mirror projection (config.MIRROR_PROJECTION), which removes the odd-in-Q
 truncation error of the forward second differences. Shaded: that error, from each curve to the T1 of the raw forward
-differences (common.rates(mirror_projection=False)). The SCF noise of the runs moves T1 by < 0.2 % here (not drawn).
+differences (dotted; common.rates(mirror_projection=False), config.projection_band). The SCF noise of the runs moves
+T1 by < 0.2 % here (not drawn).
 """
 
 import numpy as np
@@ -86,9 +87,7 @@ def main():
     for scheme, (t1, _) in curves.items():
         ok = np.isfinite(t1) & (t1 > 0)
         ax.plot(T[ok], t1[ok], color=C.COLORS[scheme], label=f"{scheme}")
-        t1n = band[scheme]
-        both = ok & np.isfinite(t1n) & (t1n > 0)
-        ax.fill_between(T[both], t1[both], t1n[both], color=C.COLORS[scheme], alpha=0.18, lw=0)
+        C.projection_band(ax, T, t1, band[scheme], C.COLORS[scheme])
     ok = np.isfinite(t1_cam) & (t1_cam > 0)
     ax.plot(T[ok], t1_cam[ok], color=C.COLORS["cambria"], ls="-.", label="Cambria 2023 (ab initio)")
     for source, label, text, x, y in exp:
@@ -97,7 +96,8 @@ def main():
     C.phonon_limited_line(ax)
     ax.set_yscale("log")
     ax.set_xlim(0, 605)  # room for the full markers of the 600 K points
-    lo = min(min(np.nanmin(c[0][(T >= 100)]) for c in curves.values()), min(np.min(y) for *_, y in exp))
+    lo = min(min(np.nanmin(c[0][(T >= 100)]) for c in curves.values()), min(np.nanmin(b[T >= 100]) for b in band.values()),
+             min(np.min(y) for *_, y in exp))
     ax.set_ylim(lo / 2, 1e3)  # every experimental point shown
     ax.set_xlabel("Temperature (K)")
     ax.set_ylabel(r"$T_1$ (s)")
@@ -130,8 +130,7 @@ def main():
                        "Cambria 2023 uncertainties": "not stored in the CSV; not drawn"},
         "Debye C (1/meV^2)": {s: float(curves[s][1]["debye_C"]) for s in C.SCHEMES},
         "mirror projection": C.MIRROR_PROJECTION,
-        "band": "shaded: forward-difference truncation error, from the curve (mirror projection: odd-in-Q error of "
-                "the forward second differences removed) to the T1 of the raw forward differences (no projection)",
+        "band": C.BAND_NOTE,
     }
     nums = {f"T1 {s} (s)": at(T, curves[s][0], C.QUOTE_T) for s in C.SCHEMES}
     nums.update({f"T1 {s}, no mirror projection (s)": at(T, band[s], C.QUOTE_T) for s in C.SCHEMES})

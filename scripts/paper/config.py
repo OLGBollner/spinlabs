@@ -149,6 +149,21 @@ def panel_letter(ax, k, x=-0.02, y=1.02, **kw):
             fontweight="bold", **kw)
 
 
+BAND_ALPHA = 0.18
+BAND_NOTE = ("shaded: the effect of the mirror projection, from each curve (projection on: forward data without the "
+             "odd-in-Q truncation error of the second differences, central data without the mirror-forbidden SCF "
+             "noise) to the same quantity without it (dotted edge; common.rates(mirror_projection=False))")
+
+
+def projection_band(ax, x, y, y_raw, color, ok=None, zorder=1):
+    """Shade from ``y`` (the drawn curve, mirror projection on) to ``y_raw`` (projection off), dotted at y_raw."""
+    m = np.isfinite(y) & np.isfinite(y_raw) & (y > 0) & (y_raw > 0)
+    if ok is not None:
+        m &= ok
+    ax.fill_between(x[m], y[m], y_raw[m], color=color, alpha=BAND_ALPHA, lw=0, zorder=zorder)
+    ax.plot(x[m], y_raw[m], color=color, ls=":", lw=0.8, zorder=zorder)
+
+
 def phonon_limited_line(ax, temperature=PHONON_LIMITED_K, label="phonon-limited"):
     """Dashed line at ``temperature`` (default PHONON_LIMITED_K, the NV- value) with a short label to its right."""
     ax.axvline(temperature, color=COLORS["ref"], ls="--", lw=0.8, zorder=1)

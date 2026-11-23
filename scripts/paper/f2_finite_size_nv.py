@@ -7,6 +7,8 @@ is added as a thin line, so the fill bias and the cell-size effect can be told a
 fill only, AO and UO, from 100 K. Experiment of M2 (m2_nv_t1.experiment) as light gray markers, for orientation only.
 The two cells also differ in displacement amplitude: NV- (64) 0.1, not mass-weighted; NV- (512) 0.05,
 mass-weighted.
+Shaded: the effect of the mirror projection (odd-in-Q truncation error of the forward second differences), from
+each curve to the T1 without it (dotted; config.projection_band); in (b) the same for the ratio.
 Outputs: figures/out/sm/F2_finite_size_NV.{pdf,png}, figures/out/sm/numbers_finite_size_nv.md, records/F2.json.
 """
 
@@ -33,12 +35,14 @@ def main():
     plt = C.style()
     rec = Record("F2", "NV- finite-size effects: T1 of NV- (64) and NV- (512), same pair treatment",
                  "scripts/paper/f2_finite_size_nv.py", "sm")
-    t1 = {}
+    t1, t1_raw = {}, {}
     for system, scheme, pairs in CASES:
         r = rates(system, scheme, pairs=pairs)
         t, t_eig, src = t1_details(T, directional(r), STATE)
         rec.t1_curve(f"{system} {scheme} {pairs} {STATE}", T, t, t_eig, src)
         t1[(system, scheme, pairs)] = t
+        t1_raw[(system, scheme, pairs)] = t1_details(T, directional(rates(system, scheme, pairs=pairs,
+                                                                            mirror_projection=False)), STATE)[0]
     # NV_512 has no off-diagonal pair runs: its production "sqrt" should equal the fill-only treatment used here
     prod512 = {s: t1_details(T, directional(rates("NV_512", s)), STATE)[0] for s in C.SCHEMES}
     ok = T >= T_MIN
@@ -60,22 +64,26 @@ def main():
         if pairs == "computed":
             ax.plot(T[ok], y[ok], color=C.COLORS[scheme], lw=0.7, ls="-", zorder=3,
                     label=f"{C.SYSTEMS[system]['label']} {scheme}, all pairs computed")
+            C.projection_band(ax, T, y, t1_raw[(system, scheme, pairs)], C.COLORS[scheme], ok=ok, zorder=2)
         else:
             ax.plot(T[ok], y[ok], color=C.COLORS[scheme], ls=STYLE[system], zorder=2,
                     label=f"{C.SYSTEMS[system]['label']} {scheme}")
+            C.projection_band(ax, T, y, t1_raw[(system, scheme, pairs)], C.COLORS[scheme], ok=ok)
     ax.set_yscale("log")
     ax.set_xlim(0, 605)
-    lo = min(np.nanmin(v[T >= 100]) for v in t1.values())
+    lo = min(np.nanmin(v[T >= 100]) for d in (t1, t1_raw) for v in d.values())
     ax.set_ylim(lo / 3, 1e3)
     ax.set_ylabel(r"$T_1$ ($m_s=0$) (s)")
     ax.legend(loc="upper right", fontsize=C.FONT - 2.5, handlelength=2.0, labelspacing=0.3)
     C.panel_letter(ax, 0)
 
-    ratio = {}
+    ratio, ratio_raw = {}, {}
     for scheme in C.SCHEMES:
         ratio[scheme] = t1[("NV_64", scheme, "diagonal-sqrt")] / t1[("NV_512", scheme, "diagonal-sqrt")]
         okr = T >= T_MIN_RATIO
+        ratio_raw[scheme] = t1_raw[("NV_64", scheme, "diagonal-sqrt")] / t1_raw[("NV_512", scheme, "diagonal-sqrt")]
         bx.plot(T[okr], ratio[scheme][okr], color=C.COLORS[scheme], label=scheme)
+        C.projection_band(bx, T, ratio[scheme], ratio_raw[scheme], C.COLORS[scheme], ok=okr)
     bx.axhline(1.0, color=C.COLORS["ref"], lw=0.6, ls=":")
     bx.set_xlabel("Temperature (K)")
     bx.set_ylabel(r"$T_1(64)\,/\,T_1(512)$")
@@ -120,6 +128,7 @@ def main():
                 "NV- (512) 0.05, mass-weighted",
         "displacement amplitude": AMPLITUDE,
         "experiment": "the M2 datasets (m2_nv_t1.experiment), light gray, orientation only",
+        "mirror projection": C.MIRROR_PROJECTION, "band": C.BAND_NOTE,
         "NV- 512 production vs fill only, max rel diff": same512,
         "numbers file": "sm/numbers_finite_size_nv.md",
     }
@@ -127,6 +136,10 @@ def main():
         "T1(64)/T1(512) fill only": {s: {f"{t:g} K": float(ratio[s][i]) for t, i in zip(QUOTE, idx)} for s in C.SCHEMES},
         "NV_64 AO T1(fill only)/T1(all pairs)": {f"{t:g} K": float(fill_bias[i]) for t, i in zip(QUOTE, idx)},
         "T1 (s)": {f"{s} {sc} {p}": {f"{t:g} K": float(v[i]) for t, i in zip(QUOTE, idx)} for (s, sc, p), v in t1.items()},
+        "T1, no mirror projection (s)": {f"{s} {sc} {p}": {f"{t:g} K": float(v[i]) for t, i in zip(QUOTE, idx)}
+                                         for (s, sc, p), v in t1_raw.items()},
+        "T1(64)/T1(512) fill only, no mirror projection": {s: {f"{t:g} K": float(ratio_raw[s][i]) for t, i in zip(QUOTE, idx)}
+                                                          for s in C.SCHEMES},
     }
     rec.write()
     print("\n".join(L[-14:]))
