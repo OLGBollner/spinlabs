@@ -10,9 +10,9 @@ Experiment, only datasets in experimental_data/NV, never interpolated:
   Cambria et al. 2023 (supplement Table S4), sample A (NVA) and sample B (NVB1-5, one file): T1 of m_s = 0 from
   the measured Omega in the same way. A point with Omega = 0 (NVB3, 50 K) has no finite T1 and is left out.
 
-Shaded: the noise band, from each production curve to the T1 with the SCF noise of the runs removed from the
-second-order couplings (spinlabs.noise; common.rates(denoise=True)). NV_512 is forward data from ISYM 3 runs, so the
-noise is measured from A modes only and may be understated (spinlabs.noise warns).
+Curves: production couplings with the mirror projection (config.MIRROR_PROJECTION), which removes the odd-in-Q
+truncation error of the forward second differences. Shaded: that error, from each curve to the T1 of the raw forward
+differences (common.rates(mirror_projection=False)). The SCF noise of the runs moves T1 by < 0.2 % here (not drawn).
 """
 
 import numpy as np
@@ -68,18 +68,14 @@ def main():
     plt = C.style()
     rec = Record("M2", "NV- (512) T1 vs temperature against experiment", "scripts/paper/m2_nv_t1.py", "main")
     T = C.TEMPERATURES
-    curves, band, noise = {}, {}, {}
+    curves, band = {}, {}
     for scheme in C.SCHEMES:
         r = rates(SYSTEM, scheme)
         t1, t1_eig, src = t1_details(T, directional(r), STATE)
         rec.t1_curve(f"{SYSTEM} {scheme} {STATE}", T, t1, t1_eig, src)
         curves[scheme] = (t1, r)
-        # the noise band: the same rates with the noise of the runs removed from the second-order couplings
-        rd = rates(SYSTEM, scheme, denoise=True)
-        noise[scheme] = {"out-of-plane (MHz)": float(rd["noise_out_of_plane_mhz"]),
-                         "in-plane (MHz)": float(rd["noise_in_plane_mhz"]),
-                         "from E modes": bool(rd["noise_from_e_modes"])}
-        band[scheme] = t1_details(T, directional(rd), STATE)[0]
+        # the band: the raw forward second differences, odd-in-Q truncation error kept (no mirror projection)
+        band[scheme] = t1_details(T, directional(rates(SYSTEM, scheme, mirror_projection=False)), STATE)[0]
     cam, omega, gamma = cambria_rates(T)
     t1_cam, eig_cam, src_cam = t1_details(T, cam, STATE)
     rec.t1_curve(f"Cambria ab initio {STATE}", T, t1_cam, eig_cam, src_cam)
@@ -133,14 +129,12 @@ def main():
                        "left out (Omega = 0, no finite T1)": {k: v for k, v in DROPPED.items()},
                        "Cambria 2023 uncertainties": "not stored in the CSV; not drawn"},
         "Debye C (1/meV^2)": {s: float(curves[s][1]["debye_C"]) for s in C.SCHEMES},
-        "noise band": "shaded: from the production T1 to the T1 with the SCF noise of the runs removed from the "
-                      "second-order couplings (spinlabs.noise: noise measured from the symmetry-forbidden parts of "
-                      "the diagonal second differences, subtracted in quadrature); forward ISYM 3 data, so measured "
-                      "from A modes only and possibly understated",
-        "noise of the second differences": noise,
+        "mirror projection": C.MIRROR_PROJECTION,
+        "band": "shaded: forward-difference truncation error, from the curve (mirror projection: odd-in-Q error of "
+                "the forward second differences removed) to the T1 of the raw forward differences (no projection)",
     }
     nums = {f"T1 {s} (s)": at(T, curves[s][0], C.QUOTE_T) for s in C.SCHEMES}
-    nums.update({f"T1 {s}, noise removed (s)": at(T, band[s], C.QUOTE_T) for s in C.SCHEMES})
+    nums.update({f"T1 {s}, no mirror projection (s)": at(T, band[s], C.QUOTE_T) for s in C.SCHEMES})
     nums["T1 Cambria ab initio (Table S3) (s)"] = at(T, t1_cam, C.QUOTE_T)
     nums["Cambria ab initio (Table S3) Omega, gamma (1/s)"] = {"Omega": at(T, omega, C.QUOTE_T), "gamma": at(T, gamma, C.QUOTE_T)}
     quoted = {}

@@ -38,15 +38,17 @@ def drop_a_x_e(manager):
     return manager
 
 
-def manager_for(system, scheme, pairs):
+def manager_for(system, scheme, pairs, mirror_projection=None):
     """ZFSManager of a production package with a second-order pair treatment.
 
     pairs: "sqrt" (computed + fill for the rest: production), "computed", "diagonal", "diagonal-sqrt"
     (diagonal + fill everywhere off the diagonal), "no_axe" (computed without the A x E pairs),
     "fill-on-computed" (diagonal + fill, kept on the computed pairs only: the S3 filter, see mask_to_computed).
+    mirror_projection: None for config.MIRROR_PROJECTION.
     """
     mode = {"no_axe": "computed", "fill-on-computed": "diagonal-sqrt"}.get(pairs, pairs)
-    manager, convention = coupling_manager(C.package(system, scheme), mode, mirror_projection=C.MIRROR_PROJECTION)
+    manager, convention = coupling_manager(C.package(system, scheme), mode,
+                                            mirror_projection=C.MIRROR_PROJECTION if mirror_projection is None else mirror_projection)
     if pairs == "no_axe":
         drop_a_x_e(manager)
     return manager, convention
@@ -161,23 +163,26 @@ def couplings(system, scheme, pairs=C.PAIRS):
 
 
 def rates(system, scheme, pairs=C.PAIRS, nogap=C.NOGAP, sigma=C.SIGMA, direct=C.DIRECT, temps=C.TEMPERATURES,
-          denoise=False):
+          denoise=False, mirror_projection=None):
     """Directional rates (1/s) per process at ``temps``: {"temperatures", "<process>:<direction>", "debye_C", ...}.
 
     ``denoise``: the second-order couplings with the noise of the dataset's runs removed (spinlabs.noise), the
     other end of the noise band next to the production rates; the measured noise is recorded ("noise_*").
+    ``mirror_projection``: None for config.MIRROR_PROJECTION; False gives the raw second differences (for forward
+    data: with the odd-in-Q truncation error, the other end of M2's band).
     """
+    proj = C.MIRROR_PROJECTION if mirror_projection is None else bool(mirror_projection)
     pkg = C.package(system, scheme)
     key = _key(package_key(system, scheme), pairs, nogap, sigma, direct, list(map(float, temps)),
-               *(["denoised"] if denoise else []))
+               *(["denoised"] if denoise else []), *([] if proj == C.MIRROR_PROJECTION else [f"projection {proj}"]))
     stem = f"rates_{system}_{scheme}_{pairs}_{'nogap' if nogap else 'gap'}_s{sigma:g}_{direct}"
-    cache = C.CACHE / f"{stem}{'_denoised' if denoise else ''}_{key}.npz"
+    cache = C.CACHE / f"{stem}{'_denoised' if denoise else ''}{'' if proj else '_unprojected'}_{key}.npz"
     if cache.exists():
         d = np.load(cache, allow_pickle=True)
         return {k: d[k] for k in d.files}
     print(f"  computing rates: {system} {scheme} pairs={pairs} nogap={nogap} sigma={sigma:g} direct={direct}"
-          + (" (noise removed)" if denoise else ""))
-    manager, convention = manager_for(system, scheme, pairs)
+          + (" (noise removed)" if denoise else "") + ("" if proj else " (no mirror projection)"))
+    manager, convention = manager_for(system, scheme, pairs, mirror_projection=proj)
     out = {"temperatures": np.asarray(temps, dtype=float), "convention": convention, "package": str(pkg)}
     with tempfile.TemporaryDirectory() as tmp:
         base = str(Path(tmp) / "coupling")
