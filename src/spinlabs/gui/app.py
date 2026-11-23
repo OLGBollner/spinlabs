@@ -761,12 +761,12 @@ class ConvergenceApp:
         p = self.palette
         self.paned = tk.PanedWindow(
             self.root, orient=tk.VERTICAL, sashwidth=8, sashrelief=tk.FLAT, background=p.background,
-            borderwidth=0, highlightthickness=0,
+            borderwidth=0,
         )
         self.paned.pack(fill=tk.BOTH, expand=True)
         self.main_paned = tk.PanedWindow(
             self.paned, orient=tk.HORIZONTAL, sashwidth=8, sashrelief=tk.FLAT, background=p.background,
-            borderwidth=0, highlightthickness=0,
+            borderwidth=0,
         )
         self.paned.add(self.main_paned, stretch="always")
         self.sidebar = ttk.Frame(self.main_paned, width=360, style="Card.TFrame")
