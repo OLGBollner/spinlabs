@@ -131,8 +131,10 @@ class TestC3vSymmetryClassification:
         assert len(spectrum.symmetries) == n_modes
         assert all(isinstance(s, str) for s in spectrum.symmetries)
 
-    def test_c3v_symmetry_classification_a1_and_e_modes(self):
-        # 4-atom cluster with C3v: N at origin, 3 C atoms at 120 deg
+    def test_c3v_symmetry_classification_a1_and_e_modes(self, monkeypatch):
+        # 4-atom cluster with C3v: N at origin, 3 C atoms at 120 deg. An isolated cluster is no
+        # supercell with a point defect for find_defect to locate: its centre, the N, is given.
+        monkeypatch.setattr(PhononSpectrum, "defect_centre", lambda self: np.zeros(3))
         axis = np.array([1.0, 1.0, 1.0])
         normal = np.array([1.0, -1.0, 0.0])
         R_C3 = MathUtils.rotation_around_symmetry_axis(axis, order=3)
