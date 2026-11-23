@@ -27,6 +27,7 @@ class TabState:
     forward: bool = True
     central: bool = False
     display: str = "norm"
+    phonon: str = "auto"
     noise: float | None = None
     target: float = SNR_TARGET
     tol: float = TRUNC_TOL
