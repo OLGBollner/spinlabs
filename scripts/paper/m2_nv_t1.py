@@ -101,8 +101,8 @@ def main():
     C.phonon_limited_line(ax)
     ax.set_yscale("log")
     ax.set_xlim(0, 605)  # room for the full markers of the 600 K points
-    lo = min(np.nanmin(c[0][(T >= 100)]) for c in curves.values())
-    ax.set_ylim(lo / 3, 1e3)
+    lo = min(min(np.nanmin(c[0][(T >= 100)]) for c in curves.values()), min(np.min(y) for *_, y in exp))
+    ax.set_ylim(lo / 2, 1e3)  # every experimental point shown
     ax.set_xlabel("Temperature (K)")
     ax.set_ylabel(r"$T_1$ (s)")
     ax.legend(loc="lower center", bbox_to_anchor=(0.5, 1.01), fontsize=C.FONT - 2.5, handlelength=1.6, ncol=3,

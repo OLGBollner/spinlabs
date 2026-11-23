@@ -55,6 +55,7 @@ def production_block():
         "- steps: NV 64 = 0.1, NV 512 = 0.05, VV0 128 = 0.05, ClV 576 = 0.05 (packages listed per figure)",
         "- second-order couplings via plot_t1_comparison.coupling_manager with exclude_inconsistent_pairs=True "
         "(second-order entries inconsistent with first order are dropped)",
+        f"- mirror projection of the diagonal second differences (as `spinlabs run`): {'on' if C.MIRROR_PROJECTION else 'off'}",
         f"- temperatures: {T[0]:g}-{T[-1]:g} K, step {T[1] - T[0]:g} K",
         "- T1: rate matrix A from the directional rates, p(t) = exp(A t) p0 from the polarized state (exact "
         "eigen-decomposition), a exp(-t/T1) + c fitted to p_init on 10000 points up to t = 10 T1_eig + 1/T "

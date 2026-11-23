@@ -94,8 +94,11 @@ MODE_STYLES = {
 }
 
 
-def coupling_manager(raw_file, mode, displacement=None):
-    """ZFSManager for one raw package with the second-order pairs of ``mode`` (one of MODES)."""
+def coupling_manager(raw_file, mode, displacement=None, mirror_projection=True):
+    """ZFSManager for one raw package with the second-order pairs of ``mode`` (one of MODES).
+
+    ``mirror_projection``: as `spinlabs run` (on by default), see ZFSManager.
+    """
     method = "defect_band_approx" if "defect_band_approx" in Path(raw_file).name else "all_bands"
     raw, spectrum, _ = load_raw_inputs(raw_zfs_file=raw_file, calc_method=method, zfs_folder="ZFS_hyp", order=2)
     if displacement:
@@ -105,6 +108,7 @@ def coupling_manager(raw_file, mode, displacement=None):
         spectrum=spectrum,
         exclude_inconsistent_pairs=True,
         offdiag_from_diagonal=mode in ("sqrt", "diagonal-sqrt"),
+        mirror_projection=mirror_projection,
     )
     manager.calc_method = method
     if mode.startswith("diagonal"):  # as if only the (i, i) pairs had been run

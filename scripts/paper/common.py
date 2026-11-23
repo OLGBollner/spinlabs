@@ -46,7 +46,7 @@ def manager_for(system, scheme, pairs):
     "fill-on-computed" (diagonal + fill, kept on the computed pairs only: the S3 filter, see mask_to_computed).
     """
     mode = {"no_axe": "computed", "fill-on-computed": "diagonal-sqrt"}.get(pairs, pairs)
-    manager, convention = coupling_manager(C.package(system, scheme), mode)
+    manager, convention = coupling_manager(C.package(system, scheme), mode, mirror_projection=C.MIRROR_PROJECTION)
     if pairs == "no_axe":
         drop_a_x_e(manager)
     return manager, convention
@@ -117,6 +117,7 @@ def pair_coverage(system, scheme):
 
 
 def _key(*parts):
+    parts = (*parts, {"mirror_projection": C.MIRROR_PROJECTION})  # every cache depends on it
     return hashlib.sha1(json.dumps(parts, sort_keys=True, default=str).encode()).hexdigest()[:12]
 
 

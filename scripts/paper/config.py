@@ -28,6 +28,9 @@ NOGAP = True  # two-phonon: zero-gap pairs left out by symmetry ((l, l) and Ex-E
 # Second-order pairs: computed where a package has them, sqrt(V_ii V_jj) fill (E x E: V_T; A x E:
 # sqrt(V00(a,a) V_T(e,e))) for the rest. "sqrt" in plot_t1_comparison.coupling_manager.
 PAIRS = "sqrt"
+# Mirror projection of the diagonal second differences (as `spinlabs run`): forward data loses the odd-in-Q
+# truncation error of mirror-odd modes (partners inherit), central data the noise of aligned modes.
+MIRROR_PROJECTION = True
 PROCESSES = ("first_order", "two_phonon")  # direct + two-phonon; the first-order Raman term (second_order) is out
 TEMPERATURES = np.arange(0.0, 601.0, 5.0)  # K
 PHONON_LIMITED_K = 125.0  # NV-: onset of the phonon-limited regime (Cambria et al. 2023), dashed line in M2
