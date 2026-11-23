@@ -224,3 +224,68 @@ class TestDetectDefectPosition:
         spectrum = self._spectrum(self._remove(pristine, [pristine[2], pristine[40]]))
         with pytest.raises(ValueError, match="found 2"):
             detect_defect_position(spectrum)
+
+
+class TestSubstitutionVacancyComplex:
+    """An OV-like complex (O on C next to a Si vacancy along c) in a slightly distorted 2H-SiC cell.
+
+    find_defect reports two defects (substitutional + vacancy), which the former per-defect centre
+    rules could not handle, and the cell is C3v only to ~1e-3 A, as relaxed supercells are
+    (OV_128_hh: 0.0011 A, point group m at symprec 1e-3).
+    """
+
+    def _spectrum(self):
+        from pymatgen.core import Lattice
+
+        from spinlabs.models import PhononSpectrum
+
+        u = 0.375
+        prim = Structure(
+            Lattice.hexagonal(3.08, 5.04),
+            ["Si", "Si", "C", "C"],
+            [[1 / 3, 2 / 3, 0], [2 / 3, 1 / 3, 0.5], [1 / 3, 2 / 3, u], [2 / 3, 1 / 3, 0.5 + u]],
+        )
+        cell = prim.copy().make_supercell([3, 3, 2])
+        c_site = next(i for i, s in enumerate(cell) if s.specie.symbol == "C")
+        # the Si bonded to it along c: same in-plane position
+        si_site = next(
+            i
+            for i, s in enumerate(cell)
+            if s.specie.symbol == "Si"
+            and np.allclose(s.frac_coords[:2], cell[c_site].frac_coords[:2])
+            and cell.get_distance(c_site, i) < 2.0
+        )
+        cell.replace(c_site, "O")
+        cell.remove_sites([si_site])
+        n = len(cell)
+        cart = cell.cart_coords + np.random.default_rng(0).normal(scale=6e-4, size=(n, 3))
+        modes = np.zeros((2, n, 3))
+        modes[0, :, 2] = 1.0  # rigid shift along the C3 axis: A1
+        modes[1, :, 0] = 1.0  # rigid shift across it: an E component
+        return PhononSpectrum(
+            frequencies_mev=np.array([10.0, 20.0]),
+            eigenvectors=modes / np.sqrt(n),
+            atom_frac_coords=cell.lattice.get_fractional_coords(cart),
+            atom_symbols=[s.specie.symbol for s in cell],
+            atomic_masses=np.ones(n),
+            lattice=cell.lattice.matrix,
+            symmetries=None,
+        )
+
+    def test_point_group_within_symprec(self):
+        from spinlabs.symmetry import detect_point_group_from_spectrum
+
+        assert detect_point_group_from_spectrum(self._spectrum()).symbol == "3m"
+
+    def test_centre_on_the_axis(self):
+        from spinlabs.symmetry import _defect_center
+
+        spectrum = self._spectrum()
+        o = spectrum.atom_frac_coords[list(spectrum.atom_symbols).index("O")]
+        offset = (np.mod(_defect_center(spectrum) - o + 0.5, 1.0) - 0.5) @ spectrum.lattice
+        assert np.linalg.norm(offset[:2]) < 0.01  # Angstrom, off the c axis through the O
+
+    def test_modes_classified(self):
+        labels = self._spectrum().symmetries
+        assert labels[0] == "A1"
+        assert labels[1] in ("Ex", "Ey")

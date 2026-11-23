@@ -30,6 +30,11 @@ from spinlabs.logging_utils import get_logger
 
 LOGGER = get_logger(__name__)
 
+# spglib distance tolerance (Angstrom) for the point group. Relaxed supercells are symmetric only to
+# about 1e-3 A: OV_128_hh is C3v within 0.0011 A and comes out as m at 1e-3, 3m from 2e-3. NV, ClV,
+# the divacancy and V_Si give the same group at 1e-3 and 1e-2.
+SYMPREC = 1e-2
+
 
 # ---------------------------------------------------------------------------
 # Character tables (Hermann-Mauguin spglib point-group symbols as keys).
@@ -97,7 +102,7 @@ class PointGroup:
     space_group: str  # international space group symbol
 
 
-def detect_point_group(structure: Structure, symprec: float = 1e-3) -> PointGroup:
+def detect_point_group(structure: Structure, symprec: float = SYMPREC) -> PointGroup:
     """Detect the point group of a (defect) supercell structure."""
     try:
         sga = SpacegroupAnalyzer(structure, symprec=symprec)
@@ -116,7 +121,7 @@ def detect_point_group(structure: Structure, symprec: float = 1e-3) -> PointGrou
     )
 
 
-def detect_point_group_from_spectrum(spectrum, symprec: float = 1e-3) -> PointGroup:
+def detect_point_group_from_spectrum(spectrum, symprec: float = SYMPREC) -> PointGroup:
     """Build a pymatgen Structure from a PhononSpectrum and detect its group."""
     structure = Structure(
         lattice=spectrum.lattice,
@@ -127,7 +132,7 @@ def detect_point_group_from_spectrum(spectrum, symprec: float = 1e-3) -> PointGr
     return detect_point_group(structure, symprec=symprec)
 
 
-def classify_modes(spectrum, tol_mev: float = 0.01, symprec: float = 1e-3) -> tuple[list[str], list[list[int]]]:
+def classify_modes(spectrum, tol_mev: float = 0.01, symprec: float = SYMPREC) -> tuple[list[str], list[list[int]]]:
     """Classify each phonon mode into irreps of the detected point group.
 
     Returns (labels, deg_groups): a list of irrep labels, one per mode, and
@@ -240,7 +245,7 @@ def sym_check_summary(check: dict | None) -> str:
 def classify_and_pair(
     spectrum,
     tol_mev: float = 0.01,
-    symprec: float = 1e-3,
+    symprec: float = SYMPREC,
     force: bool = False,
 ) -> tuple[list[str], list[list[int]]]:
     """Classify modes and build degeneracy groups, trusting stored labels by default.
@@ -330,26 +335,15 @@ def _defect_frame(spectrum) -> tuple[np.ndarray, np.ndarray]:
 
 
 def _defect_center(spectrum) -> np.ndarray:
-    """Fractional coords of the defect center, wrapped into [0, 1).
+    """Fractional coords of the defect center (PhononSpectrum.defect_centre), wrapped into [0, 1).
 
-    Exact N site for single-N (NV) and Cl-pair midpoint for ClV; otherwise
-    the generic self-contained localizer (vacancy, divacancy, substitution,
-    interstitial). Falls back to the cell origin if nothing is detected.
-    Matches PhononSpectrum.translate_defect_to_origin. Callers are
-    responsible for periodic wrapping of the result.
+    The general detector, no per-defect rules: the vacancy for a defect with one (NV, OV, ClV,
+    the divacancy, V_Si), else the single defect find_defect finds. The operations only need a
+    centre on the defect's symmetry axis, so any point on it gives the same characters (checked
+    against the former NV-site / Cl-midpoint rules: identical characters on NV_64, NV_512, ClV_128,
+    ClV_576, DiV_128, V_Si_128). Raises ValueError when there is no single defect.
     """
-    frac = np.mod(np.asarray(spectrum.atom_frac_coords, dtype=float), 1.0)
-    symbols_list = list(spectrum.atom_symbols)
-    if symbols_list.count("N") == 1:
-        return frac[symbols_list.index("N")]
-    if "Cl" in symbols_list:
-        return frac[np.asarray(symbols_list) == "Cl"].mean(axis=0)
-    from spinlabs.vasp.structures import detect_defect_position
-
-    detected = detect_defect_position(spectrum)
-    if detected is not None:
-        return detected
-    return np.zeros(3)
+    return np.mod(spectrum.defect_centre(), 1.0)
 
 
 def defect_frame_operations(spectrum) -> list[np.ndarray]:
@@ -559,7 +553,7 @@ def group_of(deg_groups: list[list[int]] | None, i: int) -> list[int] | None:
 def filter_degenerate_partners(
     spectrum,
     tol_mev: float = 0.01,
-    symprec: float = 1e-3,
+    symprec: float = SYMPREC,
 ):
     """Return a reduced spectrum keeping one mode per complete degenerate set.
 

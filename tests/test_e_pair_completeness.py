@@ -123,8 +123,9 @@ def test_filter_reduced_spectrum_keeps_original_indices_valid():
     """Regression: filtering an already-reduced spectrum (e.g. loading
     phonon_data_sym.npz and filtering again) must validate its carried
     original_indices against the full pre-reduction size, not the reduced
-    size. classify_and_pair finds no degeneracies on this stub, so nothing
-    is dropped -- but the index check would previously raise."""
+    size. The stub carries A1 labels (it has no point group to classify
+    against), so nothing is dropped -- but the index check would previously
+    raise."""
     from spinlabs.models import PhononSpectrum
     from spinlabs.symmetry import filter_degenerate_partners
 
@@ -135,6 +136,7 @@ def test_filter_reduced_spectrum_keeps_original_indices_valid():
         atom_symbols=np.array(["N"]),
         atomic_masses=np.array([14.0]),
         lattice=np.eye(3),
+        symmetries=["A1", "A1"],
         original_indices=np.array([0, 2]),
         n_full=4,  # as written by a first filter pass over the full spectrum
     )
