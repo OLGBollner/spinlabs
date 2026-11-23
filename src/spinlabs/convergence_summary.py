@@ -209,10 +209,13 @@ def mode_details(
         cache[key] = _registered_spectrum(*key)
     found = cache[key]
     if found is None:
-        LOGGER.warning(
-            f"no registered phonon data for {name} covers modes up to {max(modes)}; modes without symmetry or "
-            "frequency (package the defect folder to register its phonon_data.npz)"
-        )
+        warned = ("warned-no-phonon", key)
+        if warned not in cache:
+            LOGGER.warning(
+                f"no registered phonon data for {name} covers modes up to {max(modes)}; modes without symmetry or "
+                "frequency (package the defect folder to register its phonon_data.npz)"
+            )
+            cache[warned] = True
         return {}
     labels, frequencies, source = found
     LOGGER.debug(f"mode details of {name} from {source}")
