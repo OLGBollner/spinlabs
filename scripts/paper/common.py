@@ -159,20 +159,37 @@ def couplings(system, scheme, pairs=C.PAIRS):
     return {k: d[k] for k in d.files}
 
 
-def rates(system, scheme, pairs=C.PAIRS, nogap=C.NOGAP, sigma=C.SIGMA, direct=C.DIRECT, temps=C.TEMPERATURES):
-    """Directional rates (1/s) per process at ``temps``: {"temperatures", "<process>:<direction>", "debye_C", ...}."""
+def rates(system, scheme, pairs=C.PAIRS, nogap=C.NOGAP, sigma=C.SIGMA, direct=C.DIRECT, temps=C.TEMPERATURES,
+          denoise=False):
+    """Directional rates (1/s) per process at ``temps``: {"temperatures", "<process>:<direction>", "debye_C", ...}.
+
+    ``denoise``: the second-order couplings with the noise of the dataset's runs removed (spinlabs.noise), the
+    other end of the noise band next to the production rates; the measured noise is recorded ("noise_*").
+    """
     pkg = C.package(system, scheme)
-    key = _key(package_key(system, scheme), pairs, nogap, sigma, direct, list(map(float, temps)))
-    cache = C.CACHE / f"rates_{system}_{scheme}_{pairs}_{'nogap' if nogap else 'gap'}_s{sigma:g}_{direct}_{key}.npz"
+    key = _key(package_key(system, scheme), pairs, nogap, sigma, direct, list(map(float, temps)),
+               *(["denoised"] if denoise else []))
+    stem = f"rates_{system}_{scheme}_{pairs}_{'nogap' if nogap else 'gap'}_s{sigma:g}_{direct}"
+    cache = C.CACHE / f"{stem}{'_denoised' if denoise else ''}_{key}.npz"
     if cache.exists():
         d = np.load(cache, allow_pickle=True)
         return {k: d[k] for k in d.files}
-    print(f"  computing rates: {system} {scheme} pairs={pairs} nogap={nogap} sigma={sigma:g} direct={direct}")
+    print(f"  computing rates: {system} {scheme} pairs={pairs} nogap={nogap} sigma={sigma:g} direct={direct}"
+          + (" (noise removed)" if denoise else ""))
     manager, convention = manager_for(system, scheme, pairs)
     out = {"temperatures": np.asarray(temps, dtype=float), "convention": convention, "package": str(pkg)}
     with tempfile.TemporaryDirectory() as tmp:
         base = str(Path(tmp) / "coupling")
         manager.process_both_orders(output_filename=base)
+        if denoise:
+            from spinlabs.noise import denoised_couplings, second_difference_noise
+
+            noise = second_difference_noise(manager)
+            np.savez(f"{base}.npz", **denoised_couplings(manager, dict(np.load(f"{base}.npz", allow_pickle=True)), noise))
+            out.update(noise_out_of_plane_mhz=noise.out_of_plane, noise_in_plane_mhz=noise.in_plane,
+                       noise_from_e_modes=noise.from_e_modes)
+            print(f"    noise of the second differences: out-of-plane {noise.out_of_plane:.2g} MHz, "
+                  f"in-plane {noise.in_plane:.2g} MHz")
         if pairs == "fill-on-computed":
             kept, total = mask_to_computed(system, scheme, f"{base}.npz")
             out["pairs_kept"] = f"{kept} of {total}"
