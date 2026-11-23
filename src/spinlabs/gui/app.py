@@ -189,8 +189,10 @@ class PackTab(ttk.Frame):
         self._summary_columns = None
         self._mode_result = None
 
-        self.summary_view = FigureHost(self, scroll=True)
-        self.mode_page = ttk.Frame(self, style="Card.TFrame")
+        self.nested = ttk.Notebook(self, style="Sub.TNotebook")
+        # Ttk notebook pages must be children of the notebook, not of PackTab.
+        self.summary_view = FigureHost(self.nested, scroll=True)
+        self.mode_page = ttk.Frame(self.nested, style="Card.TFrame")
         mode_bar = ttk.Frame(self.mode_page, style="Card.TFrame")
         mode_bar.pack(fill=tk.X, padx=10, pady=(8, 4))
         ttk.Label(mode_bar, text="Column:", style="CardMuted.TLabel").pack(side=tk.LEFT)
@@ -200,7 +202,6 @@ class PackTab(ttk.Frame):
         self.column_combo.pack(side=tk.LEFT, padx=(4, 0))
         self.mode_view = FigureHost(self.mode_page, scroll=True)
         self.mode_view.pack(fill=tk.BOTH, expand=True)
-        self.nested = ttk.Notebook(self, style="Sub.TNotebook")
         self.nested.add(self.summary_view, text="Summary")
         self.nested.add(self.mode_page, text="Mode detail")
         self.nested.pack(fill=tk.BOTH, expand=True)
