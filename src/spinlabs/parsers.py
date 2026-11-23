@@ -428,6 +428,7 @@ def parse_phonon_npz(npz_path: str | Path) -> PhononSpectrum:
         iprs=np.asarray(iprs, dtype=float) if iprs is not None else None,
         e_pair_complete=e_pair_complete,
         original_indices=original_indices,
+        frame=np.asarray(data["frame"], dtype=float) if "frame" in data else None,
     )
 
 
