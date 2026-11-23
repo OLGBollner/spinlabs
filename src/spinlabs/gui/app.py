@@ -82,45 +82,47 @@ class ReportData:
 
 
 class FigureHost(ttk.Frame):
-    """A FigureCanvas with a toolbar and (optionally) horizontal/vertical scroll."""
+    """A Matplotlib canvas that fills its page and rescales with the window."""
 
-    def __init__(self, master, *, scroll: bool = True):
+    def __init__(self, master):
         super().__init__(master, style="Card.TFrame")
-        self.scroll = scroll
         self.figure: Figure | None = None
         self._canvas_widget = None
         self._toolbar = None
-        self._window = None
-        self._scroll_size = (1, 1)
+        self._fit_after: str | None = None
         self.toolbar_frame = ttk.Frame(self, style="Card.TFrame")
-        self.toolbar_frame.grid(row=0, column=0, columnspan=2, sticky="ew")
-        if scroll:
-            self.view = tk.Canvas(self, highlightthickness=0, background="#ffffff")
-            self.vbar = ttk.Scrollbar(self, orient=tk.VERTICAL, command=self.view.yview)
-            self.hbar = ttk.Scrollbar(self, orient=tk.HORIZONTAL, command=self.view.xview)
-            self.view.configure(yscrollcommand=self.vbar.set, xscrollcommand=self.hbar.set)
-            self.view.grid(row=1, column=0, sticky="nsew")
-            self.vbar.grid(row=1, column=1, sticky="ns")
-            self.hbar.grid(row=2, column=0, sticky="ew")
-            self.rowconfigure(1, weight=1)
-            self.columnconfigure(0, weight=1)
-            self.view.bind("<Configure>", self._update_scrollregion)
-            self.view.bind("<Shift-MouseWheel>", self._scroll_horizontal, add="+")
-        else:
-            self.view = ttk.Frame(self)
-            self.view.grid(row=1, column=0, columnspan=2, sticky="nsew")
-            self.rowconfigure(1, weight=1)
-            self.columnconfigure(0, weight=1)
+        self.toolbar_frame.grid(row=0, column=0, sticky="ew")
+        self.view = ttk.Frame(self, style="Card.TFrame")
+        self.view.grid(row=1, column=0, sticky="nsew")
+        self.rowconfigure(1, weight=1)
+        self.columnconfigure(0, weight=1)
+        self.view.bind("<Configure>", lambda _e: self._schedule_fit())
 
-    def _scroll_horizontal(self, event):
-        if self.scroll and self.view.winfo_exists():
-            self.view.xview_scroll(-1 if event.delta > 0 else 1, "units")
+    def _schedule_fit(self) -> None:
+        if self._fit_after is not None:
+            try:
+                self.after_cancel(self._fit_after)
+            except tk.TclError:
+                pass
+        self._fit_after = self.after(60, self._fit_figure)
 
-    def _update_scrollregion(self, _event=None):
-        if not self.scroll or self._canvas_widget is None or self.figure is None:
+    def _fit_figure(self) -> None:
+        self._fit_after = None
+        if self.figure is None or self._canvas_widget is None or not self.view.winfo_exists():
             return
-        width, height = self._scroll_size
-        self.view.configure(scrollregion=(0, 0, width, height))
+        width = max(240, self.view.winfo_width() - 2)
+        height = max(200, self.view.winfo_height() - 2)
+        dpi = self.figure.dpi or 100
+        current = self.figure.get_size_inches()
+        target = (width / dpi, height / dpi)
+        if abs(target[0] - current[0]) * dpi < 2 and abs(target[1] - current[1]) * dpi < 2:
+            return
+        self.figure.set_size_inches(*target, forward=True)
+        try:
+            self.figure.tight_layout()
+        except Exception:
+            LOGGER.debug("tight_layout failed during resize", exc_info=True)
+        self._canvas_widget.draw_idle()
 
     def set_figure(self, figure: Figure) -> None:
         old = self.figure
@@ -130,34 +132,17 @@ class FigureHost(ttk.Frame):
         if self._toolbar is not None:
             self._toolbar.destroy()
             self._toolbar = None
-        if self._window is not None and self.scroll:
-            try:
-                self.view.delete(self._window)
-            except tk.TclError:
-                pass
-            self._window = None
         self.figure = figure
-        width = max(1, int(figure.get_figwidth() * figure.dpi))
-        height = max(1, int(figure.get_figheight() * figure.dpi))
-        self._scroll_size = (width, height)
         canvas = FigureCanvasTkAgg(figure, master=self.view)
         widget = canvas.get_tk_widget()
-        widget.configure(width=width, height=height)
-        if self.scroll:
-            widget.bind("<Shift-MouseWheel>", self._scroll_horizontal, add="+")
-            self._window = self.view.create_window(
-                (0, 0), anchor="nw", window=widget, width=width, height=height
-            )
-        else:
-            widget.pack(fill=tk.BOTH, expand=True)
+        widget.pack(fill=tk.BOTH, expand=True)
         self._canvas_widget = canvas
         self._toolbar = NavigationToolbar2Tk(canvas, self.toolbar_frame, pack_toolbar=False)
         self._toolbar.update()
         theme.style_navigation_toolbar(self._toolbar)
         self._toolbar.pack(side=tk.LEFT, fill=tk.X, expand=True)
         canvas.draw()
-        if self.scroll:
-            self._update_scrollregion()
+        self._schedule_fit()
         if old is not None and old is not figure:
             plt.close(old)
 
@@ -191,7 +176,7 @@ class PackTab(ttk.Frame):
 
         self.nested = ttk.Notebook(self, style="Sub.TNotebook")
         # Ttk notebook pages must be children of the notebook, not of PackTab.
-        self.summary_view = FigureHost(self.nested, scroll=True)
+        self.summary_view = FigureHost(self.nested)
         self.mode_page = ttk.Frame(self.nested, style="Card.TFrame")
         mode_bar = ttk.Frame(self.mode_page, style="Card.TFrame")
         mode_bar.pack(fill=tk.X, padx=10, pady=(8, 4))
@@ -200,7 +185,7 @@ class PackTab(ttk.Frame):
             mode_bar, textvariable=app.active_column_var, state="readonly", width=24
         )
         self.column_combo.pack(side=tk.LEFT, padx=(4, 0))
-        self.mode_view = FigureHost(self.mode_page, scroll=True)
+        self.mode_view = FigureHost(self.mode_page)
         self.mode_view.pack(fill=tk.BOTH, expand=True)
         self.nested.add(self.summary_view, text="Summary")
         self.nested.add(self.mode_page, text="Mode detail")
