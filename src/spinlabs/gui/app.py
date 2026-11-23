@@ -91,6 +91,7 @@ class FigureHost(ttk.Frame):
         self._canvas_widget = None
         self._toolbar = None
         self._window = None
+        self._scroll_size = (1, 1)
         self.toolbar_frame = ttk.Frame(self, style="Card.TFrame")
         self.toolbar_frame.grid(row=0, column=0, columnspan=2, sticky="ew")
         if scroll:
@@ -118,9 +119,7 @@ class FigureHost(ttk.Frame):
     def _update_scrollregion(self, _event=None):
         if not self.scroll or self._canvas_widget is None or self.figure is None:
             return
-        widget = self._canvas_widget.get_tk_widget()
-        width = max(widget.winfo_reqwidth(), int(self.figure.get_figwidth() * self.figure.dpi))
-        height = max(widget.winfo_reqheight(), int(self.figure.get_figheight() * self.figure.dpi))
+        width, height = self._scroll_size
         self.view.configure(scrollregion=(0, 0, width, height))
 
     def set_figure(self, figure: Figure) -> None:
@@ -138,11 +137,16 @@ class FigureHost(ttk.Frame):
                 pass
             self._window = None
         self.figure = figure
+        width = max(1, int(figure.get_figwidth() * figure.dpi))
+        height = max(1, int(figure.get_figheight() * figure.dpi))
+        self._scroll_size = (width, height)
         canvas = FigureCanvasTkAgg(figure, master=self.view)
         widget = canvas.get_tk_widget()
         if self.scroll:
             widget.bind("<Shift-MouseWheel>", self._scroll_horizontal, add="+")
-            self._window = self.view.create_window((0, 0), anchor="nw", window=widget)
+            self._window = self.view.create_window(
+                (0, 0), anchor="nw", window=widget, width=width, height=height
+            )
         else:
             widget.pack(fill=tk.BOTH, expand=True)
         self._canvas_widget = canvas
