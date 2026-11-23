@@ -22,7 +22,13 @@ from spinlabs.vasp.trees import full_spectrum_of, tree_displacement, tree_phonon
 from spinlabs.registry import SUBLEVEL_KINDS, ensure_db, register_file
 from spinlabs.pack_convergence import ConvergenceScan, save_convergence, scan_convergence
 from spinlabs.decont import high_spin
-from spinlabs.parsers import decont_sublevels, parse_decont_dataset, parse_zfs_simulation_dataset, split_defect_folder_name
+from spinlabs.parsers import (
+    decont_sublevels,
+    parse_decont_dataset,
+    parse_phonon_data,
+    parse_zfs_simulation_dataset,
+    split_defect_folder_name,
+)
 from spinlabs.methods import CLI_CHOICES, METHODS, basis_dir, ground_state_dir, method_from_path
 from spinlabs.vasp.settings import (
     compare_settings,
@@ -916,6 +922,20 @@ def _run_conv(args: argparse.Namespace, defect_folder: Path) -> None:
         LOGGER.info("nothing saved")
         return
     section(LOGGER, "Save convergence data")
+    # Follow the main packaging path: ship the full spectrum the trees displaced along
+    # next to the defect, and register it, so convergence data keeps its symmetry lookup.
+    phonons: dict[tuple[str, int], Path] = {}
+    aligned_phonons: dict[tuple[str, int], Path] = {}
+    for s in scanned:
+        source = s.scan.phonon_file
+        if source is None or not Path(source).is_file():
+            continue
+        key = (s.defect, s.cell)
+        (aligned_phonons if s.scan.aligned else phonons)[key] = Path(source)
+    if phonons:
+        _save_phonons(phonons, args.output_root)
+    if aligned_phonons:
+        _save_phonons(aligned_phonons, args.output_root, name=ALIGNED_PHONON_NAME)
     date_dir = date.today().strftime("%Y%m%d")
     for s in scanned:
         leaf = args.output_root / f"{s.defect}_{s.cell}" / (s.calc_method or "conv") / date_dir
@@ -925,6 +945,7 @@ def _run_conv(args: argparse.Namespace, defect_folder: Path) -> None:
         save_convergence(
             s.scan, output, ground_state=s.ground_state, defect=s.defect, cell=s.cell, method=s.method,
             method_key=s.suffix, spin_sublevel=s.spin_sublevel,
+            phonon_file=s.scan.phonon_file, aligned=s.scan.aligned,
         )
         register_file(
             ensure_db(), output, SUBLEVEL_KINDS["convergence"] if s.spin_sublevel else "convergence",
@@ -971,6 +992,24 @@ def _scan_conv(args: argparse.Namespace, defect_folder: Path, root: Path) -> lis
         LOGGER.warning(f"{defect_folder.name}/{root.name}: {exc}; not packaged")
         return []
     LOGGER.info(f"{scan.n_runs} run folder(s), {scan.n_finished} with a ZFS tensor")
+    # Pair the convergence runs with the full spectrum their job scripts name, exactly as
+    # the raw-data packaging does; fall back to the defect's packaged full spectrum.
+    phonon = _find_phonon_npz(defect_folder)
+    tree_phonon_file = tree_phonon(root)
+    if tree_phonon_file is not None:
+        try:
+            tree_phonon_file = full_spectrum_of(tree_phonon_file)
+        except ValueError:
+            pass
+        if tree_phonon_file.is_file():
+            phonon = tree_phonon_file
+    if phonon is not None:
+        try:
+            spectrum = parse_phonon_data(phonon)
+            scan.phonon_file = phonon
+            scan.aligned = bool(spectrum.aligned)
+        except Exception as exc:
+            LOGGER.warning(f"{defect_folder.name}/{root.name}: cannot read phonon spectrum {phonon}: {exc}")
     ground_state = args.ground_state
     if ground_state == _GS_AUTO:
         ground_state = _auto_ground_state(defect_folder, method)
