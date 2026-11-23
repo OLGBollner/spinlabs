@@ -9,6 +9,10 @@ Experiment, only datasets in experimental_data/NV, never interpolated:
   any gamma, so T1(m_s = 0) = 1/(3 Omega) and the gamma series (measured at other temperatures) is not needed.
   Cambria et al. 2023 (supplement Table S4), sample A (NVA) and sample B (NVB1-5, one file): T1 of m_s = 0 from
   the measured Omega in the same way. A point with Omega = 0 (NVB3, 50 K) has no finite T1 and is left out.
+
+Shaded: the noise band, from each production curve to the T1 with the SCF noise of the runs removed from the
+second-order couplings (spinlabs.noise; common.rates(denoise=True)). NV_512 is forward data from ISYM 3 runs, so the
+noise is measured from A modes only and may be understated (spinlabs.noise warns).
 """
 
 import numpy as np
@@ -64,12 +68,18 @@ def main():
     plt = C.style()
     rec = Record("M2", "NV- (512) T1 vs temperature against experiment", "scripts/paper/m2_nv_t1.py", "main")
     T = C.TEMPERATURES
-    curves = {}
+    curves, band, noise = {}, {}, {}
     for scheme in C.SCHEMES:
         r = rates(SYSTEM, scheme)
         t1, t1_eig, src = t1_details(T, directional(r), STATE)
         rec.t1_curve(f"{SYSTEM} {scheme} {STATE}", T, t1, t1_eig, src)
         curves[scheme] = (t1, r)
+        # the noise band: the same rates with the noise of the runs removed from the second-order couplings
+        rd = rates(SYSTEM, scheme, denoise=True)
+        noise[scheme] = {"out-of-plane (MHz)": float(rd["noise_out_of_plane_mhz"]),
+                         "in-plane (MHz)": float(rd["noise_in_plane_mhz"]),
+                         "from E modes": bool(rd["noise_from_e_modes"])}
+        band[scheme] = t1_details(T, directional(rd), STATE)[0]
     cam, omega, gamma = cambria_rates(T)
     t1_cam, eig_cam, src_cam = t1_details(T, cam, STATE)
     rec.t1_curve(f"Cambria ab initio {STATE}", T, t1_cam, eig_cam, src_cam)
@@ -80,6 +90,9 @@ def main():
     for scheme, (t1, _) in curves.items():
         ok = np.isfinite(t1) & (t1 > 0)
         ax.plot(T[ok], t1[ok], color=C.COLORS[scheme], label=f"{scheme}")
+        t1n = band[scheme]
+        both = ok & np.isfinite(t1n) & (t1n > 0)
+        ax.fill_between(T[both], t1[both], t1n[both], color=C.COLORS[scheme], alpha=0.18, lw=0)
     ok = np.isfinite(t1_cam) & (t1_cam > 0)
     ax.plot(T[ok], t1_cam[ok], color=C.COLORS["cambria"], ls="-.", label="Cambria 2023 (ab initio)")
     for source, label, text, x, y in exp:
@@ -120,8 +133,14 @@ def main():
                        "left out (Omega = 0, no finite T1)": {k: v for k, v in DROPPED.items()},
                        "Cambria 2023 uncertainties": "not stored in the CSV; not drawn"},
         "Debye C (1/meV^2)": {s: float(curves[s][1]["debye_C"]) for s in C.SCHEMES},
+        "noise band": "shaded: from the production T1 to the T1 with the SCF noise of the runs removed from the "
+                      "second-order couplings (spinlabs.noise: noise measured from the symmetry-forbidden parts of "
+                      "the diagonal second differences, subtracted in quadrature); forward ISYM 3 data, so measured "
+                      "from A modes only and possibly understated",
+        "noise of the second differences": noise,
     }
     nums = {f"T1 {s} (s)": at(T, curves[s][0], C.QUOTE_T) for s in C.SCHEMES}
+    nums.update({f"T1 {s}, noise removed (s)": at(T, band[s], C.QUOTE_T) for s in C.SCHEMES})
     nums["T1 Cambria ab initio (Table S3) (s)"] = at(T, t1_cam, C.QUOTE_T)
     nums["Cambria ab initio (Table S3) Omega, gamma (1/s)"] = {"Omega": at(T, omega, C.QUOTE_T), "gamma": at(T, gamma, C.QUOTE_T)}
     quoted = {}
