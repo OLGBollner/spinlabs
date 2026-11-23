@@ -1,7 +1,7 @@
 """F2: finite-size effects of NV-, T1 (m_s = 0) of NV- (64) and NV- (512) against temperature, AO and UO.
 
 Both cells with the same pair treatment: diagonal + geometric-mean fill, zero-gap pairs excluded (the NV- (512)
-production treatment, "diagonal-sqrt" in plot_t1_comparison.coupling_manager). For NV- (64) this is the fill-only
+production treatment, "diagonal-sqrt" in spinlabs.pipeline.PAIR_MODES). For NV- (64) this is the fill-only
 case, not its production all-pairs case. NV- (64) AO with every second-order pair computed (no fill, "computed")
 is added as a thin line, so the fill bias and the cell-size effect can be told apart. (b): T1(64) / T1(512),
 fill only, AO and UO, from 100 K. Experiment of M2 (m2_nv_t1.experiment) as light gray markers, for orientation only.

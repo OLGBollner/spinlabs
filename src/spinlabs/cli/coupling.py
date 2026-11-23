@@ -82,8 +82,7 @@ def load_manager(args: argparse.Namespace, command: str):
     Returns ``(manager, phonon_path, orders)``; ``orders`` is what to compute.
     """
     from spinlabs.cli.run import _METHOD_MAP, _infer_method
-    from spinlabs.pipeline import load_raw_inputs
-    from spinlabs.zfs_manager import ZFSManager
+    from spinlabs.pipeline import build_manager, load_raw_inputs
 
     given = [
         flag
@@ -135,8 +134,7 @@ def load_manager(args: argparse.Namespace, command: str):
         defect=args.defect,
         cell_size=args.cell_size,
     )
-    manager = ZFSManager(raw_data=raw_data, spectrum=spectrum, **coupling_options(args))
-    manager.calc_method = calc_method
+    manager = build_manager(raw_data, spectrum, calc_method=calc_method, **coupling_options(args))
     if not manager.zfs_tensors:
         raise SystemExit("No first-order tensors in the input; every coupling needs the first-order derivatives.")
     if 2 in orders and not manager.zfs_tensors_2d and args.order:

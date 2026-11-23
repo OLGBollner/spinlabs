@@ -22,8 +22,7 @@ import numpy as np
 import config as C
 from common import DIRECTIONS, Record, _key, manager_for, mask_to_computed, package_key, pair_coverage, t1_details
 
-from spinlabs.constants import CONSTANTS
-from spinlabs.transition_rate import TransitionRate
+from spinlabs.pipeline import rate_series
 
 SYSTEMS = ("NV_64", "NV_512", "DiV_128")
 SIGMAS = [0.1, 0.15, 0.2, 0.3, 0.5, 1.0, 2.0, 3.5, 5.0, 6.0, 7.0, 7.5, 8.0, 8.5, 9.0, 9.5, 10.0, 11.0, 12.0]
@@ -56,20 +55,13 @@ def scan(system, scheme, pairs, nogap):
         manager.process_both_orders(output_filename=base)
         if pairs == "fill-on-computed":
             mask_to_computed(system, scheme, f"{base}.npz")
-        calc = TransitionRate(f"{base}.npz")
-        calc.data_2ph = calc.data
-        calc.set_debye_from_spectrum(manager.spectrum)
-        zfs = calc.data["zfs"] / CONSTANTS["meV2J"]
         groups = (manager.spectrum.deg_groups or []) if nogap else None
         for sigma in SIGMAS:
-            omega, j0pm, jpm, j00 = calc.get_spectral_density(res=0.02, sigma=sigma)
-            lines = calc.get_line_spectral_density(sigma, degenerate_groups=groups)
-            for d in DIRECTS:
-                calc.direct = d
-                calc.compute_transition_rates(T, omega, j0pm, jpm, j00, zfs)
-                calc.compute_two_phonon_rates(T, lines)
-                out[d].append({k: float(sum(calc.transition_rate[p].get(k, 0.0) for p in C.PROCESSES))
-                               for k in DIRECTIONS})
+            for d in DIRECTS:  # the rate loop of `spinlabs run` (spinlabs.pipeline.rate_series)
+                rs = rate_series(f"{base}.npz", [T], sigma=sigma, has_second_order=True, degenerate_groups=groups,
+                                 direct=d, spectrum=manager.spectrum)
+                tot = rs.directional(C.PROCESSES)
+                out[d].append({k: float(tot[k][0]) for k in DIRECTIONS})
     C.CACHE.mkdir(parents=True, exist_ok=True)
     cache.write_text(json.dumps(out))
     return out

@@ -162,75 +162,32 @@ def plot_stacked_rates(T, rates, labels, ax=None):
 # =============================================================================
 #  Calculation helpers
 # =============================================================================
-def compute_rates(data_path, two_phonon_path, t_start, t_end, t_step):
+def compute_rates(data_path, two_phonon_path, t_start, t_end, t_step, sigma=7.5):
     """
     Compute transition rates for a range of temperatures and return results
     together with metadata and temperature array.
+
+    The rates come from spinlabs.pipeline.rate_series, the rate loop of `spinlabs run`; this script keeps its own
+    legacy settings (sigma 7.5 meV, Gaussian direct rate, zero-gap pairs kept, every process in the directional rates).
     """
     try:
-        from spinlabs.transition_rate import TransitionRate
-        from spinlabs.constants import CONSTANTS
+        from spinlabs.pipeline import rate_series
     except ImportError as exc:
-        raise ImportError(
-            "Could not import TransitionRate or CONSTANTS. Ensure the spinlabs package is in the Python path."
-        ) from exc
-
-    calculator = TransitionRate(str(data_path), two_phonon_path)
+        raise ImportError("Could not import spinlabs. Ensure the spinlabs package is in the Python path.") from exc
 
     # Build temperature grid: fine near 0 K, coarser above
     low_range = np.arange(0, 1, t_step / 100)
     high_range = np.arange(1 + t_step, t_end + t_step, t_step)
     temperatures = np.concatenate([low_range, high_range])
-
-    # Pre‑compute spectral densities
-    omega, J_0_pm, J_p_m, J_0_0 = calculator.get_spectral_density(res=0.01, sigma=7.5)
-    if two_phonon_path:
-        lines = calculator.get_line_spectral_density(sigma=7.5)
-    else:
-        lines = None
-
-    zfs = calculator.data["zfs"] / CONSTANTS["meV2J"]
-
-    results = {
-        "first_order": {"0_1": [], "1_-1": []},
-        "second_order": {"0_1": [], "1_-1": []},
-        "two_phonon": {"0_1": [], "1_-1": []},
-    }
-    directional_results = {
-        "0_to_1": [],
-        "0_to_-1": [],
-        "1_to_0": [],
-        "-1_to_0": [],
-        "1_to_-1": [],
-        "-1_to_1": [],
-    }
-    valid_temps = []
-
     print(f"Computing transition rates for {len(temperatures)} temperature points...")
 
-    for T in temperatures:
-        calculator.compute_transition_rates(T, omega, J_0_pm, J_p_m, J_0_0, zfs)
-        if two_phonon_path:
-            calculator.compute_two_phonon_rates(T, lines)
-        total_rates = calculator.get_total_rates()
-        directional_rates = calculator.get_directional_rates()
+    rs = rate_series(data_path, temperatures, sigma=sigma, two_phonon_file=two_phonon_path or None, direct="gaussian")
+    results = {p: {c: v.tolist() for c, v in d.items()} for p, d in rs.totals.items()}
+    directional_results = {d: v.tolist() for d, v in rs.directional().items()}
+    valid_temps = rs.temperatures.tolist()
 
-        if total_rates and directional_rates:
-            for direction, rate in directional_rates.items():
-                directional_results[direction].append(rate)
-
-            for order in ["first_order", "second_order", "two_phonon"]:
-                for transition, rate in total_rates[order].items():
-                    results[order][transition].append(rate)
-
-            valid_temps.append(T)
-
-    meta_data = {
-        "cell_size": calculator.data["cell_size"],
-        "defect": calculator.data["defect"],
-        "calc_method": calculator.data["calc_method"],
-        "pert_scale": calculator.data["pert_scale"],
-    }
+    data = np.load(data_path, allow_pickle=True)
+    meta_data = {k: data[k] for k in ("cell_size", "defect", "calc_method", "pert_scale")}
 
     return results, directional_results, valid_temps, meta_data
 

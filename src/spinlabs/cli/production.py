@@ -7,7 +7,7 @@ here keeps the stages computing what ``spinlabs run`` computes.
 
 import argparse
 
-from spinlabs.pipeline import ALL_PROCESSES, PRODUCTION_DIRECT, PRODUCTION_PROCESSES
+from spinlabs.pipeline import ALL_PROCESSES, PRODUCTION_COUPLING_OPTIONS, PRODUCTION_DIRECT, PRODUCTION_PROCESSES
 from spinlabs.relaxation_dynamics import INIT_STATES, init_populations, init_states, normalize_init_state
 from spinlabs.transition_rate import TransitionRate
 
@@ -17,7 +17,7 @@ def add_coupling_args(opt: argparse._ArgumentGroup) -> None:
     opt.add_argument(
         "--exclude-inconsistent-pairs",
         action=argparse.BooleanOptionalAction,
-        default=True,
+        default=PRODUCTION_COUPLING_OPTIONS["exclude_inconsistent_pairs"],
         help="Drop second-order entries whose ZFS change departs from the one expected from the first-order runs "
         "by a multiple of it (strongly nonlinear modes, or over-displaced or stale runs); they are listed either "
         "way (default: dropped; --no-exclude-inconsistent-pairs keeps them)",
@@ -28,14 +28,15 @@ def add_coupling_args(opt: argparse._ArgumentGroup) -> None:
     )
     opt.add_argument(
         "--degenerate-pairs-from-symmetry",
-        action="store_true",
+        action=argparse.BooleanOptionalAction,
+        default=PRODUCTION_COUPLING_OPTIONS["degenerate_pairs_from_symmetry"],
         help="Take the second-order coupling of each degenerate Ex-Ey pair from its Ex-Ex derivative (C3v "
         "symmetry) instead of the computed Ex-Ey entry, so those runs are not needed",
     )
     opt.add_argument(
         "--offdiag-from-diagonal",
         action=argparse.BooleanOptionalAction,
-        default=True,
+        default=PRODUCTION_COUPLING_OPTIONS["offdiag_from_diagonal"],
         help="Approximate every second-order pair (i, j), i != j, that was not run from the diagonal couplings: "
         "sqrt(V_ii V_jj) per coupling type, and sqrt(V00_aa V_ee) for A x E pairs; a heuristic, only for the "
         "types the pair's symmetry allows (computed pairs keep their values) (default: on; "
@@ -44,7 +45,7 @@ def add_coupling_args(opt: argparse._ArgumentGroup) -> None:
     opt.add_argument(
         "--mirror-projection",
         action=argparse.BooleanOptionalAction,
-        default=True,
+        default=PRODUCTION_COUPLING_OPTIONS["mirror_projection"],
         help="Use mirror symmetry (C3v) on the diagonal second differences, whose true value is symmetric under "
         "the mode's sigma_v. Forward (D(2Q) - 2 D(Q) + D0): a mode that the mirror maps onto -Q keeps the "
         "mirror-symmetric part of its d2D (its odd-in-Q error removed) and its mirror-even E partner takes its "
@@ -56,13 +57,8 @@ def add_coupling_args(opt: argparse._ArgumentGroup) -> None:
 
 
 def coupling_options(args: argparse.Namespace) -> dict:
-    """ZFSManager keyword arguments from the flags of :func:`add_coupling_args`."""
-    return dict(
-        exclude_inconsistent_pairs=args.exclude_inconsistent_pairs,
-        degenerate_pairs_from_symmetry=args.degenerate_pairs_from_symmetry,
-        offdiag_from_diagonal=args.offdiag_from_diagonal,
-        mirror_projection=args.mirror_projection,
-    )
+    """build_manager keyword arguments from the flags of :func:`add_coupling_args` (PRODUCTION_COUPLING_OPTIONS keys)."""
+    return {key: getattr(args, key) for key in PRODUCTION_COUPLING_OPTIONS}
 
 
 def add_rate_args(opt: argparse._ArgumentGroup, raman_note: str = "") -> None:

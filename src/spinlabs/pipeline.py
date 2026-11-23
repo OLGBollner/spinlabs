@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import time
+from dataclasses import dataclass
 from collections.abc import Sequence
 from datetime import datetime
 from pathlib import Path
@@ -355,6 +356,101 @@ ALL_PROCESSES = ("first_order", "second_order", "two_phonon")
 PRODUCTION_DIRECT = "debye"
 PRODUCTION_PROCESSES = ("first_order", "two_phonon")
 PRODUCTION_T_END, PRODUCTION_T_STEP = 600.0, 5.0
+# ZFSManager options of the production runs, the defaults of `spinlabs run` and its stages (cli/production.py
+# takes its flag defaults from here) and of every analysis built with build_manager / coupling_manager.
+PRODUCTION_COUPLING_OPTIONS = {
+    "exclude_inconsistent_pairs": True,
+    "degenerate_pairs_from_symmetry": False,
+    "offdiag_from_diagonal": True,
+    "mirror_projection": True,
+}
+# Second-order pair treatments (build_manager ``pairs``): which runs enter, and whether the pairs not run are
+# filled with the geometric mean of the diagonals (offdiag_from_diagonal).
+PAIR_MODES = {
+    "sqrt": "every computed pair, the pairs not run filled with sqrt(V_ii V_jj) (production)",
+    "computed": "the computed pairs only, no fill",
+    "diagonal": "the diagonal (i, i) runs only, no fill",
+    "diagonal-sqrt": "the diagonal (i, i) runs only, every off-diagonal pair filled",
+    "no_axe": "the computed pairs without the A x E ones, no fill",
+}
+_PAIR_FILL = {"sqrt": True, "computed": False, "diagonal": False, "diagonal-sqrt": True, "no_axe": False}
+
+
+def build_manager(
+    raw_data: RawZFSData,
+    spectrum: PhononSpectrum | None,
+    *,
+    pairs: str | None = None,
+    displacement: str | None = None,
+    calc_method: str | None = None,
+    **options: bool,
+) -> ZFSManager:
+    """The ZFSManager of loaded raw data: the one place an analysis builds it, whatever the method.
+
+    AO, UO and the full decontamination differ only in how load_raw_inputs builds their D tensors (a UO file is
+    spin-corrected on load, a full-decont sublevel set is combined into one dataset); from here on they share
+    every step. ``options`` override PRODUCTION_COUPLING_OPTIONS. ``pairs`` (PAIR_MODES) picks the second-order
+    runs that enter and sets offdiag_from_diagonal to match; None keeps the options' fill and every run.
+    ``displacement`` overrides the raw data's displacement convention (for packages flagged wrongly).
+    ``calc_method`` overrides the method label, which otherwise comes from the data.
+    """
+    unknown = sorted(set(options) - set(PRODUCTION_COUPLING_OPTIONS))
+    if unknown:
+        raise TypeError(f"unknown coupling option(s) {unknown}: choose from {sorted(PRODUCTION_COUPLING_OPTIONS)}")
+    opts = {**PRODUCTION_COUPLING_OPTIONS, **options}
+    if pairs is not None:
+        if pairs not in PAIR_MODES:
+            raise ValueError(f"unknown pair treatment {pairs!r}: choose from {sorted(PAIR_MODES)}")
+        fill = _PAIR_FILL[pairs]
+        if "offdiag_from_diagonal" in options and bool(options["offdiag_from_diagonal"]) != fill:
+            raise ValueError(f"pairs={pairs!r} {'fills' if fill else 'does not fill'} the pairs not run, but "
+                             f"offdiag_from_diagonal={options['offdiag_from_diagonal']} was asked for")
+        opts["offdiag_from_diagonal"] = fill
+    if displacement:
+        raw_data.displacement = displacement
+    manager = ZFSManager(raw_data=raw_data, spectrum=spectrum, **opts)
+    if calc_method:
+        manager.calc_method = normalize_calc_method(calc_method)
+    if pairs in ("diagonal", "diagonal-sqrt"):  # as if only the (i, i) pairs had been run
+        manager.zfs_tensors_2d = {k: v for k, v in manager.zfs_tensors_2d.items() if k[0] == k[1]}
+    elif pairs == "no_axe":
+        a, e = {"A1", "A2"}, {"Ex", "Ey"}
+        manager.zfs_tensors_2d = {k: v for k, v in manager.zfs_tensors_2d.items()
+                                  if not (set(v["symmetry"]) & a and set(v["symmetry"]) & e)}
+    manager.pairs = pairs or ("sqrt" if opts["offdiag_from_diagonal"] else "computed")
+    return manager
+
+
+def coupling_manager(
+    *,
+    sim_folder: str | Path | Sequence[str | Path] | None = None,
+    raw_zfs_file: str | Path | Sequence[str | Path] | None = None,
+    raw_zfs_file_1d: str | Path | None = None,
+    raw_zfs_file_2d: str | Path | None = None,
+    phonon_file: str | Path | None = None,
+    calc_method: str | None = None,
+    zfs_folder: str | None = None,
+    order: int | None = None,
+    pert_scale: float | None = None,
+    defect: str | None = None,
+    cell_size: int | None = None,
+    pairs: str | None = None,
+    displacement: str | None = None,
+    **options: bool,
+) -> tuple[ZFSManager, Path | None]:
+    """load_raw_inputs + build_manager: the ZFSManager of any input, as ``spinlabs run`` builds it.
+
+    ``raw_zfs_file`` may be a package or a full-decontamination folder (its sublevels are combined on load).
+    Returns the manager and the phonon file used.
+    """
+    raw_data, spectrum, ph_path = load_raw_inputs(
+        sim_folder=sim_folder, raw_zfs_file=raw_zfs_file, raw_zfs_file_1d=raw_zfs_file_1d,
+        raw_zfs_file_2d=raw_zfs_file_2d, phonon_file=phonon_file, calc_method=calc_method or "AO",
+        zfs_folder=zfs_folder, order=order, pert_scale=pert_scale, defect=defect, cell_size=cell_size,
+    )
+    manager = build_manager(raw_data, spectrum, pairs=pairs, displacement=displacement,
+                            calc_method=calc_method, **options)
+    return manager, ph_path
 
 
 def temperature_grid(
@@ -371,7 +467,37 @@ def temperature_grid(
     return grid
 
 
-def compute_rates(
+@dataclass
+class RateSeries:
+    """Transition rates of one coupling file on a temperature grid (rate_series).
+
+    ``rates``: process -> direction ("m_to_m'", spinlabs.spin.directions) -> rate (1/s) per temperature;
+    ``totals``: process -> transition class (spinlabs.spin.transition_classes) -> mean directional rate.
+    """
+
+    temperatures: np.ndarray
+    rates: dict[str, dict[str, np.ndarray]]
+    totals: dict[str, dict[str, np.ndarray]]
+    spin: float
+    zfs_mev: float
+    debye_C: float | None = None
+    debye_C_pm: float | None = None
+
+    @property
+    def directions(self) -> list[str]:
+        return list(next(iter(self.rates.values())))
+
+    def directional(self, processes: Sequence[str] | None = None) -> dict[str, np.ndarray]:
+        """Directional rates summed over ``processes`` (default: all of ALL_PROCESSES)."""
+        processes = tuple(ALL_PROCESSES if processes is None else processes)
+        unknown = [p for p in processes if p not in ALL_PROCESSES]
+        if unknown:
+            raise ValueError(f"unknown process(es) {unknown}: choose from {ALL_PROCESSES}")
+        return {d: sum((self.rates[p][d] for p in processes), np.zeros(len(self.temperatures)))
+                for d in self.directions}
+
+
+def rate_series(
     coupling_path: str | Path,
     temps: Sequence[float],
     *,
@@ -382,9 +508,8 @@ def compute_rates(
     direct: str = "gaussian",
     b_field_mt: float = 0.0,
     spectrum=None,
-    processes: Sequence[str] | None = None,
-) -> tuple[np.ndarray, dict, dict]:
-    """Transition rates of a coupling file at each temperature.
+) -> RateSeries:
+    """Transition rates of a coupling file at each temperature, every process and direction: the one rate loop.
 
     ``sigma`` (meV) broadens each mode in the 1D and 2D spectral functions,
     standing in for the continuous phonon bands of a macroscopic crystal. The
@@ -394,14 +519,8 @@ def compute_rates(
     (i, i) and degenerate partners, are left out there. ``direct`` picks the
     one-phonon rate (TransitionRate.DIRECT_MODELS); "debye" needs the ``spectrum`` the
     couplings were computed on. ``b_field_mt`` is an axial magnetic field (mT): it splits +1 and -1,
-    which gives the +1 <-> -1 direct rate (C_+- with "debye") and moves every gap. The directional rates (which
-    T1 is solved from) sum ``processes`` (default: all of ALL_PROCESSES); the total rates keep every process.
-    Returns the temperatures with a result, the total rates per process and the directional rates.
+    which gives the +1 <-> -1 direct rate (C_+- with "debye") and moves every gap.
     """
-    processes = tuple(ALL_PROCESSES if processes is None else processes)
-    unknown = [p for p in processes if p not in ALL_PROCESSES]
-    if unknown:
-        raise ValueError(f"unknown process(es) {unknown}: choose from {ALL_PROCESSES}")
     two_ph_p = Path(two_phonon_file) if two_phonon_file else None
     calculator = TransitionRate(str(coupling_path), two_phonon_data_file=two_ph_p)
     calculator.b_field_mt = b_field_mt
@@ -424,43 +543,100 @@ def compute_rates(
         lines = calculator.get_line_spectral_density(sigma, degenerate_groups=degenerate_groups)
     omega_zfs = calculator.data["zfs"] / CONSTANTS["meV2J"]
 
-    # Total rates per transition class (S = 1: "0_1", "1_-1"), directional rates per "m_to_m'" key of the spin
     classes = list(transition_classes(calculator.spin))
-    rate_results = {k: {c: [] for c in classes} for k in ("first_order", "second_order", "two_phonon")}
-    directional_results = {k: [] for k in calculator.directions}
+    rates = {p: {d: [] for d in calculator.directions} for p in ALL_PROCESSES}
+    totals = {p: {c: [] for c in classes} for p in ALL_PROCESSES}
     valid_temps = []
     for T in temps:
         calculator.compute_transition_rates(T, omega, J_0_pm, J_p_m, J_0_0, omega_zfs)
         if two_phonon:
             calculator.compute_two_phonon_rates(T, lines)
         total_rates = calculator.get_total_rates()
-        dir_rates = {
-            d: sum(calculator.transition_rate[p].get(d, 0.0) for p in processes) for d in calculator.directions
-        }
-        if total_rates and dir_rates:
-            for k, val in dir_rates.items():
-                directional_results[k].append(val)
-            for ord_k in rate_results:
-                for trans_k in classes:
-                    rate_results[ord_k][trans_k].append(total_rates[ord_k][trans_k])
-            valid_temps.append(float(T))
-    return np.asarray(valid_temps, dtype=float), rate_results, directional_results
+        if not total_rates:
+            continue
+        for p in ALL_PROCESSES:
+            for d in calculator.directions:
+                rates[p][d].append(float(calculator.transition_rate.get(p, {}).get(d, 0.0)))
+            for c in classes:
+                totals[p][c].append(total_rates.get(p, {}).get(c, 0.0))
+        valid_temps.append(float(T))
+    arr = lambda nested: {p: {k: np.asarray(v, dtype=float) for k, v in d.items()} for p, d in nested.items()}  # noqa: E731
+    return RateSeries(
+        temperatures=np.asarray(valid_temps, dtype=float), rates=arr(rates), totals=arr(totals),
+        spin=float(calculator.spin), zfs_mev=float(omega_zfs),
+        debye_C=calculator.debye_fit.C if calculator.debye_fit is not None else None,
+        debye_C_pm=calculator.debye_fit_pm.C if calculator.debye_fit_pm is not None else None,
+    )
+
+
+def compute_rates(
+    coupling_path: str | Path,
+    temps: Sequence[float],
+    *,
+    sigma: float = DEFAULT_SIGMA_MEV,
+    two_phonon_file: str | Path | None = None,
+    has_second_order: bool = False,
+    degenerate_groups=None,
+    direct: str = "gaussian",
+    b_field_mt: float = 0.0,
+    spectrum=None,
+    processes: Sequence[str] | None = None,
+) -> tuple[np.ndarray, dict, dict]:
+    """Transition rates of a coupling file at each temperature (rate_series, in the form the run saves).
+
+    The directional rates (which T1 is solved from) sum ``processes`` (default: all of ALL_PROCESSES); the total
+    rates keep every process. Returns the temperatures with a result, the total rates per process (lists per
+    transition class) and the directional rates (lists per direction).
+    """
+    processes = tuple(ALL_PROCESSES if processes is None else processes)
+    unknown = [p for p in processes if p not in ALL_PROCESSES]
+    if unknown:
+        raise ValueError(f"unknown process(es) {unknown}: choose from {ALL_PROCESSES}")
+    series = rate_series(coupling_path, temps, sigma=sigma, two_phonon_file=two_phonon_file,
+                         has_second_order=has_second_order, degenerate_groups=degenerate_groups, direct=direct,
+                         b_field_mt=b_field_mt, spectrum=spectrum)
+    totals = {p: {c: v.tolist() for c, v in d.items()} for p, d in series.totals.items()}
+    directional = {d: v.tolist() for d, v in series.directional(processes).items()}
+    return series.temperatures, totals, directional
+
+
+def t1_details(
+    temps: Sequence[float], directional_rates: dict, init_state: str, spin: float = 1.0
+) -> tuple[np.ndarray, np.ndarray, list[str]]:
+    """T1 (s) by the population fit, T1 by the eigenvalue, and the source per temperature: the one T1 solver.
+
+    RelaxationDynamics.get_T1_fit_details at each temperature: "fit", the "eigenvalue" fallback, or "none"
+    (0 K). ``init_state`` names a state of ``spin`` (relaxation_dynamics.init_populations: ms_0, ms_1, ms_-1 for
+    S = 1; ms_pm1_2, ms_pm3_2 for S = 3/2, fitted to the doublet's summed population).
+    """
+    populations = init_populations(spin)
+    if init_state not in populations:
+        raise ValueError(f"init_state {init_state!r} is not a state of this spin: {', '.join(populations)}")
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "directional.npz"
+        np.savez(path, temperatures=np.asarray(temps, dtype=float), spin=float(spin),
+                 **{k: np.asarray(v, dtype=float) for k, v in directional_rates.items()})
+        dynamics = RelaxationDynamics(init_state=populations[init_state], rates_data=str(path))
+        rows = [dynamics.get_T1_fit_details(temp_index=i) for i in range(len(dynamics.temperatures))]
+    if not rows:
+        return np.zeros(0), np.zeros(0), []
+    t1, t1_eig, source = zip(*rows)
+    return np.asarray(t1, dtype=float), np.asarray(t1_eig, dtype=float), list(source)
 
 
 def solve_t1(directional_rates_path: str | Path, init_state: str) -> tuple[np.ndarray, np.ndarray]:
-    """ODE-fit and eigenvalue T1 (s) at each temperature of a directional-rates file.
+    """ODE-fit and eigenvalue T1 (s) at each temperature of a directional-rates file (t1_details).
 
     ``init_state`` names a state of the file's spin (relaxation_dynamics.init_populations: ms_0, ms_1, ms_-1 for
     S = 1; ms_pm1_2, ms_pm3_2 for S = 3/2).
     """
-    populations = init_populations(rates_file_spin(directional_rates_path))
-    if init_state not in populations:
-        raise ValueError(f"init_state {init_state!r} is not a state of this spin: {', '.join(populations)}")
-    dynamics = RelaxationDynamics(init_state=populations[init_state], rates_data=str(directional_rates_path))
-    t1_fit = np.asarray(dynamics.compute_T1_range(), dtype=float)
-    t1_eig = np.asarray(
-        [dynamics.get_T1_eigenval(temp_index=i)[0] for i in range(len(dynamics.temperatures))], dtype=float
-    )
+    spin = rates_file_spin(directional_rates_path)
+    with np.load(directional_rates_path, allow_pickle=True) as data:
+        temps = np.asarray(data["temperatures"], dtype=float)
+        rates = {k: np.asarray(data[k], dtype=float) for k in data.files if "_to_" in k}
+    t1_fit, t1_eig, _ = t1_details(temps, rates, init_state, spin)
     return t1_fit, t1_eig
 
 
@@ -778,16 +954,15 @@ def _execute_pipeline(
         coupling_data.save(coupling_path)
         LOGGER.info(f"saved coupling data (copied from the input): {coupling_path}")
     else:
-        manager = ZFSManager(
-            raw_data=raw_data,
-            spectrum=spectrum,
+        manager = build_manager(
+            raw_data,
+            spectrum,
+            calc_method=calc_method or None,
             exclude_inconsistent_pairs=exclude_inconsistent_pairs,
             degenerate_pairs_from_symmetry=degenerate_pairs_from_symmetry,
             offdiag_from_diagonal=offdiag_from_diagonal,
             mirror_projection=mirror_projection,
         )
-        if calc_method:
-            manager.calc_method = calc_method
         out_base = str(run_dir / "spin_phonon_coupling")
         has_both = bool(manager.zfs_tensors_2d and manager.zfs_tensors)
 

@@ -216,7 +216,8 @@ class ZFSManager:
         self.defect = raw.defect
         self.cell_size = raw.cell_size
         self.pert_scale = raw.pert_scale
-        self.calc_method = normalize_calc_method(raw.metadata.get("calc_method")) or "calc"
+        # the data's own method (a full-decont set combined on load has it only there), the metadata as fallback
+        self.calc_method = normalize_calc_method(raw.calc_method or raw.metadata.get("calc_method")) or "calc"
 
         if raw.ground_state_zfs is not None:
             D_xx, D_yy, D_zz, R = raw.ground_state_zfs.principal_components()

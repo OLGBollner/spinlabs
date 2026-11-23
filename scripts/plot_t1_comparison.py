@@ -38,10 +38,9 @@ from spinlabs.pipeline import (  # noqa: E402
     PRODUCTION_DIRECT,
     PRODUCTION_PROCESSES,
     compute_rates,
-    load_raw_inputs,
     solve_t1,
 )
-from spinlabs.zfs_manager import ZFSManager  # noqa: E402
+from spinlabs.pipeline import coupling_manager as pipeline_coupling_manager  # noqa: E402
 
 MODES = ("computed", "sqrt", "diagonal", "diagonal-sqrt")
 NOGAP = "+nogap"
@@ -94,25 +93,15 @@ MODE_STYLES = {
 }
 
 
-def coupling_manager(raw_file, mode, displacement=None, mirror_projection=True):
-    """ZFSManager for one raw package with the second-order pairs of ``mode`` (one of MODES).
+def coupling_manager(raw_file, mode, displacement=None, **options):
+    """ZFSManager for one raw package or full-decont folder with the second-order pairs of ``mode`` (MODES).
 
-    ``mirror_projection``: as `spinlabs run` (on by default), see ZFSManager.
+    spinlabs.pipeline.coupling_manager, as `spinlabs run` builds it: the method comes from the data, the
+    coupling options are the production ones (PRODUCTION_COUPLING_OPTIONS) unless ``options`` override them,
+    e.g. mirror_projection=False. Returns the manager and a label of its step and displacement convention.
     """
-    method = "defect_band_approx" if "defect_band_approx" in Path(raw_file).name else "all_bands"
-    raw, spectrum, _ = load_raw_inputs(raw_zfs_file=raw_file, calc_method=method, zfs_folder="ZFS_hyp", order=2)
-    if displacement:
-        raw.displacement = displacement
-    manager = ZFSManager(
-        raw_data=raw,
-        spectrum=spectrum,
-        exclude_inconsistent_pairs=True,
-        offdiag_from_diagonal=mode in ("sqrt", "diagonal-sqrt"),
-        mirror_projection=mirror_projection,
-    )
-    manager.calc_method = method
-    if mode.startswith("diagonal"):  # as if only the (i, i) pairs had been run
-        manager.zfs_tensors_2d = {k: v for k, v in manager.zfs_tensors_2d.items() if k[0] == k[1]}
+    manager, _ = pipeline_coupling_manager(raw_zfs_file=raw_file, pairs=mode, displacement=displacement, **options)
+    raw = manager.raw_data
     return manager, f"{raw.defect}_{raw.cell_size} step {raw.pert_scale:g}: {manager.displacement}"
 
 

@@ -53,8 +53,9 @@ def production_block():
         "meV), geometric-mean fill otherwise (E x E: sqrt(V_T(i,i) V_T(j,j)); A x E: sqrt(V00(a,a) V_T(e,e)))",
         "- first-order Raman (second_order process): excluded; rates = direct + two-phonon",
         "- steps: NV 64 = 0.1, NV 512 = 0.05, VV0 128 = 0.05, ClV 576 = 0.05 (packages listed per figure)",
-        "- second-order couplings via plot_t1_comparison.coupling_manager with exclude_inconsistent_pairs=True "
-        "(second-order entries inconsistent with first order are dropped)",
+        "- second-order couplings via spinlabs.pipeline.coupling_manager (as `spinlabs run`; every scheme, the full "
+        "decontamination included, through the same code) with the production options (inconsistent second-order "
+        "entries dropped)",
         f"- mirror projection of the diagonal second differences (as `spinlabs run`): {'on' if C.MIRROR_PROJECTION else 'off'}",
         f"- temperatures: {T[0]:g}-{T[-1]:g} K, step {T[1] - T[0]:g} K",
         "- T1: rate matrix A from the directional rates, p(t) = exp(A t) p0 from the polarized state (exact "
