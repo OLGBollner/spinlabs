@@ -116,10 +116,12 @@ class FigureHost(ttk.Frame):
             self.view.xview_scroll(-1 if event.delta > 0 else 1, "units")
 
     def _update_scrollregion(self, _event=None):
-        if self.scroll and self._canvas_widget is not None:
-            width = self._canvas_widget.winfo_reqwidth()
-            height = self._canvas_widget.winfo_reqheight()
-            self.view.configure(scrollregion=(0, 0, width, height))
+        if not self.scroll or self._canvas_widget is None or self.figure is None:
+            return
+        widget = self._canvas_widget.get_tk_widget()
+        width = max(widget.winfo_reqwidth(), int(self.figure.get_figwidth() * self.figure.dpi))
+        height = max(widget.winfo_reqheight(), int(self.figure.get_figheight() * self.figure.dpi))
+        self.view.configure(scrollregion=(0, 0, width, height))
 
     def set_figure(self, figure: Figure) -> None:
         old = self.figure
@@ -601,6 +603,7 @@ class ConvergenceApp:
         self._scheme_vars: dict[str, tuple[tk.BooleanVar, tk.StringVar]] = {}
         self._syncing = False
         self._restoring = False
+        self._closed = False
         self._group_by_row: dict[str, Group] = {}
 
         self._style()
@@ -1424,7 +1427,12 @@ class ConvergenceApp:
     def _save_state(self) -> None:
         if self._restoring:
             return
-        geometry = self.root.geometry()
+        try:
+            if not self.root.winfo_exists():
+                return
+            geometry = self.root.geometry()
+        except tk.TclError:
+            return
         if self.root.winfo_width() <= 1:
             geometry = self.state.geometry
         tabs = [tab.state() for tab in self.tabs.values()]
@@ -1510,8 +1518,17 @@ class ConvergenceApp:
                 self.set_status("Empty registry — use File → Open or `spinlabs package --conv`")
 
     def quit(self) -> None:
-        self._save_state()
-        self.root.destroy()
+        if self._closed:
+            return
+        self._closed = True
+        try:
+            self._save_state()
+        except Exception:
+            LOGGER.exception("could not save GUI state")
+        try:
+            self.root.destroy()
+        except tk.TclError:
+            pass
 
 
 def main(paths: list[Path] | None = None) -> int:
