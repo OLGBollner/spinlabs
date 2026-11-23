@@ -22,13 +22,7 @@ from spinlabs.vasp.trees import full_spectrum_of, tree_displacement, tree_phonon
 from spinlabs.registry import SUBLEVEL_KINDS, ensure_db, register_file
 from spinlabs.pack_convergence import ConvergenceScan, save_convergence, scan_convergence
 from spinlabs.decont import high_spin
-from spinlabs.parsers import (
-    decont_sublevels,
-    parse_decont_dataset,
-    parse_phonon_data,
-    parse_zfs_simulation_dataset,
-    split_defect_folder_name,
-)
+from spinlabs.parsers import decont_sublevels, parse_decont_dataset, parse_zfs_simulation_dataset, split_defect_folder_name
 from spinlabs.methods import CLI_CHOICES, METHODS, basis_dir, ground_state_dir, method_from_path
 from spinlabs.vasp.settings import (
     compare_settings,
@@ -190,7 +184,7 @@ def _run(args: argparse.Namespace) -> None:
         if found and phonon is not None:
             phonons[(found[0].defect, found[0].cell_size)] = phonon
     try:
-        aligned_phonons = _job_script_phonons(scanned, phonons)
+        aligned_phonons = _job_script_phonons([(s.defect, s.cell_size, s.phonon, s.aligned) for s in scanned], phonons)
     except ValueError as error:
         raise SystemExit(f"error: {error}")
     section(LOGGER, "Summary")
@@ -225,25 +219,26 @@ def _same_spectrum(a: Path, b: Path) -> bool:
     )
 
 
-def _job_script_phonons(scanned: list["_Scanned"], phonons: dict) -> dict[tuple[str, int], Path]:
+def _job_script_phonons(datasets, phonons: dict) -> dict[tuple[str, int], Path]:
     """The defects' aligned full spectra, from the datasets' job scripts; updates ``phonons`` (unaligned) too.
 
-    Each dataset is tagged with the alignment of the spectrum its trees displaced along (_Scanned.aligned);
-    the analysis picks the packaged phonon_data.npz or phonon_data_aligned.npz of the defect by that tag,
-    so one of each per defect must hold for all its datasets. Raises ValueError on a conflict.
+    ``datasets`` are (defect, cell, phonon, aligned) per dataset: the full spectrum its trees or convergence
+    runs displaced along and its alignment (_Scanned, _ConvScanned). The analysis picks the packaged
+    phonon_data.npz or phonon_data_aligned.npz of the defect by that tag, so one of each per defect must
+    hold for all its datasets. Raises ValueError on a conflict.
     """
     named: dict[bool, dict[tuple[str, int], Path]] = {True: {}, False: {}}
-    for s in scanned:
-        if s.phonon is None:
+    for defect, cell, phonon, aligned in datasets:
+        if phonon is None:
             continue
-        key, group = (s.defect, s.cell_size), named[bool(s.aligned)]
-        if key in group and not _same_spectrum(group[key], s.phonon):
-            kind = "aligned" if s.aligned else "unaligned"
+        key, group = (defect, cell), named[bool(aligned)]
+        if key in group and not _same_spectrum(group[key], phonon):
+            kind = "aligned" if aligned else "unaligned"
             raise ValueError(
-                f"{s.defect}_{s.cell_size}: datasets displaced along different {kind} spectra "
-                f"({group[key]} and {s.phonon}); package them separately"
+                f"{defect}_{cell}: datasets displaced along different {kind} spectra "
+                f"({group[key]} and {phonon}); package them separately"
             )
-        group[key] = s.phonon
+        group[key] = phonon
     for key, path in named[False].items():  # the job scripts' spectrum wins over the one found by name
         if key in phonons and not _same_spectrum(phonons[key], path):
             LOGGER.warning(
@@ -564,7 +559,9 @@ def _find_phonon_npz(defect_folder: Path) -> Path | None:
             if (folder / name).is_file():
                 return folder / name
     candidates = sorted(p for folder in search_dirs for p in folder.glob("*phonon*.npz"))
-    full = [p for p in candidates if "sym" not in p.stem]
+    # Mirror-aligned spectra (spinlabs symmetrize --align, resolve_sym_phonon) are other vectors than the
+    # phonon code's: they are packaged as phonon_data_aligned.npz from the job scripts, never as the defect's.
+    full = [p for p in candidates if "sym" not in p.stem and "aligned" not in p.stem]
     if len(full) == 1:
         return full[0]
     if full:
@@ -914,28 +911,33 @@ def _run_conv(args: argparse.Namespace, defect_folder: Path) -> None:
     if not conv_roots:
         raise SystemExit(f"No convergence* folders found under {defect_folder}")
     scanned = [s for root in conv_roots for s in _scan_conv(args, defect_folder, root)]
+    # The defect's phonon data, chosen as for the perturbation trees: the full spectrum the job scripts name
+    # (one of each kind per defect), else (older folders) the defect's phonon file found by name.
+    phonons: dict[tuple[str, int], Path] = {}
+    if scanned:
+        found = _find_phonon_npz(defect_folder)
+        if found is not None:
+            phonons[(scanned[0].defect, scanned[0].cell)] = found
+    try:
+        aligned_phonons = _job_script_phonons(
+            [(s.defect, s.cell, s.scan.phonon_file, s.scan.aligned) for s in scanned], phonons
+        )
+    except ValueError as error:
+        raise SystemExit(f"error: {error}")
     section(LOGGER, "Summary")
-    _print_conv_summary(scanned)
+    _print_conv_summary(scanned, phonons)
     if getattr(args, "scan", False) or not scanned:
         return
     if not getattr(args, "yes", False) and not _confirm("Save the convergence data to file? (Y/n): "):
         LOGGER.info("nothing saved")
         return
+    try:
+        _check_packaged_aligned(aligned_phonons, args.output_root)
+    except ValueError as error:
+        raise SystemExit(f"error: {error}")
     section(LOGGER, "Save convergence data")
-    # Follow the main packaging path: ship the full spectrum the trees displaced along
-    # next to the defect, and register it, so convergence data keeps its symmetry lookup.
-    phonons: dict[tuple[str, int], Path] = {}
-    aligned_phonons: dict[tuple[str, int], Path] = {}
-    for s in scanned:
-        source = s.scan.phonon_file
-        if source is None or not Path(source).is_file():
-            continue
-        key = (s.defect, s.cell)
-        (aligned_phonons if s.scan.aligned else phonons)[key] = Path(source)
-    if phonons:
-        _save_phonons(phonons, args.output_root)
-    if aligned_phonons:
-        _save_phonons(aligned_phonons, args.output_root, name=ALIGNED_PHONON_NAME)
+    _save_phonons(phonons, args.output_root)
+    _save_phonons(aligned_phonons, args.output_root, name=ALIGNED_PHONON_NAME)
     date_dir = date.today().strftime("%Y%m%d")
     for s in scanned:
         leaf = args.output_root / f"{s.defect}_{s.cell}" / (s.calc_method or "conv") / date_dir
@@ -992,24 +994,8 @@ def _scan_conv(args: argparse.Namespace, defect_folder: Path, root: Path) -> lis
         LOGGER.warning(f"{defect_folder.name}/{root.name}: {exc}; not packaged")
         return []
     LOGGER.info(f"{scan.n_runs} run folder(s), {scan.n_finished} with a ZFS tensor")
-    # Pair the convergence runs with the full spectrum their job scripts name, exactly as
-    # the raw-data packaging does; fall back to the defect's packaged full spectrum.
-    phonon = _find_phonon_npz(defect_folder)
-    tree_phonon_file = tree_phonon(root)
-    if tree_phonon_file is not None:
-        try:
-            tree_phonon_file = full_spectrum_of(tree_phonon_file)
-        except ValueError:
-            pass
-        if tree_phonon_file.is_file():
-            phonon = tree_phonon_file
-    if phonon is not None:
-        try:
-            spectrum = parse_phonon_data(phonon)
-            scan.phonon_file = phonon
-            scan.aligned = bool(spectrum.aligned)
-        except Exception as exc:
-            LOGGER.warning(f"{defect_folder.name}/{root.name}: cannot read phonon spectrum {phonon}: {exc}")
+    if not _pair_conv_phonon(defect_folder, root, [scan]):
+        return []
     ground_state = args.ground_state
     if ground_state == _GS_AUTO:
         ground_state = _auto_ground_state(defect_folder, method)
@@ -1022,6 +1008,24 @@ def _scan_conv(args: argparse.Namespace, defect_folder: Path, root: Path) -> lis
         ground = None
     settings = _vasp_settings(ground, {"runs": tree_settings(root)})
     return [_ConvScanned(defect, cell, suffix, method, calc_method, ground_state, scan, settings)]
+
+
+def _pair_conv_phonon(defect_folder: Path, root: Path, scans: list[ConvergenceScan]) -> bool:
+    """Set the full spectrum a convergence folder's job script displaces along (PHONON_PATH) and its
+    alignment on ``scans``, as for the perturbation trees (_dataset_phonon, _aligned_of).
+
+    A script that names none leaves them None (older folders: the defect's phonon file is packaged, found
+    by name). False, with an error, when the named file cannot be paired with its full spectrum.
+    """
+    named = tree_phonon(root)
+    phonon, problem = _dataset_phonon({named} if named is not None else set())
+    if problem:
+        LOGGER.error(f"{defect_folder.name}/{root.name}: {problem}; not packaged")
+        return False
+    aligned = _aligned_of(phonon)
+    for scan in scans:
+        scan.phonon_file, scan.aligned = phonon, aligned
+    return True
 
 
 def _scan_conv_decont(defect_folder: Path, root: Path, suffix: str, sublevels: list[str]) -> list[_ConvScanned]:
@@ -1043,6 +1047,8 @@ def _scan_conv_decont(defect_folder: Path, root: Path, suffix: str, sublevels: l
     grids = {(tuple(s.modes), tuple(s.perts)) for s in scans.values()}
     if len(grids) > 1:
         LOGGER.warning(f"{defect_folder.name}/{root.name}: the sublevels ran different modes/steps; not packaged")
+        return []
+    if not _pair_conv_phonon(defect_folder, root, list(scans.values())):
         return []
     incomplete = np.zeros(next(iter(scans.values())).tensors.shape[:2], dtype=bool)
     for scan in scans.values():
@@ -1072,7 +1078,7 @@ def _format_steps(perts: list[float]) -> str:
     return " ".join(f"{p:g}" for p in perts)
 
 
-def _print_conv_summary(scanned: list[_ConvScanned]) -> None:
+def _print_conv_summary(scanned: list[_ConvScanned], phonons: dict[tuple[str, int], Path] | None = None) -> None:
     if not scanned:
         print("No convergence data found.")
         return
@@ -1098,6 +1104,16 @@ def _print_conv_summary(scanned: list[_ConvScanned]) -> None:
             print(f"  !! {s.suffix}: {len(s.scan.unfinished)} run(s) without a ZFS tensor: {shown}")
         if gaps:
             print(f"  !! {s.suffix}: {gaps} mode/step combination(s) have no run folder")
+    shown: set[str] = set()  # one line per folder (a decont folder has one entry per sublevel)
+    for s in scanned:
+        if s.scan.phonon_file is not None and s.suffix not in shown:
+            shown.add(s.suffix)
+            tag = "aligned" if s.scan.aligned else "not aligned"
+            print(f"  {s.suffix}: phonon spectrum (from the job script, {tag}): {s.scan.phonon_file}")
+    if phonons:
+        print("\nPhonon data:")
+        for (defect, cell), path in phonons.items():
+            print(f"  {defect}_{cell}: {path}")
 
     print("\nGround state (stored as d0):")
     for s in scanned:

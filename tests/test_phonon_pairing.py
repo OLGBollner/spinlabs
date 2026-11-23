@@ -217,3 +217,87 @@ def test_package_skips_a_dataset_it_cannot_pair(tmp_path, monkeypatch, caplog):
 def test_package_without_phonon_path_keeps_the_old_behaviour(tmp_path, monkeypatch):
     raw_file = _package(tmp_path, monkeypatch, "BINARY=/x/vasp")
     assert _tag(raw_file) is None
+
+
+# -- spinlabs package --conv: the same pairing for the convergence runs ------------------------------------------
+
+
+def _conv_package(tmp_path, monkeypatch, scripts):
+    """Package NV_512's convergence folders, {folder name: job-script line}.
+
+    Returns {pack name: metadata} of the saved packs and the registered (kind, file name) pairs.
+    """
+    import json
+    import sqlite3
+
+    from test_cli_package import _conv_args, _outcar, _registry
+
+    from spinlabs.cli.package import _run_conv
+
+    db = _registry(monkeypatch, tmp_path)
+    for name, line in scripts.items():
+        root = tmp_path / "NV_512" / name
+        for p in (0.025, 0.05):
+            _outcar(root / "runs" / f"1_pert_{p:g}" / "OUTCAR", (1.0, 1.0, 2.0))
+        (root / "run_convergence.sh").write_text(f"#!/bin/bash\n{line}\n")
+    _run_conv(args=_conv_args(tmp_path, None), defect_folder=tmp_path / "NV_512")
+    packs = {}
+    for path in sorted((tmp_path / "data").rglob("*_conv_*.npz")):
+        with np.load(path, allow_pickle=True) as data:
+            packs[path.name] = json.loads(str(data["metadata"]))
+    rows = sqlite3.connect(db).execute("SELECT kind, path FROM files").fetchall() if db.exists() else []
+    return packs, {(kind, Path(path).name) for kind, path in rows}
+
+
+def test_conv_packages_the_aligned_spectrum_its_runs_used(tmp_path, monkeypatch):
+    full, reduced = _pair(tmp_path / "NV_512" / "data", stub="_aligned")
+    packs, registered = _conv_package(tmp_path, monkeypatch, {"convergence_test_all": f"PHONON_PATH={reduced}"})
+    packaged = tmp_path / "data" / "NV_512" / "phonon_data_aligned.npz"
+    assert packaged.read_bytes() == full.read_bytes()
+    assert ("phonon", "phonon_data_aligned.npz") in registered
+    # the defect has only aligned files: none of them stands in for its phonon code spectrum
+    assert not (tmp_path / "data" / "NV_512" / "phonon_data.npz").exists()
+    (meta,) = packs.values()
+    assert meta["phonon_file"] == str(full) and meta["aligned"] is True
+
+
+def test_conv_folder_it_cannot_pair_is_not_packaged(tmp_path, monkeypatch, caplog):
+    _, reduced = _pair(tmp_path / "NV_512" / "data", stub="_aligned")
+    (tmp_path / "NV_512" / "data" / "phonon_data_aligned.npz").unlink()  # the reduced file has no full spectrum
+    packs, _ = _conv_package(tmp_path, monkeypatch, {"convergence_test_all": f"PHONON_PATH={reduced}"})
+    assert packs == {}
+    assert "cannot pair the data with its phonon spectrum" in caplog.text
+    assert not (tmp_path / "data" / "NV_512" / "phonon_data_aligned.npz").exists()  # never the reduced file
+
+
+def test_conv_folders_along_different_spectra_stop(tmp_path, monkeypatch):
+    _, reduced = _pair(tmp_path / "NV_512" / "data", stub="_aligned")
+    swapped = np.eye(3)[[1, 0, 2]]  # another aligned spectrum: modes 0 and 1 exchanged
+    other_dir = tmp_path / "NV_512" / "other"
+    other_dir.mkdir(parents=True)
+    _spectrum(swapped, aligned=True).save(other_dir / "phonon_data_aligned.npz")
+    other = other_dir / "phonon_data_sym2_aligned.npz"
+    _spectrum(swapped[[0, 2]], original=[0, 2], n_full=3, aligned=True).save(other)
+    with pytest.raises(SystemExit, match="different aligned spectra"):
+        _conv_package(tmp_path, monkeypatch, {"convergence_test_all": f"PHONON_PATH={reduced}",
+                                              "convergence_test_occup": f"PHONON_PATH={other}"})
+    assert not (tmp_path / "data").exists()
+
+
+def test_conv_refuses_to_replace_a_packaged_aligned_spectrum(tmp_path, monkeypatch):
+    _, reduced = _pair(tmp_path / "NV_512" / "data", stub="_aligned")
+    earlier = tmp_path / "data" / "NV_512" / "phonon_data_aligned.npz"
+    earlier.parent.mkdir(parents=True)
+    _spectrum(np.array([[0.0, 1.0, 0.0], [1.0, 0.0, 0.0], [0.0, 0.0, 1.0]]), aligned=True).save(earlier)
+    with pytest.raises(SystemExit, match="holds other aligned modes"):
+        _conv_package(tmp_path, monkeypatch, {"convergence_test_all": f"PHONON_PATH={reduced}"})
+    assert not list((tmp_path / "data").rglob("*_conv_*.npz"))  # nothing saved
+
+
+def test_conv_without_phonon_path_packages_the_defects_spectrum(tmp_path, monkeypatch):
+    full, _ = _pair(tmp_path / "NV_512" / "data")
+    packs, registered = _conv_package(tmp_path, monkeypatch, {"convergence_test_all": "BINARY=/x/vasp"})
+    assert (tmp_path / "data" / "NV_512" / "phonon_data.npz").read_bytes() == full.read_bytes()
+    assert ("phonon", "phonon_data.npz") in registered
+    (meta,) = packs.values()
+    assert meta["phonon_file"] is None and meta["aligned"] is None
