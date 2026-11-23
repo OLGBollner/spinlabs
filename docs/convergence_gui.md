@@ -153,3 +153,11 @@ Each tab has nested **Summary** and **Mode detail** views.
   view still draws its raw points and marks the fit as unavailable.
 - An empty registry shows a short empty state with the `spinlabs package
   --conv` hint and the File → Open fallback.
+
+## Appearance
+
+The window uses a light card theme (white panels on a soft grey background,
+dark header, one blue accent) with flat controls, generous padding, larger
+treeview rows and a consistent type scale.  `src/spinlabs/gui/theme.py` owns the
+palette and ttk styles; it has no extra dependencies.  Matplotlib's on-screen
+figures use the same surface colours, muted axes and typography.

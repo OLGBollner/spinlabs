@@ -27,7 +27,7 @@ import matplotlib.pyplot as plt
 from spinlabs.convergence import SNR_TARGET, TRUNC_TOL, format_snr
 from spinlabs.convergence_channels import CHANNELS, CHANNEL_NAMES, ChannelAnalysis
 from spinlabs.convergence_summary import WEAK_FRACTION
-from spinlabs.gui import plots
+from spinlabs.gui import plots, theme
 from spinlabs.gui.analysis import ModeEntry, NormResult, PackSession
 from spinlabs.gui.catalog import Catalog, Group, Scheme
 from spinlabs.gui.state import GuiState, TabState, load_state, save_state
@@ -85,16 +85,16 @@ class FigureHost(ttk.Frame):
     """A FigureCanvas with a toolbar and (optionally) horizontal/vertical scroll."""
 
     def __init__(self, master, *, scroll: bool = True):
-        super().__init__(master)
+        super().__init__(master, style="Card.TFrame")
         self.scroll = scroll
         self.figure: Figure | None = None
         self._canvas_widget = None
         self._toolbar = None
         self._window = None
-        self.toolbar_frame = ttk.Frame(self)
+        self.toolbar_frame = ttk.Frame(self, style="Card.TFrame")
         self.toolbar_frame.grid(row=0, column=0, columnspan=2, sticky="ew")
         if scroll:
-            self.view = tk.Canvas(self, highlightthickness=0, background="white")
+            self.view = tk.Canvas(self, highlightthickness=0, background="#ffffff")
             self.vbar = ttk.Scrollbar(self, orient=tk.VERTICAL, command=self.view.yview)
             self.hbar = ttk.Scrollbar(self, orient=tk.HORIZONTAL, command=self.view.xview)
             self.view.configure(yscrollcommand=self.vbar.set, xscrollcommand=self.hbar.set)
@@ -148,6 +148,7 @@ class FigureHost(ttk.Frame):
         self._canvas_widget = canvas
         self._toolbar = NavigationToolbar2Tk(canvas, self.toolbar_frame, pack_toolbar=False)
         self._toolbar.update()
+        theme.style_navigation_toolbar(self._toolbar)
         self._toolbar.pack(side=tk.LEFT, fill=tk.X, expand=True)
         canvas.draw()
         if self.scroll:
@@ -160,7 +161,7 @@ class PackTab(ttk.Frame):
     """One defect tab: columns (schemes) plus Summary/Mode detail views."""
 
     def __init__(self, master, app: "ConvergenceApp", group: Group, columns_spec: list[tuple[str, str]] | None):
-        super().__init__(master)
+        super().__init__(master, style="Card.TFrame")
         self.app = app
         self.group = group
         self.columns: list[ColumnState] = []
@@ -183,17 +184,17 @@ class PackTab(ttk.Frame):
         self._mode_result = None
 
         self.summary_view = FigureHost(self, scroll=True)
-        self.mode_page = ttk.Frame(self)
-        mode_bar = ttk.Frame(self.mode_page)
-        mode_bar.pack(fill=tk.X, padx=6, pady=4)
-        ttk.Label(mode_bar, text="Column:").pack(side=tk.LEFT)
+        self.mode_page = ttk.Frame(self, style="Card.TFrame")
+        mode_bar = ttk.Frame(self.mode_page, style="Card.TFrame")
+        mode_bar.pack(fill=tk.X, padx=10, pady=(8, 4))
+        ttk.Label(mode_bar, text="Column:", style="CardMuted.TLabel").pack(side=tk.LEFT)
         self.column_combo = ttk.Combobox(
             mode_bar, textvariable=app.active_column_var, state="readonly", width=24
         )
         self.column_combo.pack(side=tk.LEFT, padx=(4, 0))
         self.mode_view = FigureHost(self.mode_page, scroll=True)
         self.mode_view.pack(fill=tk.BOTH, expand=True)
-        self.nested = ttk.Notebook(self)
+        self.nested = ttk.Notebook(self, style="Sub.TNotebook")
         self.nested.add(self.summary_view, text="Summary")
         self.nested.add(self.mode_page, text="Mode detail")
         self.nested.pack(fill=tk.BOTH, expand=True)
@@ -589,7 +590,7 @@ class ConvergenceApp:
 
     def __init__(self, root: tk.Tk, paths: list[Path] | None = None):
         self.root = root
-        self.root.title("spinlabs convergence")
+        self.root.title("SpinLabs · Convergence viewer")
         self.state = load_state()
         try:
             self.root.geometry(self.state.geometry)
@@ -609,7 +610,9 @@ class ConvergenceApp:
         self._style()
         self._build_vars()
         self._build_menu()
+        self._build_header()
         self._build_toolbar()
+        self._build_statusbar()
         self._build_layout()
         self._build_registry_tab()
         self._build_view_tab()
@@ -622,13 +625,37 @@ class ConvergenceApp:
     # -- construction ------------------------------------------------------
 
     def _style(self) -> None:
-        style = ttk.Style(self.root)
-        try:
-            style.theme_use("clam")
-        except tk.TclError:
-            pass
-        style.configure("Treeview", rowheight=22)
-        style.configure("TButton", padding=(6, 3))
+        self.palette = theme.apply_theme(self.root)
+        self.family = theme.font_family(self.root)
+        theme.style_matplotlib(self.family)
+
+    def _build_header(self) -> None:
+        p = self.palette
+        header = tk.Frame(self.root, background=p.header_bg, height=78)
+        header.pack(side=tk.TOP, fill=tk.X)
+        header.pack_propagate(False)
+        inner = tk.Frame(header, background=p.header_bg)
+        inner.pack(fill=tk.BOTH, expand=True, padx=20, pady=12)
+        left = tk.Frame(inner, background=p.header_bg)
+        left.pack(side=tk.LEFT, fill=tk.Y)
+        tk.Label(
+            left, text="SpinLabs", background=p.header_bg, foreground=p.header_text,
+            font=(self.family, 18, "bold"),
+        ).pack(anchor=tk.W)
+        tk.Label(
+            left, text="Convergence viewer  ·  norm and V\u0394n coupling channels",
+            background=p.header_bg, foreground=p.header_muted, font=(self.family, 9),
+        ).pack(anchor=tk.W, pady=(2, 0))
+        right = tk.Frame(inner, background=p.header_bg)
+        right.pack(side=tk.RIGHT, fill=tk.Y)
+        tk.Label(
+            right, text="REGISTRY-DRIVEN", background=p.header_bg, foreground=p.header_text,
+            font=(self.family, 8, "bold"),
+        ).pack(anchor=tk.E)
+        tk.Label(
+            right, text="TK + MATPLOTLIB", background=p.header_bg, foreground=p.header_muted,
+            font=(self.family, 8),
+        ).pack(anchor=tk.E, pady=(2, 0))
 
     def _build_vars(self) -> None:
         self.filter_defect = tk.StringVar(value="All")
@@ -702,52 +729,77 @@ class ConvergenceApp:
         return "break"
 
     def _build_toolbar(self) -> None:
-        bar = ttk.Frame(self.root, padding=(6, 4))
+        bar = ttk.Frame(self.root, style="Toolbar.TFrame", padding=(14, 6))
         bar.pack(side=tk.TOP, fill=tk.X)
-        for label, command in (
-            ("Open…", self.open_files), ("Refresh", self.refresh_registry), ("Save figure", self.save_figure),
-            ("CSV…", self.export_csv), ("Close tab", self.close_tab),
-        ):
-            ttk.Button(bar, text=label, command=command).pack(side=tk.LEFT, padx=(0, 4))
-        ttk.Separator(bar, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y, padx=6)
-        ttk.Label(bar, textvariable=self.status_var, anchor=tk.W).pack(side=tk.LEFT, fill=tk.X, expand=True)
+        ttk.Button(bar, text="Open…", command=self.open_files, style="Accent.TButton").pack(
+            side=tk.LEFT, padx=(0, 6)
+        )
+        ttk.Button(bar, text="Refresh", command=self.refresh_registry, style="Toolbar.TButton").pack(
+            side=tk.LEFT, padx=(0, 2)
+        )
+        ttk.Button(bar, text="Save figure", command=self.save_figure, style="Toolbar.TButton").pack(
+            side=tk.LEFT, padx=(0, 2)
+        )
+        ttk.Button(bar, text="Export CSV", command=self.export_csv, style="Toolbar.TButton").pack(
+            side=tk.LEFT, padx=(0, 2)
+        )
+        ttk.Separator(bar, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y, padx=8, pady=2)
+        ttk.Button(bar, text="Close tab", command=self.close_tab, style="Ghost.TButton").pack(side=tk.LEFT)
+        ttk.Label(
+            bar, text="Convergence data, fits and spin–phonon channels", style="CardMuted.TLabel",
+        ).pack(side=tk.RIGHT, padx=(8, 0))
+        ttk.Separator(self.root, orient=tk.HORIZONTAL).pack(side=tk.TOP, fill=tk.X)
+
+    def _build_statusbar(self) -> None:
+        self.statusbar = ttk.Frame(self.root, style="Status.TFrame", padding=(14, 4))
+        self.statusbar.pack(side=tk.BOTTOM, fill=tk.X)
+        ttk.Label(
+            self.statusbar, textvariable=self.status_var, style="Status.TLabel", anchor=tk.W,
+        ).pack(fill=tk.X)
 
     def _build_layout(self) -> None:
-        self.paned = tk.PanedWindow(self.root, orient=tk.VERTICAL, sashwidth=6, sashrelief=tk.RAISED)
+        p = self.palette
+        self.paned = tk.PanedWindow(
+            self.root, orient=tk.VERTICAL, sashwidth=8, sashrelief=tk.FLAT, background=p.background,
+            borderwidth=0, highlightthickness=0,
+        )
         self.paned.pack(fill=tk.BOTH, expand=True)
-        self.main_paned = tk.PanedWindow(self.paned, orient=tk.HORIZONTAL, sashwidth=6, sashrelief=tk.RAISED)
+        self.main_paned = tk.PanedWindow(
+            self.paned, orient=tk.HORIZONTAL, sashwidth=8, sashrelief=tk.FLAT, background=p.background,
+            borderwidth=0, highlightthickness=0,
+        )
         self.paned.add(self.main_paned, stretch="always")
-        self.sidebar = ttk.Frame(self.main_paned, width=360)
+        self.sidebar = ttk.Frame(self.main_paned, width=360, style="Card.TFrame")
         self.main_paned.add(self.sidebar, minsize=300, width=360)
-        self.content = ttk.Frame(self.main_paned)
+        self.content = ttk.Frame(self.main_paned, style="Card.TFrame")
         self.main_paned.add(self.content, stretch="always")
-        self.side_notebook = ttk.Notebook(self.sidebar)
-        self.side_notebook.pack(fill=tk.BOTH, expand=True)
-        self.registry_tab = ttk.Frame(self.side_notebook)
-        self.view_tab = ttk.Frame(self.side_notebook)
-        self.modes_tab = ttk.Frame(self.side_notebook)
-        self.advanced_tab = ttk.Frame(self.side_notebook)
+        self.side_notebook = ttk.Notebook(self.sidebar, style="Side.TNotebook")
+        self.side_notebook.pack(fill=tk.BOTH, expand=True, padx=(8, 4), pady=(4, 4))
+        self.registry_tab = ttk.Frame(self.side_notebook, style="Card.TFrame", padding=(8, 8))
+        self.view_tab = ttk.Frame(self.side_notebook, style="Card.TFrame", padding=(8, 8))
+        self.modes_tab = ttk.Frame(self.side_notebook, style="Card.TFrame", padding=(8, 8))
+        self.advanced_tab = ttk.Frame(self.side_notebook, style="Card.TFrame", padding=(8, 8))
         self.side_notebook.add(self.registry_tab, text="Registry")
         self.side_notebook.add(self.view_tab, text="View")
         self.side_notebook.add(self.modes_tab, text="Modes")
         self.side_notebook.add(self.advanced_tab, text="Advanced")
-        self.report_frame = ttk.Frame(self.paned)
+        self.report_frame = ttk.Frame(self.paned, style="Card.TFrame")
         self.paned.add(self.report_frame, height=_REPORT_HEIGHT, stretch="never")
-        self.welcome = ttk.Frame(self.content)
+        self.welcome = ttk.Frame(self.content, style="Card.TFrame")
         self.welcome_label = ttk.Label(
             self.welcome,
             text="No pack open.\nPick a defect group in the Registry tab, or use File → Open.\n"
                  "Register data with `spinlabs package --conv` to fill the registry.",
-            justify=tk.CENTER,
+            justify=tk.CENTER, style="CardMuted.TLabel", font=(self.family, 10),
         )
         self.welcome_label.pack(expand=True)
-        self.notebook = ttk.Notebook(self.content)
+        self.notebook = ttk.Notebook(self.content, style="Main.TNotebook")
         self.notebook.bind("<<NotebookTabChanged>>", self._on_tab_changed)
         self.welcome.pack(fill=tk.BOTH, expand=True)
 
     def _build_registry_tab(self) -> None:
         pad = {"padx": 4, "pady": 3}
-        box = ttk.LabelFrame(self.registry_tab, text="Filters")
+        box = ttk.LabelFrame(self.registry_tab, text="Filters", style="Card.TLabelframe")
         box.pack(fill=tk.X, padx=6, pady=4)
         self._filter_row(box, "Defect", self.filter_defect, 0)
         self._filter_row(box, "Cell", self.filter_cell, 1)
@@ -755,7 +807,7 @@ class ConvergenceApp:
         self._filter_row(box, "Displacement", self.filter_displacement, 3)
         ttk.Checkbutton(box, text="Latest only", variable=self.latest_only,
                         command=self.refresh_registry).grid(row=4, column=0, columnspan=2, sticky="w", **pad)
-        ttk.Button(box, text="Refresh", command=self.refresh_registry).grid(
+        ttk.Button(box, text="Refresh", command=self.refresh_registry, style="Toolbar.TButton").grid(
             row=5, column=0, columnspan=2, sticky="ew", **pad
         )
         self.group_tree = ttk.Treeview(
@@ -769,20 +821,23 @@ class ConvergenceApp:
         self.group_tree.pack(fill=tk.BOTH, expand=True, padx=6, pady=4)
         self.group_tree.bind("<<TreeviewSelect>>", lambda _e: self._show_group_schemes())
         self.group_tree.bind("<Double-1>", lambda _e: self.open_selected_group())
-        self.schemes_frame = ttk.LabelFrame(self.registry_tab, text="Schemes")
+        self.schemes_frame = ttk.LabelFrame(self.registry_tab, text="Schemes", style="Card.TLabelframe")
         self.schemes_frame.pack(fill=tk.BOTH, expand=True, padx=6, pady=4)
-        ttk.Button(self.registry_tab, text="Open / update tab", command=self.open_selected_group).pack(
-            fill=tk.X, padx=6, pady=(0, 4)
-        )
+        ttk.Button(
+            self.registry_tab, text="Open / update tab", command=self.open_selected_group,
+            style="Accent.TButton",
+        ).pack(fill=tk.X, padx=0, pady=(6, 6))
         buttons = ttk.Frame(self.registry_tab)
         buttons.pack(fill=tk.X, padx=6, pady=(0, 6))
-        ttk.Button(buttons, text="Open file…", command=self.open_files).pack(side=tk.LEFT, expand=True, fill=tk.X)
-        ttk.Button(buttons, text="Open folder…", command=self.open_folder).pack(
+        ttk.Button(buttons, text="Open file…", command=self.open_files, style="Toolbar.TButton").pack(
+            side=tk.LEFT, expand=True, fill=tk.X
+        )
+        ttk.Button(buttons, text="Open folder…", command=self.open_folder, style="Toolbar.TButton").pack(
             side=tk.LEFT, expand=True, fill=tk.X, padx=(4, 0)
         )
 
     def _filter_row(self, parent, label: str, var: tk.StringVar, row: int) -> None:
-        ttk.Label(parent, text=label).grid(row=row, column=0, sticky="w", padx=4, pady=2)
+        ttk.Label(parent, text=label, style="Card.TLabel").grid(row=row, column=0, sticky="w", padx=4, pady=2)
         combo = ttk.Combobox(parent, textvariable=var, state="readonly", width=16)
         combo.grid(row=row, column=1, sticky="ew", padx=4, pady=2)
         combo.bind("<<ComboboxSelected>>", lambda _e: self.refresh_registry())
@@ -790,29 +845,33 @@ class ConvergenceApp:
         parent.columnconfigure(1, weight=1)
 
     def _build_view_tab(self) -> None:
-        box = ttk.LabelFrame(self.view_tab, text="Difference scheme")
+        box = ttk.LabelFrame(self.view_tab, text="Difference scheme", style="Card.TLabelframe")
         box.pack(fill=tk.X, padx=6, pady=4)
         ttk.Checkbutton(box, text="Forward", variable=self.forward_var).pack(anchor=tk.W, padx=6, pady=2)
         self.central_check = ttk.Checkbutton(box, text="Central (−Q runs)", variable=self.central_var)
         self.central_check.pack(anchor=tk.W, padx=6, pady=2)
-        quality = ttk.LabelFrame(self.view_tab, text="Summary quantity")
+        quality = ttk.LabelFrame(self.view_tab, text="Summary quantity", style="Card.TLabelframe")
         quality.pack(fill=tk.X, padx=6, pady=4)
         ttk.Combobox(quality, textvariable=self.display_var, values=("Norm", "Coupling channels"),
                      state="readonly").pack(fill=tk.X, padx=6, pady=4)
-        columns = ttk.LabelFrame(self.view_tab, text="Columns and dates")
+        columns = ttk.LabelFrame(self.view_tab, text="Columns and dates", style="Card.TLabelframe")
         columns.pack(fill=tk.BOTH, expand=True, padx=6, pady=4)
-        self.columns_frame = ttk.Frame(columns)
+        self.columns_frame = ttk.Frame(columns, style="Card.TFrame")
         self.columns_frame.pack(fill=tk.X, padx=4, pady=4)
-        ttk.Label(columns, text="Active column (Mode detail)").pack(anchor=tk.W, padx=6, pady=(4, 0))
+        ttk.Label(columns, text="Active column (Mode detail)", style="Card.TLabel").pack(
+            anchor=tk.W, padx=6, pady=(4, 0)
+        )
         self._column_combo = ttk.Combobox(columns, textvariable=self.active_column_var, state="readonly")
         self._column_combo.pack(fill=tk.X, padx=6, pady=4)
-        ttk.Label(columns, text="Change columns in the Registry tab: select the group, then Open / update.",
-                  wraplength=320, font=("TkDefaultFont", 8)).pack(anchor=tk.W, padx=6, pady=(0, 6))
+        ttk.Label(
+            columns, text="Change columns in the Registry tab: select the group, then Open / update.",
+            wraplength=320, style="CardMuted.TLabel",
+        ).pack(anchor=tk.W, padx=6, pady=(0, 6))
 
     def _build_modes_tab(self) -> None:
-        filter_box = ttk.Frame(self.modes_tab)
-        filter_box.pack(fill=tk.X, padx=6, pady=4)
-        ttk.Label(filter_box, text="Filter").pack(side=tk.LEFT)
+        filter_box = ttk.Frame(self.modes_tab, style="Card.TFrame")
+        filter_box.pack(fill=tk.X, pady=(0, 6))
+        ttk.Label(filter_box, text="Filter", style="CardMuted.TLabel").pack(side=tk.LEFT)
         ttk.Entry(filter_box, textvariable=self.mode_filter).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=4)
         self.mode_tree = ttk.Treeview(
             self.modes_tab, columns=("show", "mode", "sym", "freq"), show="headings", height=14, selectmode="browse"
@@ -821,20 +880,26 @@ class ConvergenceApp:
                                   ("sym", "Sym", 45), ("freq", "freq/meV", 75)):
             self.mode_tree.heading(key, text=title)
             self.mode_tree.column(key, width=width, anchor=tk.W)
-        self.mode_tree.pack(fill=tk.BOTH, expand=True, padx=6, pady=4)
+        self.mode_tree.pack(fill=tk.BOTH, expand=True, pady=4)
         self.mode_tree.bind("<ButtonRelease-1>", self._on_mode_click)
-        buttons = ttk.Frame(self.modes_tab)
-        buttons.pack(fill=tk.X, padx=6, pady=(0, 4))
-        ttk.Button(buttons, text="All", command=lambda: self._mode_bulk(True)).pack(side=tk.LEFT, expand=True, fill=tk.X)
-        ttk.Button(buttons, text="None", command=lambda: self._mode_bulk(False)).pack(
+        buttons = ttk.Frame(self.modes_tab, style="Card.TFrame")
+        buttons.pack(fill=tk.X, pady=(0, 4))
+        ttk.Button(buttons, text="All", command=lambda: self._mode_bulk(True), style="Toolbar.TButton").pack(
+            side=tk.LEFT, expand=True, fill=tk.X
+        )
+        ttk.Button(buttons, text="None", command=lambda: self._mode_bulk(False), style="Toolbar.TButton").pack(
             side=tk.LEFT, expand=True, fill=tk.X, padx=4
         )
-        ttk.Button(buttons, text="Invert", command=self._mode_invert).pack(side=tk.LEFT, expand=True, fill=tk.X)
-        ttk.Label(self.modes_tab, text="Click a row for Mode detail; click Show to toggle Summary visibility.",
-                  wraplength=320, font=("TkDefaultFont", 8)).pack(anchor=tk.W, padx=6, pady=(0, 6))
+        ttk.Button(buttons, text="Invert", command=self._mode_invert, style="Toolbar.TButton").pack(
+            side=tk.LEFT, expand=True, fill=tk.X
+        )
+        ttk.Label(
+            self.modes_tab, text="Click a row for Mode detail; click Show to toggle Summary visibility.",
+            wraplength=320, style="CardMuted.TLabel",
+        ).pack(anchor=tk.W, pady=(0, 4))
 
     def _build_advanced_tab(self) -> None:
-        box = ttk.LabelFrame(self.advanced_tab, text="Analysis parameters")
+        box = ttk.LabelFrame(self.advanced_tab, text="Analysis parameters", style="Card.TLabelframe")
         box.pack(fill=tk.X, padx=6, pady=4)
         rows = [
             ("Noise σ / MHz", self.noise_var, "auto"),
@@ -843,7 +908,7 @@ class ConvergenceApp:
             ("Weak fraction", self.weak_var, None),
         ]
         for row, (label, var, tag) in enumerate(rows):
-            ttk.Label(box, text=label).grid(row=row, column=0, sticky="w", padx=4, pady=2)
+            ttk.Label(box, text=label, style="Card.TLabel").grid(row=row, column=0, sticky="w", padx=4, pady=2)
             entry = ttk.Entry(box, textvariable=var, width=10)
             entry.grid(row=row, column=1, sticky="ew", padx=4, pady=2)
             if tag == "auto":
@@ -852,7 +917,7 @@ class ConvergenceApp:
                 )
                 self.noise_entry = entry
         box.columnconfigure(1, weight=1)
-        flags = ttk.LabelFrame(self.advanced_tab, text="Mode detail")
+        flags = ttk.LabelFrame(self.advanced_tab, text="Mode detail", style="Card.TLabelframe")
         flags.pack(fill=tk.X, padx=6, pady=4)
         ttk.Checkbutton(flags, text="Drop Q=0 anchor from fits", variable=self.drop_anchor_var).pack(
             anchor=tk.W, padx=6, pady=2
@@ -861,18 +926,20 @@ class ConvergenceApp:
             anchor=tk.W, padx=6, pady=2
         )
         ttk.Checkbutton(flags, text="Quadratic fit", variable=self.quad_var).pack(anchor=tk.W, padx=6, pady=2)
-        ttk.Button(self.advanced_tab, text="Apply", command=self.apply_advanced).pack(fill=tk.X, padx=6, pady=6)
+        ttk.Button(self.advanced_tab, text="Apply", command=self.apply_advanced, style="Accent.TButton").pack(
+            fill=tk.X, pady=(10, 6)
+        )
         ttk.Label(
             self.advanced_tab, text="Defaults match `spinlabs plot convergence`.",
-            wraplength=320, font=("TkDefaultFont", 8),
-        ).pack(anchor=tk.W, padx=6)
+            wraplength=320, style="CardMuted.TLabel",
+        ).pack(anchor=tk.W)
         self._update_noise_sensitivity()
 
     def _build_report(self) -> None:
-        self.report_notebook = ttk.Notebook(self.report_frame)
+        self.report_notebook = ttk.Notebook(self.report_frame, style="Sub.TNotebook")
         self.report_notebook.pack(fill=tk.BOTH, expand=True)
-        table_tab = ttk.Frame(self.report_notebook)
-        details_tab = ttk.Frame(self.report_notebook)
+        table_tab = ttk.Frame(self.report_notebook, style="Card.TFrame", padding=(8, 8))
+        details_tab = ttk.Frame(self.report_notebook, style="Card.TFrame", padding=(8, 8))
         self.report_notebook.add(table_tab, text="Table")
         self.report_notebook.add(details_tab, text="Details")
         self.report_tree = ttk.Treeview(table_tab, show="headings", height=5)
@@ -882,7 +949,11 @@ class ConvergenceApp:
         xscroll = ttk.Scrollbar(table_tab, orient=tk.HORIZONTAL, command=self.report_tree.xview)
         xscroll.pack(side=tk.BOTTOM, fill=tk.X)
         self.report_tree.configure(yscrollcommand=yscroll.set, xscrollcommand=xscroll.set)
-        self.details_text = tk.Text(details_tab, wrap="word", height=8)
+        self.details_text = tk.Text(
+            details_tab, wrap="word", height=8, background="#ffffff", foreground=self.palette.text,
+            relief=tk.FLAT, borderwidth=0, highlightthickness=0, padx=10, pady=8,
+            insertbackground=self.palette.text, font=("DejaVu Sans Mono", 9),
+        )
         self.details_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         dscroll = ttk.Scrollbar(details_tab, orient=tk.VERTICAL, command=self.details_text.yview)
         dscroll.pack(side=tk.RIGHT, fill=tk.Y)
@@ -962,7 +1033,9 @@ class ConvergenceApp:
         group = self._selected_group()
         self._scheme_vars = {}
         if group is None:
-            ttk.Label(self.schemes_frame, text="Select a defect group").pack(anchor=tk.W, padx=6, pady=6)
+            ttk.Label(self.schemes_frame, text="Select a defect group", style="CardMuted.TLabel").pack(
+                anchor=tk.W, padx=6, pady=6
+            )
             return
         # The tree filter may be "latest only"; the tab still offers every date.
         full = self.catalog.group(group.key, latest_only=False) or group
