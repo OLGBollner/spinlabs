@@ -136,15 +136,16 @@ def build_norm_summary_figure(
     weak_fraction: float = WEAK_FRACTION,
     colors: list[str] | None = None,
     dpi: int = 100,
+    figsize: tuple[float, float] | None = None,
 ) -> Figure:
     """The CLI summary figure for GUI columns, with optional forward/central overlay."""
     if not columns:
-        fig, ax = plt.subplots(figsize=(7.0, 5.0), dpi=dpi)
+        fig, ax = plt.subplots(figsize=figsize or (7.0, 5.0), dpi=dpi)
         _empty(ax, "Open a convergence pack to see the summary")
         return fig
     fig, axes = plt.subplots(
-        2, len(columns), figsize=(max(7.5, 8.0 * len(columns)), 9.5), squeeze=False, sharex="col", sharey="row",
-        dpi=dpi,
+        2, len(columns), figsize=figsize or (max(7.5, 8.0 * len(columns)), 9.5), squeeze=False,
+        sharex="col", sharey="row", dpi=dpi,
     )
     all_modes: set[int] = set()
     for column in columns:
@@ -225,7 +226,7 @@ def build_norm_summary_figure(
         second_ax.set_xlabel("|Q| (step size)")
         _norm_legends(first_ax, second_ax, mode_ids, column.modes, col_colors, column)
 
-    fig.tight_layout()
+    fig.subplots_adjust(left=0.075, right=0.995, top=0.92, bottom=0.10, hspace=0.24, wspace=0.16)
     return fig
 
 
@@ -265,15 +266,16 @@ def build_channel_summary_figure(
     target: float = SNR_TARGET,
     tol: float = TRUNC_TOL,
     dpi: int = 100,
+    figsize: tuple[float, float] | None = None,
 ) -> Figure:
     """The V_{Delta n} channel summary for GUI columns."""
     if not columns:
-        fig, ax = plt.subplots(figsize=(7.0, 5.0), dpi=dpi)
+        fig, ax = plt.subplots(figsize=figsize or (7.0, 5.0), dpi=dpi)
         _empty(ax, "Open a convergence pack to see the coupling channels")
         return fig
     fig, axes = plt.subplots(
-        2, len(columns), figsize=(max(7.5, 8.0 * len(columns)), 9.5), squeeze=False, sharex="col", sharey="row",
-        dpi=dpi,
+        2, len(columns), figsize=figsize or (max(7.5, 8.0 * len(columns)), 9.5), squeeze=False,
+        sharex="col", sharey="row", dpi=dpi,
     )
     all_modes = sorted({mode.mode for column in columns for mode in column.analysis.modes})
     global_color = {mode: mode_color(i) for i, mode in enumerate(all_modes)}
@@ -361,7 +363,7 @@ def build_channel_summary_figure(
         second_ax.set_ylabel(r"second order $V_{\Delta n}$ (MHz/Q$^2$)")
         second_ax.set_xlabel("|Q| (step size)")
         _channel_legends(first_ax, second_ax, mode_ids, column.modes, col_colors, schemes)
-    fig.tight_layout()
+    fig.subplots_adjust(left=0.075, right=0.995, top=0.92, bottom=0.10, hspace=0.24, wspace=0.16)
     return fig
 
 
@@ -535,6 +537,7 @@ def build_mode_figure(
     trunc_tol: float = TRUNC_TOL,
     schemes: tuple[str, ...] = ("forward", "central"),
     dpi: int = 100,
+    figsize: tuple[float, float] | None = None,
 ) -> ModeFigureResult:
     """The CLI's per-mode 3x2 figure, returned instead of saved."""
     conv = session.conv
@@ -610,7 +613,7 @@ def build_mode_figure(
     ncols = 2
     nrows = 3 if schemes and parts_full is not None else 2
     fig, axes = plt.subplots(
-        nrows, ncols, figsize=(5 * ncols, 9 if nrows == 3 else 6),
+        nrows, ncols, figsize=figsize or (5 * ncols, 9 if nrows == 3 else 6),
         gridspec_kw={"height_ratios": [3, 1, 2.4][:nrows]}, dpi=dpi,
     )
     for j in range(ncols):
@@ -676,6 +679,10 @@ def build_mode_figure(
                 axes[2], p_full, parts_full, reports.get("central"), helper, "central",
                 band_report.sigma if band_report is not None else None,
             )
+        # The safe-window sentence lives in Details; a one-line title keeps the
+        # short mode-detail rows from colliding in a fitted tab.
+        for ax in axes[2]:
+            ax.set_title(ax.get_title().split("\n")[0], fontsize=9)
     entry = next((item for item in session.modes() if item.mode == mode), None)
     suffix = ""
     if entry is not None:
@@ -685,7 +692,7 @@ def build_mode_figure(
     title = f"mode {mode}: $D_\\lambda$" if not deviation else f"mode {mode}: $D_\\lambda - D_0$"
     fig.suptitle(title + suffix)
     axes[0, 1].legend(fontsize=7)
-    fig.tight_layout()
+    fig.subplots_adjust(left=0.075, right=0.985, top=0.86, bottom=0.10, hspace=0.85, wspace=0.25)
     return ModeFigureResult(
         figure=fig, report=report, noise=noise, offset=offset, label=label, warnings=warnings,
         extra_lines=extra_lines, reports=reports,

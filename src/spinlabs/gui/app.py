@@ -106,23 +106,25 @@ class FigureHost(ttk.Frame):
                 pass
         self._fit_after = self.after(60, self._fit_figure)
 
-    def _apply_figure_size(self, figure: Figure, *, forward: bool = True) -> bool:
+    def target_figsize(self, dpi: float = 100.0) -> tuple[float, float] | None:
+        """The figure size that fills this page now, or None while it is hidden."""
         if not self.view.winfo_exists():
-            return False
+            return None
         width = self.view.winfo_width()
         height = self.view.winfo_height()
         if width < 80 or height < 80:
+            return None
+        return (max(2.4, (width - 2) / dpi), max(2.0, (height - 2) / dpi))
+
+    def _apply_figure_size(self, figure: Figure, *, forward: bool = True) -> bool:
+        target = self.target_figsize(figure.dpi or 100.0)
+        if target is None:
             return False
         dpi = figure.dpi or 100
-        target = (max(240, width - 2) / dpi, max(200, height - 2) / dpi)
         current = figure.get_size_inches()
         if abs(target[0] - current[0]) * dpi < 2 and abs(target[1] - current[1]) * dpi < 2:
             return False
         figure.set_size_inches(*target, forward=forward)
-        try:
-            figure.tight_layout()
-        except Exception:
-            LOGGER.debug("tight_layout failed during resize", exc_info=True)
         return True
 
     def _fit_figure(self) -> None:
@@ -387,7 +389,9 @@ class PackTab(ttk.Frame):
                 for col in self.columns
             ]
             self._summary_columns = columns
-            fig = plots.build_channel_summary_figure(columns, schemes=schemes)
+            fig = plots.build_channel_summary_figure(
+                columns, schemes=schemes, figsize=self.summary_view.target_figsize()
+            )
         else:
             columns = [
                 plots.NormColumnPlot(
@@ -399,7 +403,7 @@ class PackTab(ttk.Frame):
                 for col in self.columns
             ]
             self._summary_columns = columns
-            fig = plots.build_norm_summary_figure(columns)
+            fig = plots.build_norm_summary_figure(columns, figsize=self.summary_view.target_figsize())
         self.summary_view.set_figure(fig)
 
     def render_mode(self) -> None:
@@ -413,6 +417,7 @@ class PackTab(ttk.Frame):
             result = plots.build_mode_figure(
                 session, mode, quad=self.quad, deviation=self.deviation, drop_anchor=self.drop_anchor,
                 noise=self.noise, snr_target=self.target, trunc_tol=self.tol, schemes=self.enabled_schemes(),
+                figsize=self.mode_view.target_figsize(),
             )
         except Exception as exc:
             self._mode_result = None
