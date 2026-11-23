@@ -142,6 +142,7 @@ class FigureHost(ttk.Frame):
         self._scroll_size = (width, height)
         canvas = FigureCanvasTkAgg(figure, master=self.view)
         widget = canvas.get_tk_widget()
+        widget.configure(width=width, height=height)
         if self.scroll:
             widget.bind("<Shift-MouseWheel>", self._scroll_horizontal, add="+")
             self._window = self.view.create_window(
@@ -173,6 +174,7 @@ class PackTab(ttk.Frame):
         self.forward = True
         self.central = False
         self.display = "norm"
+        self.phonon_preference = "auto"
         self.noise: float | None = None
         self.target = SNR_TARGET
         self.tol = TRUNC_TOL
@@ -225,7 +227,10 @@ class PackTab(ttk.Frame):
             item = scheme.file_for(date)
             session = old_sessions.get(scheme_id)
             if session is None or session.path != item.path:
-                session = PackSession(item.path, scheme.label, self.group.displacement, self.mode_cache)
+                session = PackSession(
+                    item.path, scheme.label, self.group.displacement, self.mode_cache,
+                    phonon_preference=self.phonon_preference,
+                )
             columns.append(ColumnState(scheme, item.date, session))
         self.columns = columns
         entries: dict[int, ModeEntry] = {}
@@ -247,6 +252,14 @@ class PackTab(ttk.Frame):
         self.active_column = min(old_active_col, max(0, len(columns) - 1))
         self.sync_column_combo()
         self.render_current()
+
+    def set_phonon_preference(self, preference: str) -> None:
+        preference = preference if preference in ("auto", "aligned", "unaligned") else "auto"
+        self.phonon_preference = preference
+        spec = [(column.scheme.id, column.date) for column in self.columns]
+        for column in self.columns:
+            column.session.set_phonon_preference(preference)
+        self.set_columns(spec, initial=False)
 
     def sync_column_combo(self) -> None:
         labels = [col.label for col in self.columns]
@@ -396,15 +409,25 @@ class PackTab(ttk.Frame):
     # -- report ------------------------------------------------------------
 
     def _details(self) -> str:
+        active_label = "—"
+        if self.active_mode is not None:
+            entry = self._mode_entries.get(self.active_mode)
+            if entry is not None:
+                active_label = entry.label
+            else:
+                active_label = str(self.active_mode)
         lines = [
             f"{self.group.title}  ({self.group.displacement})",
             f"tab: {len(self.columns)} column(s); view: {self.nested.tab(self.nested.select(), 'text')}",
             f"modes visible: {len(self.visible_modes)} / {len(self.mode_entries)}; "
-            f"active mode: {self.active_mode if self.active_mode is not None else '—'}",
+            f"active mode: {active_label}",
         ]
         for column in self.columns:
             lines.append("")
             lines.append(f"column: {column.label}  ({column.path})")
+            phonon = column.session.phonon_path
+            if phonon is not None:
+                lines.append(f"  phonon: {phonon}")
             for warning in column.session.warnings():
                 lines.append(f"  warning: {warning}")
         if self.nested.index("current") == 0:
@@ -494,8 +517,8 @@ class PackTab(ttk.Frame):
 
     def _channel_report(self) -> ReportData:
         columns = [
-            ("column", "Column", 90), ("mode", "Mode", 55), ("sym", "Sym", 45), ("order", "Order", 55),
-            ("channel", "Channel", 75), ("scheme", "Scheme", 65), ("q0", "Q→0", 75),
+            ("column", "Column", 90), ("mode", "Mode", 55), ("sym", "Sym", 45), ("freq", "freq/meV", 65),
+            ("order", "Order", 55), ("channel", "Channel", 75), ("scheme", "Scheme", 65), ("q0", "Q→0", 75),
             ("lo", "q_lo", 65), ("hi", "q_hi", 65), ("flags", "Flags", 140),
         ]
         rows: list[dict[str, str]] = []
@@ -521,6 +544,7 @@ class PackTab(ttk.Frame):
                                 flags.append("upper bound")
                             rows.append({
                                 "column": column.label, "mode": str(mode.mode), "sym": entry.symmetry or "",
+                                "freq": _fmt(entry.frequency, 3),
                                 "order": "first" if order == 1 else "second", "channel": CHANNEL_NAMES[channel],
                                 "scheme": scheme, "q0": _fmt(series.q0), "lo": _fmt(window.q_lo),
                                 "hi": _fmt(window.q_hi), "flags": ", ".join(flags),
@@ -579,6 +603,7 @@ class PackTab(ttk.Frame):
             forward=self.forward,
             central=self.central,
             display=self.display,
+            phonon=self.phonon_preference,
             noise=self.noise,
             target=self.target,
             tol=self.tol,
@@ -671,6 +696,7 @@ class ConvergenceApp:
         self.central_var = tk.BooleanVar(value=False)
         self.display_var = tk.StringVar(value="Norm")
         self.active_column_var = tk.StringVar(value="")
+        self.phonon_var = tk.StringVar(value="Auto")
         self.mode_filter = tk.StringVar(value="")
         self.noise_auto = tk.BooleanVar(value=True)
         self.noise_var = tk.StringVar(value="")
@@ -930,6 +956,15 @@ class ConvergenceApp:
             anchor=tk.W, padx=6, pady=2
         )
         ttk.Checkbutton(flags, text="Quadratic fit", variable=self.quad_var).pack(anchor=tk.W, padx=6, pady=2)
+        phonon = ttk.LabelFrame(self.advanced_tab, text="Phonon symmetry", style="Card.TLabelframe")
+        phonon.pack(fill=tk.X, padx=0, pady=(8, 0))
+        ttk.Label(
+            phonon, text="Full spectrum for labels and frequencies", style="CardMuted.TLabel",
+        ).pack(anchor=tk.W, padx=4)
+        ttk.Combobox(
+            phonon, textvariable=self.phonon_var, state="readonly",
+            values=("Auto", "Aligned full", "Unaligned full"),
+        ).pack(fill=tk.X, padx=4, pady=(4, 4))
         ttk.Button(self.advanced_tab, text="Apply", command=self.apply_advanced, style="Accent.TButton").pack(
             fill=tk.X, pady=(10, 6)
         )
@@ -1261,6 +1296,9 @@ class ConvergenceApp:
                 text="Central (−Q runs)" if has_minus else "Central (no −Q runs in this pack)",
             )
             self.display_var.set("Coupling channels" if tab.display == "channels" else "Norm")
+            self.phonon_var.set({
+                "aligned": "Aligned full", "unaligned": "Unaligned full",
+            }.get(tab.phonon_preference, "Auto"))
             self.noise_auto.set(tab.noise is None)
             self.noise_var.set("" if tab.noise is None else f"{tab.noise:g}")
             self.target_var.set(f"{tab.target:g}")
@@ -1399,6 +1437,10 @@ class ConvergenceApp:
         tab.drop_anchor = bool(self.drop_anchor_var.get())
         tab.deviation = bool(self.deviation_var.get())
         tab.quad = bool(self.quad_var.get())
+        phonon = {
+            "Aligned full": "aligned", "Unaligned full": "unaligned",
+        }.get(self.phonon_var.get(), "auto")
+        tab.set_phonon_preference(phonon)
         tab.render_current()
 
     def _select_view(self, index: int) -> None:
@@ -1563,6 +1605,7 @@ class ConvergenceApp:
             except Exception:
                 LOGGER.exception("cannot restore tab %s", group.title)
                 continue
+            tab.set_phonon_preference(saved.phonon)
             tab.forward, tab.central, tab.display = saved.forward, saved.central, saved.display
             tab.noise, tab.target, tab.tol = saved.noise, saved.target, saved.tol
             tab.weak_fraction, tab.drop_anchor = saved.weak_fraction, saved.drop_anchor

@@ -676,7 +676,14 @@ def build_mode_figure(
                 axes[2], p_full, parts_full, reports.get("central"), helper, "central",
                 band_report.sigma if band_report is not None else None,
             )
-    fig.suptitle(f"mode {mode}: $D_\\lambda$" if not deviation else f"mode {mode}: $D_\\lambda - D_0$")
+    entry = next((item for item in session.modes() if item.mode == mode), None)
+    suffix = ""
+    if entry is not None:
+        bits = [bit for bit in (entry.symmetry, f"{entry.frequency:.2f} meV" if entry.frequency is not None else None) if bit]
+        if bits:
+            suffix = " (" + ", ".join(bits) + ")"
+    title = f"mode {mode}: $D_\\lambda$" if not deviation else f"mode {mode}: $D_\\lambda - D_0$"
+    fig.suptitle(title + suffix)
     axes[0, 1].legend(fontsize=7)
     fig.tight_layout()
     return ModeFigureResult(

@@ -69,6 +69,8 @@ class ConvergenceScan:
     n_missing_energy: int = 0
     displacement: str | None = None  # the job script's DISPLACEMENT, None when it says nothing
     n_zero_runs: int = 0  # <mode>_pert_0 run folders (the unperturbed point, shared by every mode)
+    phonon_file: Path | None = None  # full spectrum the trees displaced along, when known
+    aligned: bool | None = None  # whether that spectrum was mirror-aligned
 
     @property
     def n_finished(self) -> int:
@@ -133,6 +135,8 @@ def save_convergence(
     method: str | None = None,
     method_key: str | None = None,
     spin_sublevel: str | None = None,
+    phonon_file: Path | None = None,
+    aligned: bool | None = None,
 ) -> Path:
     """Write a scanned root to one .npz (with the ground-state tensor as 'd0' when given).
 
@@ -168,6 +172,8 @@ def save_convergence(
         # Cartesian lengths in Angstrom, the others Q in Angstrom*sqrt(amu)
         "displacement": scan.displacement or "mass_weighted",
         "spin_sublevel": spin_sublevel,
+        "phonon_file": str(phonon_file or scan.phonon_file) if (phonon_file or scan.phonon_file) else None,
+        "aligned": aligned if aligned is not None else scan.aligned,
     }
     np.savez_compressed(
         output,

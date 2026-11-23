@@ -14,6 +14,7 @@ import numpy as np
 from spinlabs.convergence import SNR_TARGET, TRUNC_TOL, load_convergence
 from spinlabs.convergence_channels import ChannelAnalysis, analyse_channels
 from spinlabs.convergence_summary import COLORS, WEAK_FRACTION, analyse, mode_details
+from spinlabs.gui.phonons import PhononChoice, resolve_phonon
 from spinlabs.logging_utils import get_logger
 
 LOGGER = get_logger(__name__)
@@ -76,14 +77,19 @@ class PackSession:
     defect/cell and is shared through ``mode_cache``.
     """
 
-    def __init__(self, path: Path, label: str, displacement: str, mode_cache: dict | None = None):
+    def __init__(
+        self, path: Path, label: str, displacement: str, mode_cache: dict | None = None,
+        phonon_preference: str = "auto",
+    ):
         self.path = Path(path)
         self.label = label
         self.displacement = displacement
+        self.phonon_preference = phonon_preference
         self.mode_cache = {} if mode_cache is None else mode_cache
         self._conv = None
         self._modes: list[ModeEntry] | None = None
         self._mode_warnings: list[str] = []
+        self._phonon_choice: PhononChoice | None = None
         self._norm_cache: dict[tuple, NormResult] = {}
         self._channel_cache: dict[tuple, ChannelAnalysis] = {}
 
@@ -122,10 +128,21 @@ class PackSession:
         if self._modes is not None:
             return self._modes
         availability = self.availability()
-        info = mode_details(self.path, availability.modes, self.mode_cache, meta=self.metadata)
+        override = {"aligned": True, "unaligned": False}.get(self.phonon_preference)
+        self._phonon_choice = resolve_phonon(
+            self.path, self.metadata, max(availability.modes) if availability.modes else 0,
+            override_aligned=override,
+        )
+        info = mode_details(
+            self.path, availability.modes, self.mode_cache, meta=self.metadata,
+            phonon_file=self._phonon_choice.path,
+        )
         if not info and availability.modes:
+            detail = "; ".join(self._phonon_choice.notes[:3])
             self._mode_warnings.append(
-                "no registered phonon data covers this pack; mode symmetry and frequency are unavailable"
+                f"no full phonon spectrum covers modes up to {max(availability.modes)}; "
+                f"mode symmetry and frequency are unavailable"
+                + (f" ({detail})" if detail else "")
             )
         self._modes = [
             ModeEntry(int(m), *(info.get(int(m), (None, None)))) for m in availability.modes
@@ -137,6 +154,24 @@ class PackSession:
         if self._modes is None:
             self.modes()
         return list(self._mode_warnings)
+
+    @property
+    def phonon_path(self):
+        if self._phonon_choice is None:
+            self.modes()
+        return self._phonon_choice.path if self._phonon_choice is not None else None
+
+    def set_phonon_preference(self, preference: str) -> None:
+        if preference not in ("auto", "aligned", "unaligned"):
+            preference = "auto"
+        if preference == self.phonon_preference:
+            return
+        self.phonon_preference = preference
+        self._modes = None
+        self._mode_warnings = []
+        self._phonon_choice = None
+        self._norm_cache.clear()
+        self._channel_cache.clear()
 
     def norm(
         self,

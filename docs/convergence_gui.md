@@ -151,6 +151,18 @@ Each tab has nested **Summary** and **Mode detail** views.
 - Too few amplitudes for the SNR estimate: the mode is listed as skipped in the
   Details pane and omitted from the summary row, matching the CLI. The channel
   view still draws its raw points and marks the fit as unavailable.
+- Phonon symmetry and frequency follow the main pipeline's pairing: a pack's
+  recorded full spectrum (`phonon_file`, plus its `aligned` tag) first, then the
+  registered full spectra, then `phonon_data.npz` / `phonon_data_aligned.npz`
+  next to the pack or under the stored ground-state defect folder.  A
+  symmetry-reduced file is resolved to its full spectrum.  Packs without an
+  `aligned` tag prefer the aligned full spectrum when both are present; the
+  Advanced tab can force Auto, Aligned full or Unaligned full per tab.
+  `package --conv` now copies and registers the full spectrum alongside the
+  convergence pack, using the aligned file when the trees displaced along
+  aligned modes.  If no full
+  spectrum covers the highest mode, the table leaves symmetry/frequency blank
+  and Details says which files were rejected and why.
 - An empty registry shows a short empty state with the `spinlabs package
   --conv` hint and the File → Open fallback.
 

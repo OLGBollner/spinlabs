@@ -183,15 +183,36 @@ def _registered_spectrum(
 
 
 def mode_details(
-    path, modes, cache: dict | None = None, meta: dict | None = None
+    path, modes, cache: dict | None = None, meta: dict | None = None, phonon_file=None
 ) -> dict[int, tuple[str | None, float | None]]:
     """(symmetry, frequency in meV) per mode from the defect's registered phonon data.
 
     Empty, with a warning, when the pack names no defect/cell or no registered spectrum
     covers the modes. ``cache`` keeps parsed spectra between packs of one figure.
     ``meta`` saves loading the pack again when the caller already has its metadata.
+    ``phonon_file`` uses that full spectrum instead of looking it up in the registry.
     """
     cache = {} if cache is None else cache
+    if phonon_file is not None:
+        from spinlabs.parsers import parse_phonon_data
+        from spinlabs.symmetry import classify_and_pair
+
+        try:
+            spectrum = parse_phonon_data(phonon_file)
+        except Exception as exc:
+            LOGGER.warning(f"{Path(path).name}: cannot read phonon file {phonon_file}: {exc}")
+            return {}
+        if spectrum.symmetries is None:
+            classify_and_pair(spectrum)
+        labels = tuple(str(s) for s in spectrum.symmetries)
+        frequencies = np.asarray(spectrum.frequencies_mev)
+        return {
+            m: (
+                labels[m - 1] if m <= len(labels) else None,
+                float(frequencies[m - 1]) if m <= len(frequencies) else None,
+            )
+            for m in modes
+        }
     meta = load_convergence(path).metadata if meta is None else meta
     name = f"{meta.get('defect')}_{meta.get('cell')}"
     if not modes:
