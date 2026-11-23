@@ -194,9 +194,12 @@ def _summary(manager, ph_path, first, second, top: int, modes: list[int]) -> str
             + (" -- " + ", ".join(f"{i + 1}_{j + 1} (alpha={a:.2f})" for i, j, a, _ in bad) if bad else "")
         )
         if manager.mirror_projection:
+            syms = [str(s) for s in manager.spectrum.symmetries] if manager.spectrum is not None else []
+            central_e = sum(1 for i in manager.mirror_projected_central if i < len(syms) and syms[i] in ("Ex", "Ey"))
             lines.append(
                 f"  mirror projection: {len(manager.mirror_projected)} forward and "
-                f"{len(manager.mirror_projected_central)} central diagonals projected, "
+                f"{central_e} central E diagonals projected "
+                f"(+{len(manager.mirror_projected_central) - central_e} central A), "
                 f"{len(manager.mirror_inherited)} even partners from their odd twin, "
                 f"{len(manager.mirror_uncorrected)} E diagonals uncorrected"
             )

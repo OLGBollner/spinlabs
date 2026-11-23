@@ -136,3 +136,28 @@ def _save(tmp_path, raw):
     path.parent.mkdir(exist_ok=True)
     raw.save(path)
     return path
+
+
+@pytest.mark.parametrize(
+    "folders, method",
+    [
+        ("NV_64/second_order/pert_0.1/AO", "AO"),
+        ("NV_64/second_order/pert_0.1/defect_band_approx", "UO"),
+        (["NV_64/first_order/pert_0.1/UO", "NV_64/second_order/pert_0.1/UO"], "UO"),
+    ],
+)
+def test_sim_folder_method_is_read_from_the_folder_names(folders, method):
+    from spinlabs.pipeline import sim_folder_method
+
+    assert sim_folder_method(folders) == method
+
+
+@pytest.mark.parametrize("folders", ["NV_64/second_order/pert_0.1/runs",
+                                     ["NV_64/second_order/pert_0.1/AO", "NV_64/second_order/pert_0.1/UO"]])
+def test_sim_folder_without_a_method_is_an_error(folders):
+    from spinlabs.pipeline import coupling_manager, sim_folder_method
+
+    with pytest.raises(ValueError, match="pass calc_method"):
+        sim_folder_method(folders)
+    with pytest.raises(ValueError, match="pass calc_method"):
+        coupling_manager(sim_folder=folders)

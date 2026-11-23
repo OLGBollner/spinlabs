@@ -20,6 +20,7 @@ from spinlabs.logging_utils import (
 )
 
 from spinlabs.constants import CONSTANTS
+from spinlabs.methods import method_from_path
 from spinlabs.models import (
     PhononSpectrum,
     RawZFSData,
@@ -421,6 +422,17 @@ def build_manager(
     return manager
 
 
+def sim_folder_method(sim_folder: str | Path | Sequence[str | Path]) -> str:
+    """The method (AO, UO, full_decont) simulation folder(s) name in their last three path parts
+    (<order>/pert_<p>/<basis>); ValueError when they name none or disagree."""
+    folders = sim_folder if isinstance(sim_folder, (list, tuple)) else [sim_folder]
+    found = {method_from_path(Path(*Path(f).parts[-3:])) for f in folders}
+    if len(found) != 1 or None in found:
+        names = ", ".join(str(f) for f in folders)
+        raise ValueError(f"cannot tell the method of the simulation folder(s) {names} from their names; pass calc_method")
+    return found.pop()
+
+
 def coupling_manager(
     *,
     sim_folder: str | Path | Sequence[str | Path] | None = None,
@@ -441,8 +453,12 @@ def coupling_manager(
     """load_raw_inputs + build_manager: the ZFSManager of any input, as ``spinlabs run`` builds it.
 
     ``raw_zfs_file`` may be a package or a full-decontamination folder (its sublevels are combined on load).
+    Simulation folders are parsed per method (a UO folder is spin-corrected), so without ``calc_method`` the
+    method is read from their paths (method_from_path), and a folder that names none is an error.
     Returns the manager and the phonon file used.
     """
+    if calc_method is None and sim_folder is not None:
+        calc_method = sim_folder_method(sim_folder)
     raw_data, spectrum, ph_path = load_raw_inputs(
         sim_folder=sim_folder, raw_zfs_file=raw_zfs_file, raw_zfs_file_1d=raw_zfs_file_1d,
         raw_zfs_file_2d=raw_zfs_file_2d, phonon_file=phonon_file, calc_method=calc_method or "AO",
@@ -852,7 +868,6 @@ def _execute_pipeline(
             if raw_data.calc_method not in (None, "None", ""):
                 calc_method = raw_data.calc_method
             elif raw_zfs_file:
-                from spinlabs.methods import method_from_path
                 from spinlabs.utils import relative_to_cwd
 
                 paths = raw_zfs_file if isinstance(raw_zfs_file, (list, tuple)) else [raw_zfs_file]

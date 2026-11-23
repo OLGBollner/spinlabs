@@ -81,6 +81,7 @@ def second_difference_noise(manager) -> SecondOrderNoise:
     parity = manager._mirror_parities() if any(lab in ("Ex", "Ey") for lab in labels) else {}
     out_samples: list[float] = []
     in_samples: list[float] = []
+    from_e = False  # whether aligned central E modes contributed samples
     for (i, j), item in manager.zfs_tensors_2d.items():
         if i != j:
             continue
@@ -95,11 +96,10 @@ def second_difference_noise(manager) -> SecondOrderNoise:
             anti = 0.5 * (d - M @ d @ M.T)  # one out-of-plane and one in-plane component, in a frame-free form
             out_samples.append(np.hypot(anti[0, 2], anti[1, 2]))
             in_samples.append(0.5 * np.hypot(anti[0, 0] - anti[1, 1], 2 * anti[0, 1]))  # |w_anti| = 2 |xy|
+            from_e = True
     if not out_samples or not in_samples:
         raise ValueError("no symmetry-forbidden parts to measure the noise from (no A modes or aligned central E modes)")
     mhz = CONSTANTS["MHz2J"]
-    from_e = any(lab in ("Ex", "Ey") for lab in labels) and len(out_samples) > 2 * sum(
-        1 for (i, j) in manager.zfs_tensors_2d if i == j and labels[i] in ("A1", "A2"))
     noise = SecondOrderNoise(
         out_of_plane=float(np.median(np.abs(out_samples)) / _MEDIAN_ABS / mhz),
         in_plane=float(np.median(np.abs(in_samples)) / _MEDIAN_ABS / mhz),
@@ -156,8 +156,10 @@ def mode_amplitudes(manager) -> np.ndarray:
 def denoised_couplings(manager, coupling: dict, noise: SecondOrderNoise | None = None) -> dict:
     """``coupling`` (a coupling npz as a dict, the manager's output) with the noise removed from V2_*.
 
-    Every diagonal coupling loses its expected noise in quadrature; the filled pairs follow. Modes the
-    manager's mirror projection treated carry only the allowed component's noise.
+    Every diagonal coupling loses its expected noise in quadrature; the filled pairs (sqrt(V_ii V_jj)) follow
+    by sqrt(s_i s_j). Off-diagonal pairs the dataset computed keep their values: their own noise is not
+    estimated, and the diagonals' factors do not apply to them. Modes the manager's mirror projection treated
+    carry only the allowed component's noise.
     """
     noise = noise or second_difference_noise(manager)
     labels = [str(s) for s in manager.spectrum.symmetries]
@@ -187,4 +189,9 @@ def denoised_couplings(manager, coupling: dict, noise: SecondOrderNoise | None =
         vec = np.where([lab.startswith("A") for lab in labels], scale["V2_0_0"], scale[channel])
         out[channel] = np.asarray(coupling[channel], dtype=float) * np.sqrt(np.outer(vec, vec))
     out["V2_0_0"] = np.asarray(coupling["V2_0_0"], dtype=float) * np.sqrt(np.outer(scale["V2_0_0"], scale["V2_0_0"]))
+    computed = [(i, j) for (i, j) in manager.zfs_tensors_2d if i != j]
+    for channel in ("V2_0_0", "V2_0_pm", "V2_p_m"):
+        original = np.asarray(coupling[channel], dtype=float)
+        for i, j in computed:
+            out[channel][i, j], out[channel][j, i] = original[i, j], original[j, i]
     return out

@@ -114,3 +114,34 @@ def test_couplings_stored_in_mhz_are_handled():
 def test_mode_amplitudes_fill_twins():
     manager = _manager({(1, 1): {"pert": (3.0, 3.0)}}, ["A1", "Ex", "Ey"], groups=[[0], [1, 2]])
     assert mode_amplitudes(manager).tolist() == [0.0, 3.0, 3.0]
+
+
+def test_from_e_modes_is_set_by_the_e_samples_themselves():
+    # Two forward A1 diagonals, one without its first-order run (no sample), and one aligned central E mode:
+    # 3 out-of-plane samples against 2 A diagonals, which a count-based flag reads as A-only.
+    mirror = np.diag([-1.0, 1.0, 1.0])
+    d2 = np.array([[0.01, 0.02, 0.003], [0.02, -0.01, 0.004], [0.003, 0.004, 1.0]]) * MHZ
+    entries = {(0, 0): {"tensor": D0 + d2, "central": False, "pert": (1e-24, 1e-24)},
+               (1, 1): {"tensor": D0 + d2, "central": False, "pert": (1e-24, 1e-24)},
+               (2, 2): _central((0.002, 0.001), (0.01, 0.02))}
+    manager = _manager(entries, ["A1", "A1", "Ex"])
+    manager.first_order = {0: {"tensor": D0}}  # mode 1 has no first-order run
+    manager._mirror_parities = lambda: {2: (mirror, -1.0)}
+    noise = second_difference_noise(manager)
+    assert noise.n_out == 3 and noise.from_e_modes is True
+
+
+def test_computed_off_diagonal_pairs_keep_their_values():
+    labels = ["A1", "Ex", "Ey"]
+    q = 2e-12
+    entries = {(i, i): {"pert": (q, q)} for i in range(3)}
+    entries[(0, 1)] = {"pert": (q, q)}  # a computed pair
+    manager = _manager(entries, labels, groups=[[0], [1, 2]])
+    noise = SecondOrderNoise(out_of_plane=0.003, in_plane=0.006, n_out=10, n_in=10)
+    sv = {ch: np.hypot(*noise.per_component(ch)) * MHZ / q**2 for ch in ("V2_0_0", "V2_0_pm", "V2_p_m")}
+    coupling = _coupling([4 * sv["V2_0_0"], 0, 0], [0, 2 * sv["V2_0_pm"], 2 * sv["V2_0_pm"]],
+                         [0, 2 * sv["V2_p_m"], 2 * sv["V2_p_m"]], labels)
+    out = denoised_couplings(manager, coupling, noise)
+    for channel in ("V2_0_0", "V2_0_pm", "V2_p_m"):
+        assert out[channel][0, 1] == coupling[channel][0, 1] and out[channel][1, 0] == coupling[channel][1, 0]
+    assert out["V2_0_pm"][0, 2] != coupling["V2_0_pm"][0, 2]  # the filled pair still follows its diagonals

@@ -667,10 +667,12 @@ class ZFSManager:
                 if self.spectrum is not None and str(self.spectrum.symmetries[i]) in ("Ex", "Ey")
             ]
             if central_e:
-                skipped = len(set(central_e) - set(self.mirror_projected_central))
+                projected_e = set(central_e) & set(self.mirror_projected_central)
+                skipped = len(set(central_e) - projected_e)
+                n_a = len(self.mirror_projected_central) - len(projected_e)
                 LOGGER.info(
-                    f"mirror projection: {len(self.mirror_projected_central)} central diagonals projected "
-                    f"(the noise in their mirror-forbidden part removed)"
+                    f"mirror projection: {len(projected_e)} central E diagonals projected (the noise in their "
+                    f"mirror-forbidden part removed)" + (f", and {n_a} central A diagonals" if n_a else "")
                     + (f"; {skipped} central E diagonals not aligned with a mirror "
                        f"(|overlap| < {MIRROR_MIN_OVERLAP_CENTRAL}) left as they are" if skipped else "")
                 )

@@ -299,7 +299,7 @@ def plot_t1(result, out, exp):
         top.set_ylabel(f"$T_1$ of {slabel} (s)")
         top.grid(True, ls=":", alpha=0.5)
         top.set_xlim(temps.min(), temps.max())
-        top.set_ylim(1e-4, max(1e2, top.get_ylim()[0]))
+        top.set_ylim(1e-4, max(1e2, top.get_ylim()[1]))
         _ratio_axis(bottom, "$T_1$ / AO")
         bottom.set_ylim(0, max(1.2, bottom.get_ylim()[1]))
         bottom.set_xlabel("Temperature (K)")
