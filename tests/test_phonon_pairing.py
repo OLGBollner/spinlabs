@@ -73,6 +73,49 @@ def test_tree_setup_without_alignment_keeps_the_classified_file(tmp_path):
     assert full_spectrum_of(target) == out / "data" / "phonon_data.npz"
 
 
+def _reduced_nv64(folder):
+    """NV_64's spectrum reduced to one mode per degenerate set (126 of 189), as spinlabs symmetrize writes it."""
+    from spinlabs.parsers import save_phonon_npz
+    from spinlabs.symmetry import classify_and_pair, filter_degenerate_partners, symmetrize_degenerate_groups
+
+    spectrum = parse_phonon_npz(NV_64_PHONONS)
+    classify_and_pair(spectrum)
+    path = folder / "phonon_data.npz"
+    save_phonon_npz(filter_degenerate_partners(symmetrize_degenerate_groups(spectrum)), path)
+    return path
+
+
+def test_tree_setup_refuses_a_reduced_spectrum(tmp_path):
+    # NV_216: a reduced file where the full spectrum belongs passed through filter and alignment
+    # unchanged and was written as its own "full" phonon_data_aligned.npz.
+    out = tmp_path / "NV_64"
+    (out / "data").mkdir(parents=True)
+    reduced = _reduced_nv64(out / "data")
+    with pytest.raises(ValueError, match=r"symmetry-reduced phonon spectrum \(126 of 189 modes\)"):
+        resolve_sym_phonon(out, reduced)
+    assert sorted(p.name for p in (out / "data").iterdir()) == ["phonon_data.npz"]  # nothing written
+
+
+def test_reduced_spectra_are_told_from_full_ones(tmp_path):
+    from spinlabs.models import reduced_spectrum_reason
+
+    assert reduced_spectrum_reason(parse_phonon_npz(NV_64_PHONONS)) is None
+    assert reduced_spectrum_reason(parse_phonon_npz(_reduced_nv64(tmp_path))) == "126 of 189 modes"
+    # an older reduced file: the indices into the full spectrum, no n_full
+    assert "indices into a larger spectrum" in reduced_spectrum_reason(_spectrum(FULL[[0, 2]], original=[0, 2]))
+    # nothing but the mode count: 2 modes of a 1-atom cell
+    assert "a full spectrum has 3" in reduced_spectrum_reason(_spectrum(FULL[:2]))
+
+
+def test_symmetrize_refuses_a_reduced_spectrum(tmp_path):
+    from spinlabs import cli
+
+    reduced = _reduced_nv64(tmp_path)
+    with pytest.raises(SystemExit, match="already symmetry-reduced"):
+        cli.main(["symmetrize", str(reduced), "--align"])
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["phonon_data.npz"]
+
+
 # -- PHONON_PATH from a tree's job script ----------------------------------------------------------------
 
 
