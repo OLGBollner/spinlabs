@@ -335,6 +335,10 @@ class PhononSpectrum:
     # Whether every degenerate E set was rotated onto one mirror plane (symmetry.align_degenerate_pairs):
     # True for an aligned file, False for a symmetrized file whose sets are only classified, None unstated.
     aligned: Optional[bool] = None
+    # The defect frame the modes were classified in (symmetry.defect_frame): a rotation whose columns
+    # are the sigma_v1 mirror normal n, z x n and the C3 axis z, in the cell's Cartesian frame. The
+    # symmetry operations, the Ex/Ey labels and the alignment mirror all follow from it.
+    frame: Optional[np.ndarray] = None  # Shape (3, 3)
     frequency_unit: str = "meV"
 
     def __post_init__(self):
@@ -944,6 +948,7 @@ class PhononSpectrum:
             # code can map each reduced mode back to its source position.
             original_indices=kept,
             n_full=((self.n_full if self.n_full is not None else len(original)) if original is not None else n),
+            frame=self.frame,
         )
         n_full = self.n_full if self.n_full is not None else (len(original) if original is not None else n)
         check_original_indices(reduced.original_indices, reduced.n_modes, n_full=n_full)
@@ -971,6 +976,7 @@ class PhononSpectrum:
         FieldSpec("original_indices", "array", shape=("n_modes",), optional=True, save_aliases=("idx",)),
         FieldSpec("n_full", "int", optional=True),
         FieldSpec("aligned", "bool", optional=True),
+        FieldSpec("frame", "array", shape=(3, 3), optional=True),
     ]
 
     def save(self, out_path: Union[str, Path]) -> str:

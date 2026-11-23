@@ -34,6 +34,9 @@ LOGGER = get_logger(__name__)
 # about 1e-3 A: OV_128_hh is C3v within 0.0011 A and comes out as m at 1e-3, 3m from 2e-3. NV, ClV,
 # the divacancy and V_Si give the same group at 1e-3 and 1e-2.
 SYMPREC = 1e-2
+# Largest atom mismatch (Angstrom) a stored defect frame's operations may leave (frame_mismatch).
+FRAME_TOL = 0.05
+_TIE = 1e-6  # components equal within this count as a tie in frame_from_structure
 
 
 # ---------------------------------------------------------------------------
@@ -145,7 +148,15 @@ def classify_modes(spectrum, tol_mev: float = 0.01, symprec: float = SYMPREC) ->
     if table is None:
         raise NotImplementedError(f"No character table for point group '{pg.symbol}'. Add one to CHARACTER_TABLES.")
 
+    stored = getattr(spectrum, "frame", None) is not None
     ops = defect_frame_operations(spectrum)
+    if stored:
+        mismatch = frame_mismatch(spectrum, spectrum.frame)
+        if mismatch > FRAME_TOL:
+            raise ValueError(
+                f"the stored defect frame is not a symmetry of the structure: an operation misplaces an atom by "
+                f"{mismatch:.3f} A (> {FRAME_TOL} A)"
+            )
     chars = _mode_characters(spectrum, ops)
     # Sublabels of a 2D irrep (Ex/Ey) are a basis convention, not physics:
     # the stored convention (set by the legacy analyzer) is the sign of the
@@ -273,7 +284,10 @@ def classify_and_pair(
     except Exception:
         table = {}
     if table:
-        ops = defect_frame_operations(spectrum)
+        try:
+            ops = defect_frame_operations(spectrum)
+        except NotImplementedError:  # no C3v frame (another point group): nothing to verify against
+            return labels, deg_groups
         chars = _mode_characters(spectrum, ops)
         spectrum.sym_check = verify_deg_groups(chars, labels, deg_groups, table)
     return labels, deg_groups
@@ -321,17 +335,120 @@ def _build_groups_from_labels(spectrum, labels, tol_mev):
 # ---------------------------------------------------------------------------
 
 
-def _defect_frame(spectrum) -> tuple[np.ndarray, np.ndarray]:
-    """Returns (axis, reflection_normal) of the defect in Cartesian coords.
+def frame_matrix(axis, normal) -> np.ndarray:
+    """Defect frame from a C3 axis and a sigma_v mirror normal: columns n, z x n, z (orthonormal)."""
+    z = np.asarray(axis, dtype=float)
+    z = z / np.linalg.norm(z)
+    n = np.asarray(normal, dtype=float)
+    n = n - np.dot(n, z) * z
+    n = n / np.linalg.norm(n)
+    return np.column_stack([n, np.cross(z, n), z])
 
-    Same convention as the legacy analyze_c3v_symmetry: NV (C+N) has its
-    principal axis along [1, 1, 1] with a sigma_v mirror normal [1, -1, 0];
-    everything else (e.g. ClV) is taken as [0, 0, 1] / [1, 0, 0].
+
+def _positive_along(v: np.ndarray, directions) -> np.ndarray:
+    """``v`` with its sign fixed: positive along the first of ``directions`` it is not normal to."""
+    for d in directions:
+        c = float(np.dot(v, d))
+        if abs(c) > _TIE:
+            return v if c > 0 else -v
+    return v
+
+
+def frame_from_structure(spectrum) -> np.ndarray:
+    """The defect frame of a C3v structure, from its own symmetry operations (spglib, SYMPREC).
+
+    z is the axis of the C3 rotation, signed so that its largest component (the first of equal
+    ones) is positive. n is the normal of the sigma_v mirror with the largest component along the
+    first lattice vector a1, ties broken by a2 and then a3; each normal is signed positive along
+    the first of a1, a2, a3 it has a component on. Raises NotImplementedError for a structure
+    without a C3 axis and three mirrors.
     """
-    symbols = list(spectrum.atom_symbols)
-    if "C" in symbols and "N" in symbols:
-        return np.array([1.0, 1.0, 1.0]), np.array([1.0, -1.0, 0.0])
-    return np.array([0.0, 0.0, 1.0]), np.array([1.0, 0.0, 0.0])
+    structure = Structure(
+        lattice=spectrum.lattice,
+        species=spectrum.atom_symbols,
+        coords=spectrum.atom_frac_coords,
+        coords_are_cartesian=False,
+    )
+    try:
+        sga = SpacegroupAnalyzer(structure, symprec=SYMPREC)
+        rotations = [op.rotation_matrix for op in sga.get_symmetry_operations(cartesian=True)]
+        symbol = sga.get_point_group_symbol()
+    except Exception as exc:
+        raise SymmetryDetectionError(f"Unable to determine symmetry (symprec={SYMPREC}): {exc}") from exc
+    c3 = [R for R in rotations if np.linalg.det(R) > 0 and abs(np.trace(R)) < 1e-3]  # trace 1 + 2 cos 120
+    mirrors = [R for R in rotations if np.linalg.det(R) < 0 and abs(np.trace(R) - 1.0) < 1e-3]
+    if not c3 or len(mirrors) != 3:
+        raise NotImplementedError(f"the defect frame needs C3v (a C3 axis and three mirrors), got point group {symbol}")
+
+    values, vectors = np.linalg.eig(c3[0])
+    z = np.real(vectors[:, int(np.argmin(np.abs(values - 1.0)))])
+    z = z / np.linalg.norm(z)
+    k = int(np.argmax(np.abs(z) > np.abs(z).max() - _TIE))  # first of the largest components
+    z = z if z[k] > 0 else -z
+
+    lattice = np.asarray(spectrum.lattice, dtype=float)
+    a = [row / np.linalg.norm(row) for row in lattice]
+    normals = []
+    for M in mirrors:
+        values, vectors = np.linalg.eig(M)
+        n = np.real(vectors[:, int(np.argmin(np.abs(values + 1.0)))])
+        normals.append(_positive_along(n / np.linalg.norm(n), a))
+    n = max(normals, key=lambda v: tuple(round(float(np.dot(v, d)) / _TIE) for d in a))
+    return frame_matrix(z, n)
+
+
+def defect_frame(spectrum) -> np.ndarray:
+    """The spectrum's defect frame: the stored one (``spectrum.frame``), else frame_from_structure.
+
+    A computed frame is stored on the spectrum, so files written from it carry it. A spectrum with
+    stored labels but no frame was classified in a frame that was not recorded (phonon files from
+    before frames were stored); the computed frame can differ from it (NV in a cubic cell: another
+    of the three mirrors, so Ex and Ey swap), which is logged.
+    """
+    if getattr(spectrum, "frame", None) is None:
+        if spectrum.symmetries is not None:
+            LOGGER.warning(
+                "phonon file has symmetry labels but no stored defect frame; using the frame of the structure, "
+                "which may differ from the one the labels were made in (stamp it: scripts/stamp_phonon_frames.py)"
+            )
+        spectrum.frame = frame_from_structure(spectrum)
+    return np.asarray(spectrum.frame, dtype=float)
+
+
+def frame_operations(frame) -> list[np.ndarray]:
+    """C3v operations (E, C3, C3^2, sigma_v1, sigma_v2, sigma_v3) of a defect frame (frame_matrix).
+
+    C3 turns by +120 deg about the frame's z; sigma_v1 is the mirror normal to its first column and
+    sigma_v2, sigma_v3 are C3 and C3^2 applied after it.
+    """
+    from spinlabs.utils import MathUtils
+
+    frame = np.asarray(frame, dtype=float)
+    axis, normal = frame[:, 2], frame[:, 0]
+    ops = [np.eye(3)]
+    ops.append(MathUtils.rotation_around_symmetry_axis(axis, 3))
+    ops.append(MathUtils.rotation_around_symmetry_axis(axis, 3).T)  # C3^2
+    M = np.eye(3) - 2.0 * np.outer(normal, normal)
+    for C in (None, ops[1], ops[2]):  # three sigma_v mirrors of C3v
+        ops.append(M if C is None else C @ M)
+    return ops
+
+
+def frame_mismatch(spectrum, frame) -> float:
+    """Largest distance (Angstrom) between an atom's image under an operation of ``frame`` (about the
+    defect centre) and the atom it maps onto: ~0 when the frame's operations are symmetries."""
+    lattice = np.asarray(spectrum.lattice, dtype=float)
+    inv_lat = np.linalg.inv(lattice)
+    frac = np.mod(np.asarray(spectrum.atom_frac_coords, dtype=float) - _defect_center(spectrum), 1.0)
+    cart = frac @ lattice
+    symbols = np.asarray(spectrum.atom_symbols)
+    worst = 0.0
+    for R in frame_operations(frame):
+        mapping = _atom_mapping(R, cart, frac, inv_lat, symbols, lattice)
+        image = np.mod(cart @ np.asarray(R).T @ inv_lat, 1.0)
+        diff = np.mod(frac[mapping] - image + 0.5, 1.0) - 0.5
+        worst = max(worst, float(np.linalg.norm(diff @ lattice, axis=1).max()))
+    return worst
 
 
 def _defect_center(spectrum) -> np.ndarray:
@@ -347,28 +464,12 @@ def _defect_center(spectrum) -> np.ndarray:
 
 
 def defect_frame_operations(spectrum) -> list[np.ndarray]:
-    """Builds the point-group operations in the defect-aligned frame.
+    """The point-group operations in the spectrum's defect frame (defect_frame, frame_operations).
 
-    The defect is centered at the origin and the principal axis is taken as
-    the group's z axis, so the operations are the standard rotations/reflections
-    about that frame. Operations act about the *defect center*, not the cell
-    origin: applying them to an off-center structure corrupts the atom mapping
-    and hence the characters.
+    They act about the *defect center*, not the cell origin (see _mode_characters): applying them to
+    an off-center structure corrupts the atom mapping and hence the characters.
     """
-    from spinlabs.utils import MathUtils
-
-    axis, normal = _defect_frame(spectrum)
-    axis = axis / np.linalg.norm(axis)
-    ops = [np.eye(3)]
-    ops.append(MathUtils.rotation_around_symmetry_axis(axis, 3))
-    ops.append(MathUtils.rotation_around_symmetry_axis(axis, 3).T)  # C3^2
-    for C in (None, ops[1], ops[2]):  # three sigma_v mirrors of C3v
-        n = normal / np.linalg.norm(normal)
-        M = np.eye(3) - 2.0 * np.outer(n, n)
-        if C is not None:  # rotate the mirror plane by +-120 deg about the axis
-            M = C @ M
-        ops.append(M)
-    return ops
+    return frame_operations(defect_frame(spectrum))
 
 
 def mirror_parities(spectrum) -> dict[int, tuple[np.ndarray, float]]:
@@ -559,10 +660,14 @@ def filter_degenerate_partners(
 
     General replacement for ``PhononSpectrum.filter_sym_pairs``: classifies
     via :func:`classify_and_pair` (any point group), then drops all but one
-    member of every multi-member degeneracy group. Within a group the
-    surviving member is the one with the lexicographically smallest irrep
-    label (for C3v this reproduces the legacy keep-all-Ex rule, since
-    'Ex' < 'Ey').
+    member of every multi-member degeneracy group. In an aligned spectrum
+    (align_degenerate_pairs) the surviving member is the one odd under the
+    alignment mirror (sigma_v2, ALIGN_MIRROR): the one whose forward second
+    difference the mirror projection can clean; a set without exactly one
+    such member raises ValueError. Otherwise it is the one with the
+    lexicographically smallest irrep label (for C3v the legacy keep-all-Ex
+    rule, since 'Ex' < 'Ey'). The two agree on aligned C3v sets: the
+    sigma_v2-odd partner has chi(sigma_v1) = +1/2 and is the Ex.
 
     The reduced spectrum carries 0-based ``original_indices`` into the
     FULL (pre-reduction) spectrum. If the input spectrum was itself already
@@ -570,11 +675,21 @@ def filter_degenerate_partners(
     original DFT run positions.
     """
     labels, deg_groups = classify_and_pair(spectrum, tol_mev=tol_mev, symprec=symprec)
+    parity = _alignment_parities(spectrum) if spectrum.aligned else None
     drop: set[int] = set()
     for g in deg_groups:
         if len(g) < 2:
             continue
-        keep = min(g, key=lambda i: labels[i] or "")
+        if parity is None:
+            keep = min(g, key=lambda i: labels[i] or "")
+        else:
+            odd = [i for i in g if parity[i] < -1.0 + ALIGN_TOL]
+            if len(odd) != 1:
+                raise ValueError(
+                    f"aligned degenerate set {sorted(g)} has {len(odd)} partners odd under the alignment mirror "
+                    f"(characters {[round(float(parity[i]), 4) for i in g]}), not one"
+                )
+            keep = odd[0]
         drop.update(i for i in g if i != keep)
 
     n = spectrum.n_modes
@@ -595,12 +710,21 @@ def filter_degenerate_partners(
         original_indices=kept,
         n_full=((spectrum.n_full if spectrum.n_full is not None else len(original)) if original is not None else n),
         aligned=spectrum.aligned,
+        frame=spectrum.frame,
     )
     # indices point into the FULL pre-reduction spectrum, so the parent
     # size is the recorded n_full (or the input's own size when unreduced)
     n_full = spectrum.n_full if spectrum.n_full is not None else (len(original) if original is not None else n)
     check_original_indices(reduced.original_indices, reduced.n_modes, n_full=n_full)
     return reduced
+
+
+def _alignment_parities(spectrum) -> np.ndarray:
+    """<e|M e> / <e|e> of every mode under the alignment mirror M (sigma_v2, ALIGN_MIRROR): +-1 when aligned."""
+    M = [defect_frame_operations(spectrum)[ALIGN_MIRROR]]
+    chars = np.real(_mode_characters(spectrum, M))[:, 0]
+    eigs = np.asarray(spectrum.eigenvectors, dtype=float)
+    return chars / np.sum(eigs.reshape(eigs.shape[0], -1) ** 2, axis=1)
 
 
 def twin_of(deg_groups, i: int) -> int | None:
