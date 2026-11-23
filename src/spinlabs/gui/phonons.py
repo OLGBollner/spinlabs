@@ -82,9 +82,15 @@ def _is_aligned(path: Path, spectrum) -> bool:
 
 
 def resolve_phonon(
-    pack_path: Path, meta: dict, max_mode: int, override_aligned: bool | None = None
+    pack_path: Path, meta: dict, max_mode: int, override_aligned: bool | None = None,
+    cache: dict | None = None,
 ) -> PhononChoice:
-    """The best full phonon spectrum for a pack, and why if none covers its modes."""
+    """The best full phonon spectrum for a pack, and why if none covers its modes.
+
+    ``cache`` (shared by the GUI's packs) stores parsed spectra, so several
+    columns or tabs using one phonon file pay for parsing it only once.
+    """
+    cache = {} if cache is None else cache
     pack_path = Path(pack_path)
     wanted_aligned = override_aligned if override_aligned is not None else meta.get("aligned")
     if isinstance(wanted_aligned, str):
@@ -93,10 +99,18 @@ def resolve_phonon(
     best = None
     best_score = -10**9
     for path in _candidate_paths(pack_path, meta):
-        try:
-            spectrum = parse_phonon_data(path)
-        except Exception as exc:
-            notes.append(f"{path}: cannot parse ({exc})")
+        spectrum_key = ("phonon-spectrum", str(path))
+        if spectrum_key in cache:
+            spectrum = cache[spectrum_key]
+        else:
+            try:
+                spectrum = parse_phonon_data(path)
+            except Exception as exc:
+                notes.append(f"{path}: cannot parse ({exc})")
+                continue
+            cache[spectrum_key] = spectrum
+        if spectrum is None:
+            notes.append(f"{path}: cannot parse")
             continue
         if spectrum.n_modes < max_mode:
             notes.append(f"{path}: {spectrum.n_modes} modes, need {max_mode}")

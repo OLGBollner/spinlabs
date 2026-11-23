@@ -197,11 +197,15 @@ def mode_details(
         from spinlabs.parsers import parse_phonon_data
         from spinlabs.symmetry import classify_and_pair
 
-        try:
-            spectrum = parse_phonon_data(phonon_file)
-        except Exception as exc:
-            LOGGER.warning(f"{Path(path).name}: cannot read phonon file {phonon_file}: {exc}")
-            return {}
+        spectrum_key = ("phonon-spectrum", str(phonon_file))
+        spectrum = cache.get(spectrum_key)
+        if spectrum is None:
+            try:
+                spectrum = parse_phonon_data(phonon_file)
+            except Exception as exc:
+                LOGGER.warning(f"{Path(path).name}: cannot read phonon file {phonon_file}: {exc}")
+                return {}
+            cache[spectrum_key] = spectrum
         if spectrum.symmetries is None:
             classify_and_pair(spectrum)
         labels = tuple(str(s) for s in spectrum.symmetries)

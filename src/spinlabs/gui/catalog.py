@@ -197,6 +197,7 @@ class Catalog:
         self.conn = conn or ensure_db()
         self.errors: list[str] = []
         self._raw: list[tuple[Path, dict, str, str]] = []
+        self._groups_cache: dict[tuple, list[Group]] = {}
         self._load()
 
     def _load(self) -> None:
@@ -249,6 +250,9 @@ class Catalog:
         latest_only: bool = False,
     ) -> list[Group]:
         """Groups matching the filters; with ``latest_only`` each scheme keeps its newest file."""
+        cache_key = (defect, cell, method, displacement, bool(latest_only))
+        if cache_key in self._groups_cache:
+            return list(self._groups_cache[cache_key])
         collected: dict[tuple[str, str, str], dict[str, list[tuple[str, Path]]]] = {}
         for path, meta, date, scheme_id in self._raw:
             if defect and meta["defect"] != defect:
@@ -303,6 +307,7 @@ class Catalog:
                 if counts[scheme.label] > 1:
                     scheme.label = f"{scheme.label} [{scheme.dates[0].date}]"
             groups.append(Group(defect=defect_name, cell=cell_name, displacement=displacement_name, schemes=schemes))
+        self._groups_cache[cache_key] = list(groups)
         return groups
 
     def group(self, key: str, *, latest_only: bool = False) -> Group | None:

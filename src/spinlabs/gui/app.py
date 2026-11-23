@@ -106,23 +106,31 @@ class FigureHost(ttk.Frame):
                 pass
         self._fit_after = self.after(60, self._fit_figure)
 
-    def _fit_figure(self) -> None:
-        self._fit_after = None
-        if self.figure is None or self._canvas_widget is None or not self.view.winfo_exists():
-            return
-        width = max(240, self.view.winfo_width() - 2)
-        height = max(200, self.view.winfo_height() - 2)
-        dpi = self.figure.dpi or 100
-        current = self.figure.get_size_inches()
-        target = (width / dpi, height / dpi)
+    def _apply_figure_size(self, figure: Figure, *, forward: bool = True) -> bool:
+        if not self.view.winfo_exists():
+            return False
+        width = self.view.winfo_width()
+        height = self.view.winfo_height()
+        if width < 80 or height < 80:
+            return False
+        dpi = figure.dpi or 100
+        target = (max(240, width - 2) / dpi, max(200, height - 2) / dpi)
+        current = figure.get_size_inches()
         if abs(target[0] - current[0]) * dpi < 2 and abs(target[1] - current[1]) * dpi < 2:
-            return
-        self.figure.set_size_inches(*target, forward=True)
+            return False
+        figure.set_size_inches(*target, forward=forward)
         try:
-            self.figure.tight_layout()
+            figure.tight_layout()
         except Exception:
             LOGGER.debug("tight_layout failed during resize", exc_info=True)
-        self._canvas_widget.draw_idle()
+        return True
+
+    def _fit_figure(self) -> None:
+        self._fit_after = None
+        if self.figure is None or self._canvas_widget is None:
+            return
+        if self._apply_figure_size(self.figure, forward=True):
+            self._canvas_widget.draw_idle()
 
     def set_figure(self, figure: Figure) -> None:
         old = self.figure
@@ -133,6 +141,7 @@ class FigureHost(ttk.Frame):
             self._toolbar.destroy()
             self._toolbar = None
         self.figure = figure
+        self._apply_figure_size(figure, forward=False)
         canvas = FigureCanvasTkAgg(figure, master=self.view)
         widget = canvas.get_tk_widget()
         widget.pack(fill=tk.BOTH, expand=True)
@@ -173,6 +182,8 @@ class PackTab(ttk.Frame):
         self._mode_entries: dict[int, ModeEntry] = {}
         self._summary_columns = None
         self._mode_result = None
+        self._last_render_keys: dict[int, tuple | None] = {0: None, 1: None}
+        self._last_report_key: tuple | None = None
 
         self.nested = ttk.Notebook(self, style="Sub.TNotebook")
         # Ttk notebook pages must be children of the notebook, not of PackTab.
@@ -236,6 +247,8 @@ class PackTab(ttk.Frame):
         else:
             self.active_mode = min(entries) if entries else None
         self.active_column = min(old_active_col, max(0, len(columns) - 1))
+        self._last_render_keys = {0: None, 1: None}
+        self._last_report_key = None
         self.sync_column_combo()
         self.render_current()
 
@@ -323,12 +336,28 @@ class PackTab(ttk.Frame):
                 warnings=[str(exc)],
             )
 
+    def _render_key(self):
+        return (
+            self.display, self.enabled_schemes(),
+            tuple(sorted(self.visible_modes)), self.active_mode, self.active_column,
+            self.noise, self.target, self.tol, self.weak_fraction,
+            self.drop_anchor, self.deviation, self.quad,
+            tuple((str(column.path), column.date) for column in self.columns),
+        )
+
     def render_current(self) -> None:
-        if self.nested.index("current") == 1:
-            self.render_mode()
-        else:
-            self.render_summary()
-        self.update_report()
+        view = self.nested.index("current")
+        key = self._render_key()
+        if key != self._last_render_keys[view]:
+            if view == 1:
+                self.render_mode()
+            else:
+                self.render_summary()
+            self._last_render_keys[view] = key
+        report_key = (view, key)
+        if report_key != self._last_report_key:
+            self.update_report()
+            self._last_report_key = report_key
         self.app.set_status(self.status_text())
 
     def status_text(self) -> str:

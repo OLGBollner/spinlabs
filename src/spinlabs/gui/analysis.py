@@ -129,10 +129,18 @@ class PackSession:
             return self._modes
         availability = self.availability()
         override = {"aligned": True, "unaligned": False}.get(self.phonon_preference)
-        self._phonon_choice = resolve_phonon(
-            self.path, self.metadata, max(availability.modes) if availability.modes else 0,
-            override_aligned=override,
+        max_mode = max(availability.modes) if availability.modes else 0
+        choice_key = (
+            "phonon-choice", str(self.path), max_mode, self.phonon_preference,
+            str(self.metadata.get("aligned")),
         )
+        if choice_key in self.mode_cache:
+            self._phonon_choice = self.mode_cache[choice_key]
+        else:
+            self._phonon_choice = resolve_phonon(
+                self.path, self.metadata, max_mode, override_aligned=override, cache=self.mode_cache,
+            )
+            self.mode_cache[choice_key] = self._phonon_choice
         info = mode_details(
             self.path, availability.modes, self.mode_cache, meta=self.metadata,
             phonon_file=self._phonon_choice.path,
