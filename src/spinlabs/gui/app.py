@@ -627,7 +627,7 @@ class ConvergenceApp:
     def _style(self) -> None:
         self.palette = theme.apply_theme(self.root)
         self.family = theme.font_family(self.root)
-        theme.style_matplotlib(self.family)
+        theme.style_matplotlib()
 
     def _build_header(self) -> None:
         p = self.palette

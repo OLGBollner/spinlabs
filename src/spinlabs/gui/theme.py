@@ -206,8 +206,6 @@ def apply_theme(root: tk.Misc) -> Palette:
         "TCombobox",
         fieldbackground=[("readonly", palette.card), ("disabled", palette.background)],
         foreground=[("readonly", palette.text), ("disabled", palette.muted)],
-        selectbackground=[("readonly", palette.card)],
-        selectforeground=[("readonly", palette.text)],
     )
     style.configure("TCheckbutton", background=palette.card, foreground=palette.text,
                     padding=(2, 3), font=(family, 10), focuscolor=palette.accent)
@@ -234,10 +232,10 @@ def font_family(root: tk.Misc) -> str:
     return _pick_family(root)
 
 
-def style_matplotlib(family: str | None = None) -> None:
+def style_matplotlib() -> None:
     """Give the embedded figures the same typographic and surface language."""
     plt.rcParams.update({
-        "font.family": family or "DejaVu Sans",
+        "font.family": "DejaVu Sans",
         "font.size": 9,
         "axes.titlesize": 10,
         "axes.labelsize": 9,
