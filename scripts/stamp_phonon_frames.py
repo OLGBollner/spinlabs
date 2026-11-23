@@ -21,6 +21,12 @@ A folder stands for every phonon npz below it (recursively): an npz with eigenve
 eigenvectors), lattice and atom_symbols, whatever its name; ZFS packages, coupling files and
 convergence packs below it are passed over.
 
+A phonopy yaml (named explicitly) is the phonon code's full spectrum: it is written as <stem>.npz next
+to it, every mode as the yaml has it (not aligned), classified in the legacy frame and with that frame
+stored. ``spinlabs symmetrize --align <stem>.npz`` then aligns it exactly as the code before stored
+frames did, so the aligned files of runs made then can be recreated (an existing <stem>.npz is not
+overwritten).
+
 Run it wherever the finished defects' phonon files live (the cluster's defect folders and data/, and
 local copies): an rsync from an unstamped copy overwrites a stamped file.
 """
@@ -68,6 +74,8 @@ def phonon_files(arguments) -> tuple[list, list[str]]:
             files += found
         elif not path.exists():
             errors.append(f"{path}: no such file or folder")
+        elif path.suffix.lower() in (".yaml", ".yml"):
+            files.append(path)
         elif not is_phonon_npz(path):
             errors.append(f"{path}: not a phonon npz (no eigenvectors, lattice and atom_symbols)")
         else:
@@ -120,8 +128,39 @@ def update_registry(path) -> bool:
         return cur.rowcount > 0
 
 
+def npz_from_yaml(path, dry_run: bool) -> bool:
+    """Write a phonopy yaml's full spectrum as <stem>.npz, classified in the legacy frame and stamped with it."""
+    from dataclasses import replace
+
+    from spinlabs.parsers import prepare_phonopy_yaml, save_phonon_npz
+
+    out = path.with_suffix(".npz")
+    if out.exists():
+        print(f"{path}: {out.name} exists; not overwritten (stamp it instead: pass {out})")
+        return True
+    spectrum, _ = prepare_phonopy_yaml(path)
+    frame = legacy_frame(list(spectrum.atom_symbols))
+    mismatch = frame_mismatch(spectrum, frame)
+    axis, normal = np.round(frame[:, 2], 4).tolist(), np.round(frame[:, 0], 4).tolist()
+    if mismatch > FRAME_TOL:
+        print(f"{path}: legacy frame (axis {axis}, normal {normal}) misplaces an atom by {mismatch:.3f} A "
+              f"(> {FRAME_TOL} A); nothing written", file=sys.stderr)
+        return False
+    if dry_run:
+        print(f"{path}: would write {out.name} ({spectrum.n_modes} modes) with axis {axis}, normal {normal}")
+        return True
+    # Parsing classified the modes in the frame of the structure: classify them again in the legacy one.
+    spectrum = replace(spectrum, symmetries=None, deg_groups=None, e_pair_complete=None, pair_ids=None, frame=frame)
+    save_phonon_npz(spectrum, out)
+    print(f"{path}: wrote {out} ({spectrum.n_modes} modes, not aligned) with axis {axis}, normal {normal} "
+          f"(mismatch {mismatch:.4f} A)")
+    return True
+
+
 def stamp(path, dry_run: bool) -> bool:
     """Stamp one file; False when it could not be (frame not a symmetry of the structure)."""
+    if path.suffix.lower() in (".yaml", ".yml"):
+        return npz_from_yaml(path, dry_run)
     with np.load(path, allow_pickle=True) as npz:
         data = {k: npz[k] for k in npz.files if k in ("atom_frac_coords", "atoms", "atom_symbols", "lattice", "frame")}
     frame = legacy_frame([str(s) for s in data["atom_symbols"]])
