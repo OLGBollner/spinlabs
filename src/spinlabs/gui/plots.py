@@ -234,15 +234,16 @@ def build_norm_summary_figure(
         _log_axes(second_ax, q, steps)
         first_ax.set_title(f"{column.label}: σ = {_sigma_text(column)}, D0 offset {_offset_text(column)}",
                            fontsize=12 if canonical else 11)
-        if has_central and not has_forward:
-            first_ax.set_ylabel(r"first order, central $\|D(Q) - D(-Q)\| / 2Q$ (MHz/Q)")
-            second_ax.set_ylabel(r"second order, central $\|D(Q) + D(-Q) - 2D_0\| / Q^2$ (MHz/Q$^2$)")
-        elif both:
-            first_ax.set_ylabel(r"first order finite difference (MHz/Q)")
-            second_ax.set_ylabel(r"second order finite difference (MHz/Q$^2$)")
-        else:
-            first_ax.set_ylabel(r"first order $\|D(Q) - D_0\| / Q$ (MHz/Q)")
-            second_ax.set_ylabel(r"second order $\|D(2Q) - 2D(Q) + D_0\| / Q^2$ (MHz/Q$^2$)")
+        if col == 0:
+            if has_central and not has_forward:
+                first_ax.set_ylabel(r"first order, central $\|D(Q) - D(-Q)\| / 2Q$ (MHz/Q)")
+                second_ax.set_ylabel(r"second order, central $\|D(Q) + D(-Q) - 2D_0\| / Q^2$ (MHz/Q$^2$)")
+            elif both:
+                first_ax.set_ylabel(r"first order finite difference (MHz/Q)")
+                second_ax.set_ylabel(r"second order finite difference (MHz/Q$^2$)")
+            else:
+                first_ax.set_ylabel(r"first order $\|D(Q) - D_0\| / Q$ (MHz/Q)")
+                second_ax.set_ylabel(r"second order $\|D(2Q) - 2D(Q) + D_0\| / Q^2$ (MHz/Q$^2$)")
         second_ax.set_xlabel("|Q| (step size)")
         _norm_legends(first_ax, second_ax, mode_ids, column.modes, col_colors, column, canonical=canonical)
 
@@ -410,8 +411,9 @@ def build_channel_summary_figure(
                 ax.axhline(floor, color=color, ls=_CHANNEL_LS[channel], lw=0.7, alpha=0.35)
         first_ax.set_title(f"{column.label}: σ = {analysis.sigma:.2g} MHz, D0 offset {analysis.offset:.2g} MHz",
                            fontsize=12 if canonical else 11)
-        first_ax.set_ylabel(r"first order $V_{\Delta n}$ (MHz/Q)")
-        second_ax.set_ylabel(r"second order $V_{\Delta n}$ (MHz/Q$^2$)")
+        if col == 0:
+            first_ax.set_ylabel(r"first order $V_{\Delta n}$ (MHz/Q)")
+            second_ax.set_ylabel(r"second order $V_{\Delta n}$ (MHz/Q$^2$)")
         second_ax.set_xlabel("|Q| (step size)")
         _channel_legends(first_ax, second_ax, mode_ids, column.modes, col_colors, schemes,
                          canonical=canonical)
