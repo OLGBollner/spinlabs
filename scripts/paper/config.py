@@ -87,6 +87,16 @@ SYSTEMS = {
 }
 
 
+def phonon_file(system: str) -> Path:
+    """The full phonon spectrum a system's packages were displaced along: data/<system>/phonon_data_aligned.npz for
+    data run along mirror-aligned modes (the package's aligned tag), else phonon_data.npz."""
+    from spinlabs.models import packaged_phonon_name
+
+    with np.load(package(system, "AO"), allow_pickle=True) as d:
+        aligned = d["aligned"].item() if "aligned" in d.files else None
+    return DATA / system / packaged_phonon_name(bool(aligned) if aligned is not None else None)
+
+
 def package(system: str, scheme: str) -> Path:
     path = DATA / SYSTEMS[system]["packages"][scheme]
     if not path.exists():

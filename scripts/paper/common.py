@@ -84,8 +84,9 @@ def pair_coverage(system, scheme):
     """Which second-order pairs a package computed: complete or not, and if not, the |gap| window."""
     from spinlabs.parsers import parse_phonon_data
 
-    f = np.asarray(parse_phonon_data(str(C.DATA / system / "phonon_data.npz")).frequencies_mev, dtype=float)
-    sym = [str(x) for x in parse_phonon_data(str(C.DATA / system / "phonon_data.npz")).symmetries]
+    spectrum = parse_phonon_data(str(C.phonon_file(system)))
+    f = np.asarray(spectrum.frequencies_mev, dtype=float)
+    sym = [str(x) for x in spectrum.symmetries]
     d = np.load(C.package(system, scheme), allow_pickle=True)
     keys = {tuple(sorted(map(int, k.split("_")))) for k in d["second_order"].item()}
     run = sorted(int(k) for k in d["first_order"].item())
