@@ -8,10 +8,10 @@ installation, so the import failure is turned into a helpful message.
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 import csv
 from dataclasses import dataclass
 from pathlib import Path
-import re
 import sys
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
@@ -20,7 +20,6 @@ import matplotlib
 
 matplotlib.use("TkAgg")  # must precede the pyplot import in gui.plots
 
-from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolbar2Tk
 from matplotlib.figure import Figure
 import matplotlib.pyplot as plt
 
@@ -30,29 +29,16 @@ from spinlabs.convergence_summary import WEAK_FRACTION
 from spinlabs.gui import plots, theme
 from spinlabs.gui.analysis import ModeEntry, NormResult, PackSession
 from spinlabs.gui.catalog import Catalog, Group, Scheme
+from spinlabs.gui.comparison import ComparisonTab
+from spinlabs.gui.production import ProductionPackage, ProductionSession, production_packages
 from spinlabs.gui.state import GuiState, TabState, load_state, save_state
 from spinlabs.gui.tabs import TabView
 from spinlabs.gui.tooltips import Tooltip
-from spinlabs.gui.widgets import ScrollableFrame
+from spinlabs.gui.widgets import FigureHost, ReportData, ScrollableFrame, _fmt, _safe_name
 from spinlabs.logging_utils import get_logger
 
 LOGGER = get_logger(__name__)
 _REPORT_HEIGHT = 230
-
-
-def _fmt(value: float | None, digits: int = 4) -> str:
-    if value is None:
-        return "—"
-    try:
-        if value != value or value in (float("inf"), float("-inf")):
-            return "—"
-    except TypeError:
-        return "—"
-    return f"{value:.{digits}g}"
-
-
-def _safe_name(text: str) -> str:
-    return re.sub(r"[^A-Za-z0-9_.-]+", "_", text).strip("_")
 
 
 @dataclass
@@ -71,103 +57,6 @@ class ColumnState:
         return self.session.path
 
 
-@dataclass
-class ReportData:
-    columns: list[tuple[str, str, int]]  # key, heading, width
-    rows: list[dict[str, str]]
-    details: str
-
-    @property
-    def headings(self) -> list[str]:
-        return [heading for _key, heading, _width in self.columns]
-
-    def row_values(self, row: dict[str, str]) -> list[str]:
-        return [row.get(key, "") for key, _heading, _width in self.columns]
-
-
-class FigureHost(ttk.Frame):
-    """A Matplotlib canvas that fills its page and rescales with the window."""
-
-    def __init__(self, master):
-        super().__init__(master, style="Card.TFrame")
-        self.figure: Figure | None = None
-        self._canvas_widget = None
-        self._toolbar = None
-        self._fit_after: str | None = None
-        self.toolbar_frame = ttk.Frame(self, style="Card.TFrame")
-        self.toolbar_frame.grid(row=0, column=0, sticky="ew")
-        self.view = ttk.Frame(self, style="Card.TFrame")
-        self.view.grid(row=1, column=0, sticky="nsew")
-        self.rowconfigure(1, weight=1)
-        self.columnconfigure(0, weight=1)
-        self.view.bind("<Configure>", lambda _e: self._schedule_fit())
-
-    def _schedule_fit(self) -> None:
-        if self._fit_after is not None:
-            try:
-                self.after_cancel(self._fit_after)
-            except tk.TclError:
-                pass
-        self._fit_after = self.after(60, self._fit_figure)
-
-    def target_figsize(self, dpi: float = 100.0) -> tuple[float, float] | None:
-        """The figure size that fills this page now, or None while it is hidden."""
-        if not self.view.winfo_exists():
-            return None
-        width = self.view.winfo_width()
-        height = self.view.winfo_height()
-        if width < 80 or height < 80:
-            return None
-        return (max(2.4, (width - 2) / dpi), max(2.0, (height - 2) / dpi))
-
-    def _apply_figure_size(self, figure: Figure, *, forward: bool = True) -> bool:
-        target = self.target_figsize(figure.dpi or 100.0)
-        if target is None:
-            return False
-        dpi = figure.dpi or 100
-        current = figure.get_size_inches()
-        if abs(target[0] - current[0]) * dpi < 2 and abs(target[1] - current[1]) * dpi < 2:
-            return False
-        figure.set_size_inches(*target, forward=forward)
-        return True
-
-    def _fit_figure(self) -> None:
-        self._fit_after = None
-        if self.figure is None or self._canvas_widget is None:
-            return
-        if self._apply_figure_size(self.figure, forward=True):
-            self._canvas_widget.draw_idle()
-
-    def set_figure(self, figure: Figure) -> None:
-        old_figure = self.figure
-        old_canvas = self._canvas_widget
-        old_toolbar = self._toolbar
-
-        # Prepare the replacement before touching the visible canvas: the old
-        # plot stays on screen until the new FigureCanvas has been drawn.
-        self._apply_figure_size(figure, forward=False)
-        canvas = FigureCanvasTkAgg(figure, master=self.view)
-        widget = canvas.get_tk_widget()
-        canvas.draw()
-        toolbar = NavigationToolbar2Tk(canvas, self.toolbar_frame, pack_toolbar=False)
-        toolbar.update()
-        theme.style_navigation_toolbar(toolbar)
-
-        if old_canvas is not None:
-            old_canvas.get_tk_widget().destroy()
-        if old_toolbar is not None:
-            old_toolbar.destroy()
-        widget.pack(fill=tk.BOTH, expand=True)
-        toolbar.pack(side=tk.LEFT, fill=tk.X, expand=True)
-
-        self.figure = figure
-        self._canvas_widget = canvas
-        self._toolbar = toolbar
-        self._schedule_fit()
-        if old_figure is not None and old_figure is not figure:
-            plt.close(old_figure)
-
-
 class PackTab(ttk.Frame):
     """One defect tab: columns (schemes) plus Summary/Mode detail views."""
 
@@ -175,6 +64,7 @@ class PackTab(ttk.Frame):
         super().__init__(master, style="Card.TFrame")
         self.app = app
         self.group = group
+        self.key = group.key  # the tab's key in ConvergenceApp.tabs (comparison tabs: "comparison:<n>")
         self.columns: list[ColumnState] = []
         self.mode_cache = app.mode_cache
         self.forward = True
@@ -682,8 +572,13 @@ class ConvergenceApp:
         self.root.protocol("WM_DELETE_WINDOW", self.quit)
         self.mode_cache: dict = {}
         self.catalog = Catalog()
-        self.tabs: dict[str, PackTab] = {}
-        self._tab_by_tabid: dict[str, PackTab] = {}
+        self.tabs: dict[str, PackTab | ComparisonTab] = {}
+        self._tab_by_tabid: dict[str, PackTab | ComparisonTab] = {}
+        # Production couplings and rates are computed off the UI thread, one job at a time (each is numpy-heavy)
+        self.executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="spinlabs-gui")
+        self._sessions: dict[str, ProductionSession] = {}
+        self._production_by_row: dict[str, ProductionPackage] = {}
+        self._comparison_count = 0
         self._scheme_vars: dict[str, tuple[tk.BooleanVar, tk.StringVar]] = {}
         self._syncing = False
         self._restoring = False
@@ -700,6 +595,7 @@ class ConvergenceApp:
         self._build_layout()
         self._build_registry_tab()
         self._build_view_tab()
+        self._build_production_tab()
         self._build_report()
         self.refresh_registry(initial=True)
         self._restore_or_open(paths)
@@ -728,7 +624,7 @@ class ConvergenceApp:
             font=(self.family, 18, "bold"),
         ).pack(anchor=tk.W)
         tk.Label(
-            left, text="Convergence viewer  ·  norm and V\u0394n coupling channels",
+            left, text="Convergence viewer  ·  norm and V\u0394n coupling channels  ·  production comparisons",
             background=p.header_bg, foreground=p.header_muted, font=(self.family, 9),
         ).pack(anchor=tk.W, pady=(2, 0))
         right = tk.Frame(inner, background=p.header_bg)
@@ -774,6 +670,7 @@ class ConvergenceApp:
         file_menu = tk.Menu(menu, tearoff=False)
         file_menu.add_command(label="Open file(s)…", command=self.open_files)
         file_menu.add_command(label="Open decont folder…", command=self.open_folder)
+        file_menu.add_command(label="New comparison", command=lambda: self.new_comparison())
         file_menu.add_separator()
         file_menu.add_command(label="Refresh registry", command=self.refresh_registry)
         file_menu.add_separator()
@@ -872,15 +769,19 @@ class ConvergenceApp:
         self.side_notebook.pack(fill=tk.BOTH, expand=True, padx=(8, 4), pady=(4, 4))
         self.registry_tab = ttk.Frame(self.side_notebook, style="Card.TFrame", padding=(8, 8))
         self.view_tab = ttk.Frame(self.side_notebook, style="Card.TFrame", padding=0)
+        self.production_tab = ttk.Frame(self.side_notebook, style="Card.TFrame", padding=(8, 8))
         self.side_notebook.add(self.registry_tab, text="Registry")
         self.side_notebook.add(self.view_tab, text="View")
+        self.side_notebook.add(self.production_tab, text="Production")
         self.report_frame = ttk.Frame(self.paned, style="Card.TFrame")
         self.paned.add(self.report_frame, height=_REPORT_HEIGHT, stretch="never")
         self.welcome = ttk.Frame(self.content, style="Card.TFrame")
         self.welcome_label = ttk.Label(
             self.welcome,
             text="No pack open.\nPick a defect group in the Registry tab, or use File → Open.\n"
-                 "Register data with `spinlabs package --conv` to fill the registry.",
+                 "Register data with `spinlabs package --conv` to fill the registry.\n\n"
+                 "Compare production couplings, spectral functions, rates and T1 of several packages\n"
+                 "in the Production tab.",
             justify=tk.CENTER, style="CardMuted.TLabel", font=(self.family, 10),
         )
         self.welcome_label.pack(expand=True)
@@ -933,6 +834,116 @@ class ConvergenceApp:
         open_folder = ttk.Button(buttons, text="Open folder…", command=self.open_folder)
         open_folder.pack(side=tk.LEFT, expand=True, fill=tk.X, padx=(4, 0))
         self._tip(open_folder, "Open a full-decontamination convergence folder (session only).")
+
+    def _build_production_tab(self) -> None:
+        ttk.Label(
+            self.production_tab, text="Production packages (spinlabs package): couplings, spectral functions, "
+            "rates and T1, several in one graph.", wraplength=320, style="CardMuted.TLabel",
+        ).pack(anchor=tk.W, padx=6, pady=(0, 4))
+        row = ttk.Frame(self.production_tab, style="Card.TFrame")
+        row.pack(fill=tk.X, padx=6, pady=2)
+        ttk.Label(row, text="Filter", style="CardMuted.TLabel").pack(side=tk.LEFT)
+        self.production_filter = tk.StringVar(value="")
+        entry = ttk.Entry(row, textvariable=self.production_filter)
+        entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=4)
+        self._tip(entry, "Filter the packages by defect, cell, method, step or date.")
+        self.production_filter.trace_add("write", lambda *_: self._refresh_production())
+        self.production_tree = ttk.Treeview(
+            self.production_tab, columns=("defect", "cell", "method", "step", "date"), show="headings",
+            height=14, selectmode="extended",
+        )
+        for key, title, width in (("defect", "Defect", 70), ("cell", "Cell", 45), ("method", "Method", 80),
+                                  ("step", "Step", 45), ("date", "Date", 75)):
+            self.production_tree.heading(key, text=title)
+            self.production_tree.column(key, width=width, anchor=tk.W)
+        self.production_tree.pack(fill=tk.BOTH, expand=True, padx=6, pady=4)
+        self._tip(self.production_tree, "Select one or more packages (Ctrl/Shift-click), then add them to a comparison.")
+        self.production_tree.bind("<Double-1>", lambda _e: self.add_to_comparison())
+        new = ttk.Button(self.production_tab, text="New comparison", command=self.new_comparison_from_selection,
+                         style="Accent.TButton")
+        new.pack(fill=tk.X, padx=6, pady=(6, 2))
+        self._tip(new, "Open a new comparison tab with the selected packages.")
+        add = ttk.Button(self.production_tab, text="Add to comparison", command=self.add_to_comparison)
+        add.pack(fill=tk.X, padx=6, pady=2)
+        self._tip(add, "Add the selected packages to the open comparison tab (a new one if none is open).")
+        self._refresh_production()
+
+    def _refresh_production(self) -> None:
+        if not hasattr(self, "production_tree"):
+            return
+        needle = self.production_filter.get().strip().lower()
+        self.production_tree.delete(*self.production_tree.get_children())
+        self._production_by_row = {}
+        try:
+            packages = production_packages()
+        except Exception:  # noqa: BLE001 -- an unreadable registry leaves the list empty
+            LOGGER.exception("cannot list the production packages")
+            packages = []
+        for package in packages:
+            values = (package.defect, package.cell or "", package.method or "",
+                      f"{package.step:g}" if package.step is not None else "", package.date)
+            if needle and needle not in " ".join(map(str, values)).lower():
+                continue
+            self._production_by_row[package.key] = package
+            self.production_tree.insert("", tk.END, iid=package.key, values=values)
+
+    def production_session(self, package: ProductionPackage) -> ProductionSession:
+        """One session per package, shared by every comparison tab (its results and caches)."""
+        if package.key not in self._sessions:
+            self._sessions[package.key] = ProductionSession(package)
+        return self._sessions[package.key]
+
+    def _selected_production(self) -> list[ProductionPackage]:
+        return [self._production_by_row[iid] for iid in self.production_tree.selection()
+                if iid in self._production_by_row]
+
+    def new_comparison(self, packages: list[ProductionPackage] | None = None, state: dict | None = None,
+                       *, select: bool = True) -> ComparisonTab:
+        if state and state.get("key"):
+            key, title = state["key"], state.get("title") or state["key"]
+            try:
+                self._comparison_count = max(self._comparison_count, int(str(key).rsplit(":", 1)[-1]))
+            except ValueError:
+                pass
+        else:
+            self._comparison_count += 1
+            key, title = f"comparison:{self._comparison_count}", f"Comparison {self._comparison_count}"
+        tab = ComparisonTab(self.notebook.body, self, key, title, state)
+        self.tabs[key] = tab
+        self._tab_by_tabid[str(tab)] = tab
+        self.notebook.add(tab, text=title)
+        self._update_empty_state()
+        if packages:
+            tab.add_packages(packages)
+        if select:
+            self.notebook.select(tab)
+            self._sync_controls_to_tab(tab)
+            tab.render_current()
+            self._save_state()
+        return tab
+
+    def new_comparison_from_selection(self) -> None:
+        self.new_comparison(self._selected_production())
+
+    def add_to_comparison(self) -> None:
+        packages = self._selected_production()
+        if not packages:
+            messagebox.showinfo("No package", "Select one or more production packages first.")
+            return
+        target = self.active_tab if isinstance(self.active_tab, ComparisonTab) else next(
+            (tab for tab in reversed(list(self.tabs.values())) if isinstance(tab, ComparisonTab)), None)
+        if target is None:
+            self.new_comparison(packages)
+            return
+        self._select_tab(target)
+        target.add_packages(packages)
+        self._save_state()
+
+    @property
+    def _pack_tab(self) -> PackTab | None:
+        """The active tab when it is a convergence pack tab (the sidebar's View controls act on it)."""
+        tab = self.active_tab
+        return tab if isinstance(tab, PackTab) else None
 
     def _filter_row(self, parent, label: str, var: tk.StringVar, row: int) -> None:
         ttk.Label(parent, text=label, style="Card.TLabel").grid(row=row, column=0, sticky="w", padx=4, pady=2)
@@ -1180,6 +1191,7 @@ class ConvergenceApp:
             self.group_tree.selection_set(first)
             self.group_tree.see(first)
         self._show_group_schemes()
+        self._refresh_production()
         if initial:
             self._sync_filters_from_state()
 
@@ -1340,7 +1352,7 @@ class ConvergenceApp:
         if tab is None:
             return
         self.notebook.forget(tab)
-        self.tabs.pop(tab.group.key, None)
+        self.tabs.pop(tab.key, None)
         self._tab_by_tabid.pop(str(tab), None)
         tab.destroy()
         self._update_empty_state()
@@ -1358,7 +1370,7 @@ class ConvergenceApp:
             if tab is active:
                 continue
             self.notebook.forget(tab)
-            self.tabs.pop(tab.group.key, None)
+            self.tabs.pop(tab.key, None)
             self._tab_by_tabid.pop(str(tab), None)
             tab.destroy()
         self._update_empty_state()
@@ -1433,7 +1445,13 @@ class ConvergenceApp:
 
     # -- controls ----------------------------------------------------------
 
-    def _sync_controls_to_tab(self, tab: PackTab) -> None:
+    def _sync_controls_to_tab(self, tab: PackTab | ComparisonTab) -> None:
+        if isinstance(tab, ComparisonTab):  # its controls live in the tab; the View sidebar is for packs
+            self.mode_tree.delete(*self.mode_tree.get_children())
+            self._column_combo["values"] = []
+            for child in self.columns_frame.winfo_children():
+                child.destroy()
+            return
         self._syncing = True
         try:
             self.forward_var.set(tab.forward)
@@ -1485,7 +1503,7 @@ class ConvergenceApp:
         self.columns_frame.columnconfigure(1, weight=1)
 
     def _change_date(self, column: ColumnState, date: str) -> None:
-        tab = self.active_tab
+        tab = self._pack_tab
         if tab is None or date == column.date:
             return
         spec = [(c.scheme.id, date if c is column else c.date) for c in tab.columns]
@@ -1496,7 +1514,7 @@ class ConvergenceApp:
     def _on_view_control(self, *_args) -> None:
         if self._syncing:
             return
-        tab = self.active_tab
+        tab = self._pack_tab
         if tab is None:
             return
         tab.forward = bool(self.forward_var.get())
@@ -1508,7 +1526,7 @@ class ConvergenceApp:
         tab.render_current()
 
     def _on_mode_click(self, event) -> None:
-        tab = self.active_tab
+        tab = self._pack_tab
         if tab is None:
             return
         row = self.mode_tree.identify_row(event.y)
@@ -1531,7 +1549,7 @@ class ConvergenceApp:
             tab.render_current()
 
     def _populate_mode_tree(self) -> None:
-        tab = self.active_tab
+        tab = self._pack_tab
         self.mode_tree.delete(*self.mode_tree.get_children())
         if tab is None:
             return
@@ -1554,14 +1572,14 @@ class ConvergenceApp:
         return {int(iid) for iid in self.mode_tree.get_children()}
 
     def _mode_bulk(self, visible: bool) -> None:
-        tab = self.active_tab
+        tab = self._pack_tab
         if tab is None:
             return
         tab.set_visible(self._visible_in_tree(), visible)
         self._populate_mode_tree()
 
     def _mode_invert(self) -> None:
-        tab = self.active_tab
+        tab = self._pack_tab
         if tab is None:
             return
         tab.invert_visible(self._visible_in_tree())
@@ -1572,7 +1590,7 @@ class ConvergenceApp:
             self.noise_entry.configure(state=tk.DISABLED if self.noise_auto.get() else tk.NORMAL)
 
     def apply_advanced(self) -> None:
-        tab = self.active_tab
+        tab = self._pack_tab
         if tab is None:
             return
         try:
@@ -1597,7 +1615,7 @@ class ConvergenceApp:
         tab.render_current()
 
     def _select_view(self, index: int) -> None:
-        tab = self.active_tab
+        tab = self._pack_tab
         if tab is not None:
             tab.nested.select(index)
 
@@ -1643,8 +1661,9 @@ class ConvergenceApp:
 
     # -- save/export -------------------------------------------------------
 
-    def _default_output(self, tab: PackTab, suffix: str) -> Path:
-        return Path("figures") / "convergence" / f"{tab.save_stem()}{suffix}"
+    def _default_output(self, tab: PackTab | ComparisonTab, suffix: str) -> Path:
+        folder = "comparison" if isinstance(tab, ComparisonTab) else "convergence"
+        return Path("figures") / folder / f"{tab.save_stem()}{suffix}"
 
     def save_figure(self, fmt: str = "png") -> None:
         """Write the CLI-style figure (not the stretched on-screen one) in the chosen format."""
@@ -1719,7 +1738,8 @@ class ConvergenceApp:
             return
         if self.root.winfo_width() <= 1:
             geometry = self.state.geometry
-        tabs = [tab.state() for tab in self.tabs.values()]
+        tabs = [tab.state() for tab in self.tabs.values() if isinstance(tab, PackTab)]
+        comparisons = [tab.state() for tab in self.tabs.values() if isinstance(tab, ComparisonTab)]
         self.state = GuiState(
             geometry=geometry,
             filters={
@@ -1728,9 +1748,10 @@ class ConvergenceApp:
                 "latest_only": self.latest_only.get(),
             },
             report_visible=self.report_visible.get(),
-            active_tab=self.active_tab.group.key if self.active_tab is not None else None,
+            active_tab=self.active_tab.key if self.active_tab is not None else None,
             tabs=tabs,
             last_directory=self.state.last_directory,
+            comparisons=comparisons,
         )
         try:
             save_state(self.state)
@@ -1784,6 +1805,15 @@ class ConvergenceApp:
             self._tab_by_tabid[str(tab)] = tab
             self.notebook.add(tab, text=group.title)
             restored = True
+        for saved in self.state.comparisons:
+            if saved.get("key") in self.tabs:
+                continue
+            try:
+                self.new_comparison(state=saved, select=False)
+            except Exception:  # noqa: BLE001 -- a comparison that cannot be rebuilt is left out
+                LOGGER.exception("cannot restore comparison %s", saved.get("key"))
+                continue
+            restored = True
         if restored:
             self._update_empty_state()
             active = next(
@@ -1806,6 +1836,7 @@ class ConvergenceApp:
         if self._closed:
             return
         self._closed = True
+        self.executor.shutdown(wait=False, cancel_futures=True)
         try:
             self._save_state()
         except Exception:

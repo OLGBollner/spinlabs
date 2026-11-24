@@ -180,6 +180,38 @@ Each tab has nested **Summary** and **Mode detail** views.
 - An empty registry shows a short empty state with the `spinlabs package
   --conv` hint and the File → Open fallback.
 
+## Production comparisons
+
+A second kind of tab compares production data across packages: defects, cell
+sizes and methods in one graph, one colour per entry.
+
+- The **Production** sidebar tab lists the registered production packages
+  (`spinlabs package`: `packaged_zfs` files, full-decontamination sets as one
+  entry per folder). *New comparison* opens a tab with the selected packages;
+  *Add to comparison* adds them to the open comparison (a new one if none is
+  open). An unregistered package can be added with *Add file…* in the tab.
+- Views: **Couplings** (|V| per mode against the phonon energy, first order or
+  the diagonal second order), **Spectral functions** (one-phonon J1(ω) and the
+  two-phonon J2(ω, ω) along the diagonal), **2D map** (the full J2(ωx, ωy) of
+  one entry, chosen in a dropdown), **Rates** (the Δ1 and Δ2 rates against
+  temperature, m_s S → S−1 and S → S−2) and **T1** (lowest or highest |m_s|
+  initial state, optionally relative to the first entry).
+- Options in the tab: channels (Δ0, Δ1, Δ2), log scale, σ for the spectral
+  functions and the rates, processes for the rates (total, direct,
+  two-phonon, first-order Raman), temperatures, and the production settings
+  (second-order pair treatment, direct model, mirror projection). The
+  defaults are those of `spinlabs run`.
+- All numbers come from the production code (`spinlabs.gui.production` over
+  `spinlabs.pipeline`): `coupling_manager` for the couplings, `rate_series`
+  for the rates, `t1_details` for T1; the spectral functions are the
+  densities the rates integrate (zero-gap pairs left out). Couplings and rates
+  are computed on a background thread and cached on disk under
+  `~/.spinlabs/gui_cache/`, keyed on the package's registered sha256 and the
+  settings; the tab draws the entries that are ready and polls for the rest.
+- If the Debye direct rate cannot be fitted to a spectrum, the Gaussian one is
+  used and the Details tab says so.
+- Comparison tabs are saved and restored with the session like pack tabs.
+
 ## Appearance
 
 The window uses the Sun Valley ttk theme (the Windows 11-style `sv-ttk`), with a

@@ -45,6 +45,8 @@ class GuiState:
     active_tab: str | None = None
     tabs: list[TabState] = field(default_factory=list)
     last_directory: str | None = None
+    # comparison tabs (spinlabs.gui.comparison.ComparisonTab.state): entries, view options and settings
+    comparisons: list[dict] = field(default_factory=list)
 
 
 def load_state(path: Path | None = None) -> GuiState:
@@ -73,6 +75,7 @@ def load_state(path: Path | None = None) -> GuiState:
         active_tab=raw.get("active_tab"),
         tabs=tabs,
         last_directory=raw.get("last_directory"),
+        comparisons=[c for c in raw.get("comparisons") or [] if isinstance(c, dict) and c.get("key")],
     )
 
 

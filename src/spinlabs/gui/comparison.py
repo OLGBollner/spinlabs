@@ -1,0 +1,534 @@
+"""The comparison tab: production couplings, spectral functions, 2D maps, rates and T1 of several packages.
+
+Entries are production packages (registry ``packaged_zfs``, full-decontamination sets included); any mix of
+defects, cells and methods is drawn in one graph, one colour per entry. The numbers come from
+:mod:`spinlabs.gui.production` (the production pipeline); the work runs on the app's worker thread and the
+tab polls until it is done, drawing what is ready meanwhile.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from pathlib import Path
+import tkinter as tk
+from tkinter import messagebox, ttk
+
+import matplotlib
+from matplotlib.figure import Figure
+import matplotlib.pyplot as plt
+
+from spinlabs.gui import production_plots as pplots
+from spinlabs.gui.plots import message_figure
+from spinlabs.gui.production import (
+    CHANNELS,
+    DIRECT_MODELS,
+    PAIR_TREATMENTS,
+    PROCESSES,
+    T1_STATES,
+    ProductionPackage,
+    ProductionSession,
+    Settings,
+    package_for_path,
+    rate_direction,
+)
+from spinlabs.gui.widgets import FigureHost, ReportData, ScrollableFrame, _fmt, _safe_name
+
+VIEWS = ("Couplings", "Spectral functions", "2D map", "Rates", "T1")
+_POLL_MS = 400
+_PLAIN_CHANNELS = {"d0": "Δ0 (V00)", "d1": "Δ1 (V0±)", "d2": "Δ2 (V±)"}
+QUOTE_T = (100.0, 300.0)
+
+
+@dataclass
+class Entry:
+    package: ProductionPackage
+    session: ProductionSession
+    color: str
+
+
+class ComparisonTab(ttk.Frame):
+    """One comparison: entries, view options and production settings, and the five views."""
+
+    def __init__(self, master, app, key: str, title: str, state: dict | None = None):
+        super().__init__(master, style="Card.TFrame")
+        self.app = app
+        self.key = key
+        self.title = title
+        self.entries: list[Entry] = []
+        self.settings = Settings()
+        self.channels = {"d1", "d2"}
+        self.order = 1
+        self.log = True
+        self.processes = {"total"}
+        self.t1_state = T1_STATES[0]
+        self.ratio = False
+        self.map_entry = 0
+        self._poll_after: str | None = None
+        self._last_keys: dict[int, tuple | None] = {i: None for i in range(len(VIEWS))}
+        self._build()
+        if state:
+            self.apply_state(state)
+        self.sync_controls()
+
+    # -- widgets ----------------------------------------------------------------------------------------
+
+    def _build(self) -> None:
+        panes = tk.PanedWindow(self, orient=tk.HORIZONTAL, sashwidth=6, sashrelief=tk.FLAT,
+                               background=self.app.palette.background, borderwidth=0)
+        panes.pack(fill=tk.BOTH, expand=True)
+        side = ttk.Frame(panes, style="Card.TFrame", width=300)
+        panes.add(side, minsize=260, width=300)
+        self.nested = ttk.Notebook(panes)
+        panes.add(self.nested, stretch="always")
+        self.hosts = []
+        for name in VIEWS:
+            host = FigureHost(self.nested)
+            self.nested.add(host, text=name)
+            self.hosts.append(host)
+        self.nested.bind("<<NotebookTabChanged>>", lambda _e: self.render_current())
+
+        scroll = ScrollableFrame(side, palette=self.app.palette)
+        scroll.pack(fill=tk.BOTH, expand=True)
+        body = scroll.content
+        tip = self.app._tip
+
+        box = ttk.LabelFrame(body, text="Entries")
+        box.pack(fill=tk.X, padx=6, pady=4)
+        self.entry_tree = ttk.Treeview(box, columns=("entry", "status"), show="headings", height=6,
+                                       selectmode="extended")
+        self.entry_tree.heading("entry", text="Entry")
+        self.entry_tree.heading("status", text="Status")
+        self.entry_tree.column("entry", width=170, anchor=tk.W)
+        self.entry_tree.column("status", width=80, anchor=tk.W)
+        self.entry_tree.pack(fill=tk.X, padx=4, pady=4)
+        tip(self.entry_tree, "The packages compared in this tab, one colour each. Add them from the Production tab.")
+        row = ttk.Frame(box, style="Card.TFrame")
+        row.pack(fill=tk.X, padx=4, pady=(0, 4))
+        remove = ttk.Button(row, text="Remove", command=self.remove_selected)
+        remove.pack(side=tk.LEFT, expand=True, fill=tk.X)
+        tip(remove, "Remove the selected entries from this comparison.")
+        add_file = ttk.Button(row, text="Add file…", command=self.add_file)
+        add_file.pack(side=tk.LEFT, expand=True, fill=tk.X, padx=(4, 0))
+        tip(add_file, "Add a packaged ZFS file that is not in the registry.")
+
+        box = ttk.LabelFrame(body, text="Channels")
+        box.pack(fill=tk.X, padx=6, pady=4)
+        self.channel_vars = {}
+        for channel in CHANNELS:
+            var = tk.BooleanVar(value=channel in self.channels)
+            check = ttk.Checkbutton(box, text=_PLAIN_CHANNELS[channel], variable=var, command=self._on_option)
+            check.pack(anchor=tk.W, padx=6, pady=1)
+            self.channel_vars[channel] = var
+        tip(box, "Δ0: V00 (A1 modes, level modulation, no transitions); Δ1: V0± (Δm = ±1); Δ2: V± (Δm = ±2). "
+                 "Rates show the spin-flip channels Δ1 and Δ2.")
+
+        box = ttk.LabelFrame(body, text="Couplings and spectra")
+        box.pack(fill=tk.X, padx=6, pady=4)
+        self.order_var = tk.StringVar(value="First order")
+        order = ttk.Combobox(box, textvariable=self.order_var, state="readonly",
+                             values=("First order", "Second order (diagonal)"))
+        order.pack(fill=tk.X, padx=6, pady=2)
+        order.bind("<<ComboboxSelected>>", lambda _e: self._on_option())
+        tip(order, "Couplings view: |V| per mode, or the diagonal second-order |V^(ll)|.")
+        self.log_var = tk.BooleanVar(value=self.log)
+        ttk.Checkbutton(box, text="Log scale", variable=self.log_var, command=self._on_option).pack(
+            anchor=tk.W, padx=6, pady=1)
+        ttk.Label(box, text="σ (meV)", style="Card.TLabel").pack(anchor=tk.W, padx=6)
+        self.sigma_var = tk.StringVar(value=f"{self.settings.sigma:g}")
+        sigma = ttk.Entry(box, textvariable=self.sigma_var, width=8)
+        sigma.pack(anchor=tk.W, padx=6, pady=2)
+        sigma.bind("<Return>", lambda _e: self.apply_settings())
+        tip(sigma, "Gaussian broadening of the spectral functions and the rates (production: 3.5 meV). Enter applies.")
+        ttk.Label(box, text="2D map entry", style="Card.TLabel").pack(anchor=tk.W, padx=6, pady=(4, 0))
+        self.map_var = tk.StringVar(value="")
+        self.map_combo = ttk.Combobox(box, textvariable=self.map_var, state="readonly")
+        self.map_combo.pack(fill=tk.X, padx=6, pady=2)
+        self.map_combo.bind("<<ComboboxSelected>>", lambda _e: self._on_option())
+        tip(self.map_combo, "The entry whose full two-phonon spectral density the 2D map view shows.")
+
+        box = ttk.LabelFrame(body, text="Rates and T1")
+        box.pack(fill=tk.X, padx=6, pady=4)
+        self.process_vars = {}
+        for name in PROCESSES:
+            var = tk.BooleanVar(value=name in self.processes)
+            ttk.Checkbutton(box, text=name, variable=var, command=self._on_option).pack(anchor=tk.W, padx=6, pady=1)
+            self.process_vars[name] = var
+        tip(box, "Rates: total (direct + two-phonon, the production T1 processes) or each process alone. "
+                 "T1 always uses the production processes.")
+        ttk.Label(box, text="T1 initial state", style="Card.TLabel").pack(anchor=tk.W, padx=6, pady=(4, 0))
+        self.state_var = tk.StringVar(value=self.t1_state)
+        state = ttk.Combobox(box, textvariable=self.state_var, state="readonly", values=T1_STATES)
+        state.pack(fill=tk.X, padx=6, pady=2)
+        state.bind("<<ComboboxSelected>>", lambda _e: self._on_option())
+        tip(state, "Lowest |m_s|: m_s = 0 (S = 1) or ±1/2 (S = 3/2), the optically pumped state of NV- and V2.")
+        self.ratio_var = tk.BooleanVar(value=self.ratio)
+        ratio = ttk.Checkbutton(box, text="T1 relative to the first entry", variable=self.ratio_var,
+                                command=self._on_option)
+        ratio.pack(anchor=tk.W, padx=6, pady=1)
+
+        box = ttk.LabelFrame(body, text="Temperatures (K)")
+        box.pack(fill=tk.X, padx=6, pady=4)
+        self.t_vars = {}
+        for col, (name, value) in enumerate((("min", self.settings.t_min), ("max", self.settings.t_max),
+                                             ("step", self.settings.t_step))):
+            ttk.Label(box, text=name, style="Card.TLabel").grid(row=0, column=col, padx=4, sticky="w")
+            var = tk.StringVar(value=f"{value:g}")
+            ttk.Entry(box, textvariable=var, width=6).grid(row=1, column=col, padx=4, pady=2, sticky="ew")
+            self.t_vars[name] = var
+
+        box = ttk.LabelFrame(body, text="Production settings")
+        box.pack(fill=tk.X, padx=6, pady=4)
+        ttk.Label(box, text="Second-order pairs", style="Card.TLabel").pack(anchor=tk.W, padx=6)
+        self.pairs_var = tk.StringVar(value=self.settings.pairs)
+        pairs = ttk.Combobox(box, textvariable=self.pairs_var, state="readonly", values=PAIR_TREATMENTS)
+        pairs.pack(fill=tk.X, padx=6, pady=2)
+        tip(pairs, "sqrt: computed pairs + geometric-mean fill (production); see spinlabs.pipeline.PAIR_MODES.")
+        ttk.Label(box, text="Direct (one-phonon) rate", style="Card.TLabel").pack(anchor=tk.W, padx=6)
+        self.direct_var = tk.StringVar(value=self.settings.direct)
+        ttk.Combobox(box, textvariable=self.direct_var, state="readonly", values=DIRECT_MODELS).pack(
+            fill=tk.X, padx=6, pady=2)
+        self.mirror_var = tk.BooleanVar(value=self.settings.mirror_projection)
+        mirror = ttk.Checkbutton(box, text="Mirror projection", variable=self.mirror_var)
+        mirror.pack(anchor=tk.W, padx=6, pady=1)
+        tip(mirror, "The mirror projection of the diagonal second differences, as `spinlabs run` (production: on).")
+        apply = ttk.Button(body, text="Apply", command=self.apply_settings, style="Accent.TButton")
+        apply.pack(fill=tk.X, padx=6, pady=(8, 4))
+        tip(apply, "Apply σ, the temperatures and the production settings. New couplings or rates are computed "
+                   "in the background and cached on disk.")
+        ttk.Label(body, text="Defaults are the production settings of `spinlabs run`.", wraplength=260,
+                  style="CardMuted.TLabel").pack(anchor=tk.W, padx=8, pady=(0, 8))
+
+    # -- entries ----------------------------------------------------------------------------------------
+
+    def add_packages(self, packages: list[ProductionPackage]) -> None:
+        known = {e.package.key for e in self.entries}
+        for package in packages:
+            if package.key in known:
+                continue
+            session = self.app.production_session(package)
+            self.entries.append(Entry(package, session, pplots.entry_color(len(self.entries))))
+            known.add(package.key)
+        self._recolor()
+        self.sync_controls()
+        self.invalidate()
+        self.render_current()
+
+    def add_file(self) -> None:
+        from tkinter import filedialog
+
+        path = filedialog.askopenfilename(
+            title="Add a packaged ZFS file", filetypes=[("ZFS package", "*.npz"), ("All files", "*.*")],
+            initialdir=self.app.state.last_directory or str(Path.cwd()),
+        )
+        if not path:
+            return
+        try:
+            self.add_packages([package_for_path(Path(path))])
+        except Exception as exc:  # noqa: BLE001
+            messagebox.showerror("Cannot add package", f"{path}\n\n{exc}")
+
+    def remove_selected(self) -> None:
+        selected = set(self.entry_tree.selection())
+        self.entries = [e for e in self.entries if e.package.key not in selected]
+        self._recolor()
+        self.sync_controls()
+        self.invalidate()
+        self.render_current()
+
+    def _recolor(self) -> None:
+        for index, entry in enumerate(self.entries):
+            entry.color = pplots.entry_color(index)
+
+    # -- options and settings ---------------------------------------------------------------------------
+
+    def _on_option(self) -> None:
+        self.channels = {c for c, var in self.channel_vars.items() if var.get()}
+        self.order = 2 if self.order_var.get().startswith("Second") else 1
+        self.log = bool(self.log_var.get())
+        self.processes = {name for name, var in self.process_vars.items() if var.get()}
+        self.t1_state = self.state_var.get() or T1_STATES[0]
+        self.ratio = bool(self.ratio_var.get())
+        labels = [e.package.long_label for e in self.entries]
+        if self.map_var.get() in labels:
+            self.map_entry = labels.index(self.map_var.get())
+        self.render_current()
+
+    def apply_settings(self) -> None:
+        try:
+            settings = Settings(
+                pairs=self.pairs_var.get(), mirror_projection=bool(self.mirror_var.get()),
+                direct=self.direct_var.get(), sigma=float(self.sigma_var.get()),
+                t_min=float(self.t_vars["min"].get()), t_max=float(self.t_vars["max"].get()),
+                t_step=float(self.t_vars["step"].get()),
+            )
+        except ValueError as exc:
+            messagebox.showerror("Invalid settings", str(exc) or "σ and the temperatures must be numbers.")
+            return
+        self.settings = settings
+        self.invalidate()
+        self.render_current()
+
+    def sync_controls(self) -> None:
+        """Write the tab's state into its widgets (after a restore or an entry change)."""
+        for channel, var in self.channel_vars.items():
+            var.set(channel in self.channels)
+        self.order_var.set("Second order (diagonal)" if self.order == 2 else "First order")
+        self.log_var.set(self.log)
+        for name, var in self.process_vars.items():
+            var.set(name in self.processes)
+        self.state_var.set(self.t1_state)
+        self.ratio_var.set(self.ratio)
+        s = self.settings
+        self.sigma_var.set(f"{s.sigma:g}")
+        for name, value in (("min", s.t_min), ("max", s.t_max), ("step", s.t_step)):
+            self.t_vars[name].set(f"{value:g}")
+        self.pairs_var.set(s.pairs)
+        self.direct_var.set(s.direct)
+        self.mirror_var.set(s.mirror_projection)
+        labels = [e.package.long_label for e in self.entries]
+        self.map_combo["values"] = labels
+        self.map_entry = min(self.map_entry, max(0, len(labels) - 1))
+        self.map_var.set(labels[self.map_entry] if labels else "")
+        self.update_entry_tree()
+
+    def update_entry_tree(self) -> None:
+        self.entry_tree.delete(*self.entry_tree.get_children())
+        for entry in self.entries:
+            tag = f"c{entry.color}"
+            self.entry_tree.tag_configure(tag, foreground=entry.color)
+            if entry.session.errors():
+                status = "failed"
+            elif entry.session.busy():
+                status = "computing…"
+            else:
+                status = "ready"
+            self.entry_tree.insert("", tk.END, iid=entry.package.key, values=(entry.package.long_label, status),
+                                   tags=(tag,))
+
+    # -- data -------------------------------------------------------------------------------------------
+
+    def _fetch(self, kind: str, *args):
+        """[(entry, result)] of the entries whose result is ready; queues the others. Failures are skipped
+        (listed in the report)."""
+        ready = []
+        for entry in self.entries:
+            try:
+                result = entry.session.get(kind, self.settings, *args, executor=self.app.executor)
+            except RuntimeError:
+                continue
+            if result is not None:
+                ready.append((entry, result))
+        return ready
+
+    def _pending(self) -> bool:
+        return any(entry.session.busy() for entry in self.entries)
+
+    # -- rendering --------------------------------------------------------------------------------------
+
+    def invalidate(self) -> None:
+        self._last_keys = {i: None for i in range(len(VIEWS))}
+
+    def _view_key(self, view: int) -> tuple:
+        return (view, tuple(e.package.key for e in self.entries), tuple(sorted(self.channels)), self.order,
+                self.log, tuple(sorted(self.processes)), self.t1_state, self.ratio, self.map_entry,
+                self.settings.rate_key())
+
+    def _figure(self, view: int, *, canonical: bool = False) -> Figure:
+        host = self.hosts[view]
+        figsize = None if canonical else host.target_figsize()
+        if not self.entries:
+            return message_figure("No entries: add production packages from the Production tab", figsize=figsize or (8, 5))
+        channels = [c for c in CHANNELS if c in self.channels]
+        if view == 0:
+            data = [(e.package.long_label, e.color, c) for e, c in self._fetch("couplings")]
+            return pplots.build_coupling_figure(data, channels, self.order, log=self.log, figsize=figsize)
+        if view == 1:
+            data = [(e.package.long_label, e.color, s) for e, s in self._fetch("spectral")]
+            return pplots.build_spectral_figure(data, channels, self.settings.sigma, log=self.log, figsize=figsize)
+        if view == 2:
+            entry = self.entries[min(self.map_entry, len(self.entries) - 1)]
+            try:
+                maps = entry.session.get("spectral_map", self.settings, executor=self.app.executor)
+            except RuntimeError as exc:
+                return message_figure(f"{entry.package.long_label}: {exc}", figsize=figsize or (8, 5))
+            if maps is None:
+                return message_figure(f"Computing the 2D spectral density of {entry.package.long_label}…",
+                                      figsize=figsize or (8, 5))
+            return pplots.build_map_figure(entry.package.long_label, maps, channels, self.settings.sigma,
+                                           figsize=figsize)
+        if view == 3:
+            processes = {name: PROCESSES[name] for name in PROCESSES if name in self.processes}
+            data = [(e.package.long_label, e.color, r) for e, r in self._fetch("rates")]
+            return pplots.build_rates_figure(data, channels, processes, figsize=figsize)
+        data = [(e.package.long_label, e.color, t) for e, t in self._fetch("t1", self.t1_state)]
+        return pplots.build_t1_figure(data, ratio=self.ratio, figsize=figsize)
+
+    def render_current(self) -> None:
+        view = self.nested.index("current")
+        key = self._view_key(view)
+        pending_before = self._pending()
+        if key != self._last_keys[view] or pending_before:
+            self.app.set_busy(True)
+            try:
+                self.hosts[view].set_figure(self._figure(view))
+            finally:
+                self.app.set_busy(False)
+            # Final only if nothing was pending before the draw (a job finishing during it was not drawn) and
+            # the draw queued nothing new; otherwise the poll draws it again.
+            self._last_keys[view] = None if pending_before or self._pending() else key
+        self.update_entry_tree()
+        self.update_report()
+        self.app.set_status(self.status_text())
+        self._schedule_poll()
+
+    def _schedule_poll(self) -> None:
+        if self._poll_after is not None:
+            try:
+                self.after_cancel(self._poll_after)
+            except tk.TclError:
+                pass
+            self._poll_after = None
+        if self._pending():
+            self._poll_after = self.after(_POLL_MS, self._poll)
+
+    def _poll(self) -> None:
+        self._poll_after = None
+        if not self.winfo_exists():
+            return
+        if self.app.active_tab is self:
+            self.render_current()
+        elif self._pending():
+            self._schedule_poll()
+
+    def status_text(self) -> str:
+        busy = [e.package.label for e in self.entries if e.session.busy()]
+        failed = [e.package.label for e in self.entries if e.session.errors()]
+        bits = [self.title, f"{len(self.entries)} entr{'y' if len(self.entries) == 1 else 'ies'}",
+                VIEWS[self.nested.index("current")]]
+        if busy:
+            bits.append("computing: " + ", ".join(busy))
+        if failed:
+            bits.append(f"{len(failed)} failed (see Details)")
+        return "  |  ".join(bits)
+
+    def canonical_figure(self) -> Figure:
+        with matplotlib.rc_context(matplotlib.rcParamsDefault):
+            return self._figure(self.nested.index("current"), canonical=True)
+
+    def visible_figure(self) -> Figure | None:
+        return self.hosts[self.nested.index("current")].figure
+
+    def save_stem(self) -> str:
+        return _safe_name(f"{self.title}_{VIEWS[self.nested.index('current')]}")
+
+    # -- report -----------------------------------------------------------------------------------------
+
+    def report(self) -> ReportData:
+        columns = [("entry", "Entry", 190), ("spin", "S", 40), ("modes", "Modes", 55), ("direct", "Direct", 70)]
+        columns += [(f"t1_{t:g}", f"T1 {t:g} K (s)", 90) for t in QUOTE_T]
+        columns += [(f"{c}_{t:g}", f"Δ{c[1]} rate {t:g} K (1/s)", 115) for c in ("d1", "d2") for t in QUOTE_T]
+        # only what is already computed: the report never queues work of other views
+        peek = lambda kind, *args: {  # noqa: E731
+            e.package.key: v for e in self.entries if (v := e.session.peek(kind, self.settings, *args)) is not None
+        }
+        couplings, rates, t1 = peek("couplings"), peek("rates"), peek("t1", self.t1_state)
+        rows = []
+        for entry in self.entries:
+            key = entry.package.key
+            row = {"entry": entry.package.long_label}
+            c, r = couplings.get(key), rates.get(key)
+            if c is not None:
+                row["spin"] = f"{c.spin:g}"
+                row["modes"] = str(len(c.frequencies))
+            if r is not None:
+                row["direct"] = r.direct
+                total = r.total(PROCESSES["total"])
+                for channel in ("d1", "d2"):
+                    series = total[rate_direction(r.spin, channel)]
+                    for t in QUOTE_T:
+                        row[f"{channel}_{t:g}"] = _at(r.temperatures, series, t)
+            if key in t1:
+                temps, values, _state = t1[key]
+                for t in QUOTE_T:
+                    row[f"t1_{t:g}"] = _at(temps, values, t)
+            rows.append(row)
+        return ReportData(columns, rows, self._details(couplings, rates))
+
+    def _details(self, couplings, rates) -> str:
+        s = self.settings
+        lines = [f"{self.title}: {len(self.entries)} entries; view {VIEWS[self.nested.index('current')]}",
+                 f"settings: pairs {s.pairs}, mirror projection {'on' if s.mirror_projection else 'off'}, direct "
+                 f"{s.direct}, σ {s.sigma:g} meV, T {s.t_min:g}-{s.t_max:g} K step {s.t_step:g}",
+                 "rates: Δ1 = m_s S → S−1, Δ2 = S → S−2 (equal to their reverse and mirror transitions at these "
+                 "temperatures); T1 from direct + two-phonon (production)"]
+        for entry in self.entries:
+            key = entry.package.key
+            lines.append("")
+            lines.append(f"{entry.package.long_label}: {entry.package.path}")
+            c = couplings.get(key)
+            if c is not None:
+                lines.append(f"  {c.convention}; phonon {c.phonon_file}")
+            r = rates.get(key)
+            if r is not None:
+                lines.append(f"  D = {r.zfs_mev * 241798.9242:.1f} MHz, S = {r.spin:g}")
+                lines.extend(f"  warning: {w}" for w in r.warnings)
+            if entry.session.busy():
+                lines.append("  computing…")
+            lines.extend(f"  error: {e}" for e in entry.session.errors())
+        return "\n".join(lines)
+
+    def update_report(self) -> None:
+        self.app.set_report(self.report())
+
+    # -- persistence ------------------------------------------------------------------------------------
+
+    def state(self) -> dict:
+        return {
+            "key": self.key, "title": self.title, "entries": [str(e.package.path) for e in self.entries],
+            "settings": self.settings.to_dict(), "channels": sorted(self.channels), "order": self.order,
+            "log": self.log, "processes": sorted(self.processes), "t1_state": self.t1_state, "ratio": self.ratio,
+            "map_entry": self.map_entry, "view": self.nested.index("current"),
+        }
+
+    def apply_state(self, state: dict) -> None:
+        self.settings = Settings.from_dict(state.get("settings"))
+        self.channels = set(state.get("channels") or self.channels) & set(CHANNELS)
+        self.order = 2 if state.get("order") == 2 else 1
+        self.log = bool(state.get("log", True))
+        self.processes = set(state.get("processes") or self.processes) & set(PROCESSES)
+        self.t1_state = state.get("t1_state") if state.get("t1_state") in T1_STATES else T1_STATES[0]
+        self.ratio = bool(state.get("ratio", False))
+        self.map_entry = int(state.get("map_entry") or 0)
+        packages = []
+        for path in state.get("entries") or []:
+            try:
+                packages.append(package_for_path(Path(path)))
+            except Exception:  # noqa: BLE001 -- a package that is gone is left out
+                continue
+        known = {e.package.key for e in self.entries}
+        for package in packages:
+            if package.key not in known:
+                self.entries.append(Entry(package, self.app.production_session(package),
+                                          pplots.entry_color(len(self.entries))))
+        view = int(state.get("view") or 0)
+        if 0 <= view < len(VIEWS):
+            self.nested.select(view)
+
+    def destroy(self):
+        if self._poll_after is not None:
+            try:
+                self.after_cancel(self._poll_after)
+            except tk.TclError:
+                pass
+        for host in self.hosts:
+            if host.figure is not None:
+                plt.close(host.figure)
+                host.figure = None
+        super().destroy()
+
+
+def _at(temps, values, t: float) -> str:
+    import numpy as np
+
+    idx = np.flatnonzero(np.isclose(temps, t))
+    return _fmt(float(values[idx[0]])) if len(idx) else "—"
