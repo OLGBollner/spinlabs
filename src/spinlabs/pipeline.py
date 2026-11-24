@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from collections.abc import Sequence
 from datetime import datetime
 from pathlib import Path
@@ -407,8 +407,8 @@ def build_manager(
             raise ValueError(f"pairs={pairs!r} {'fills' if fill else 'does not fill'} the pairs not run, but "
                              f"offdiag_from_diagonal={options['offdiag_from_diagonal']} was asked for")
         opts["offdiag_from_diagonal"] = fill
-    if displacement:
-        raw_data.displacement = displacement
+    if displacement:  # on a copy: the caller's raw data keeps its own convention
+        raw_data = replace(raw_data, displacement=displacement)
     manager = ZFSManager(raw_data=raw_data, spectrum=spectrum, **opts)
     if calc_method:
         manager.calc_method = normalize_calc_method(calc_method)
@@ -524,6 +524,7 @@ def rate_series(
     direct: str = "gaussian",
     b_field_mt: float = 0.0,
     spectrum=None,
+    res: float = 0.02,
 ) -> RateSeries:
     """Transition rates of a coupling file at each temperature, every process and direction: the one rate loop.
 
@@ -535,7 +536,8 @@ def rate_series(
     (i, i) and degenerate partners, are left out there. ``direct`` picks the
     one-phonon rate (TransitionRate.DIRECT_MODELS); "debye" needs the ``spectrum`` the
     couplings were computed on. ``b_field_mt`` is an axial magnetic field (mT): it splits +1 and -1,
-    which gives the +1 <-> -1 direct rate (C_+- with "debye") and moves every gap.
+    which gives the +1 <-> -1 direct rate (C_+- with "debye") and moves every gap. ``res`` (meV) is the
+    energy grid of the 1D spectral density.
     """
     two_ph_p = Path(two_phonon_file) if two_phonon_file else None
     calculator = TransitionRate(str(coupling_path), two_phonon_data_file=two_ph_p)
@@ -554,7 +556,7 @@ def rate_series(
     if two_ph_p is None and has_second_order:
         calculator.data_2ph = calculator.data
 
-    omega, J_0_pm, J_p_m, J_0_0 = calculator.get_spectral_density(res=0.02, sigma=sigma)
+    omega, J_0_pm, J_p_m, J_0_0 = calculator.get_spectral_density(res=res, sigma=sigma)
     if two_phonon:
         lines = calculator.get_line_spectral_density(sigma, degenerate_groups=degenerate_groups)
     omega_zfs = calculator.data["zfs"] / CONSTANTS["meV2J"]

@@ -168,7 +168,8 @@ def compute_rates(data_path, two_phonon_path, t_start, t_end, t_step, sigma=7.5)
     together with metadata and temperature array.
 
     The rates come from spinlabs.pipeline.rate_series, the rate loop of `spinlabs run`; this script keeps its own
-    legacy settings (sigma 7.5 meV, Gaussian direct rate, zero-gap pairs kept, every process in the directional rates).
+    legacy settings (sigma 7.5 meV, a 0.01 meV energy grid, Gaussian direct rate, zero-gap pairs kept, every
+    process in the directional rates).
     """
     try:
         from spinlabs.pipeline import rate_series
@@ -181,13 +182,15 @@ def compute_rates(data_path, two_phonon_path, t_start, t_end, t_step, sigma=7.5)
     temperatures = np.concatenate([low_range, high_range])
     print(f"Computing transition rates for {len(temperatures)} temperature points...")
 
-    rs = rate_series(data_path, temperatures, sigma=sigma, two_phonon_file=two_phonon_path or None, direct="gaussian")
+    rs = rate_series(
+        data_path, temperatures, sigma=sigma, two_phonon_file=two_phonon_path or None, direct="gaussian", res=0.01
+    )
     results = {p: {c: v.tolist() for c, v in d.items()} for p, d in rs.totals.items()}
     directional_results = {d: v.tolist() for d, v in rs.directional().items()}
     valid_temps = rs.temperatures.tolist()
 
-    data = np.load(data_path, allow_pickle=True)
-    meta_data = {k: data[k] for k in ("cell_size", "defect", "calc_method", "pert_scale")}
+    with np.load(data_path, allow_pickle=True) as data:
+        meta_data = {k: data[k] for k in ("cell_size", "defect", "calc_method", "pert_scale")}
 
     return results, directional_results, valid_temps, meta_data
 

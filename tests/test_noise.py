@@ -26,6 +26,7 @@ def _manager(entries, labels, groups=None, settings=None):
         spectrum=spectrum, zfs_tensors_2d=entries, zfs_relaxed=D0, eigen_rotation=None, first_order={},
         raw_data=SimpleNamespace(vasp_settings=settings), _mirror_parities=lambda: {},
         mirror_projected=[], mirror_projected_central=[], mirror_inherited=[],
+        computed_pairs={(min(i, j), max(i, j)) for i, j in entries}, offdiag_from_diagonal=True,
     )
 
 
@@ -145,3 +146,42 @@ def test_computed_off_diagonal_pairs_keep_their_values():
     for channel in ("V2_0_0", "V2_0_pm", "V2_p_m"):
         assert out[channel][0, 1] == coupling[channel][0, 1] and out[channel][1, 0] == coupling[channel][1, 0]
     assert out["V2_0_pm"][0, 2] != coupling["V2_0_pm"][0, 2]  # the filled pair still follows its diagonals
+
+
+def test_a_dropped_pair_is_refilled_from_the_denoised_diagonals():
+    # (1, 2) has a run but the manager dropped it (e.g. inconsistent), so its coupling is the fill
+    labels = ["A1", "Ex", "Ex"]
+    q = 2e-12
+    entries = {(i, i): {"pert": (q, q)} for i in range(3)}
+    entries[(1, 2)] = {"pert": (q, q)}
+    manager = _manager(entries, labels, groups=[[0], [1], [2]])
+    manager.computed_pairs = {(0, 0), (1, 1), (2, 2)}
+    noise = SecondOrderNoise(out_of_plane=0.003, in_plane=0.006, n_out=10, n_in=10)
+    sv = {ch: np.hypot(*noise.per_component(ch)) * MHZ / q**2 for ch in ("V2_0_0", "V2_0_pm", "V2_p_m")}
+    coupling = _coupling([4 * sv["V2_0_0"], 3 * sv["V2_0_0"], 2 * sv["V2_0_0"]],
+                         [0, 2 * sv["V2_0_pm"], 3 * sv["V2_0_pm"]], [0, 2 * sv["V2_p_m"], 3 * sv["V2_p_m"]], labels)
+    out = denoised_couplings(manager, coupling, noise)
+    for channel in ("V2_0_0", "V2_0_pm", "V2_p_m"):
+        d = np.diag(out[channel])
+        assert np.isclose(out[channel][1, 2], np.sqrt(d[1] * d[2]))
+        assert out[channel][1, 2] < coupling[channel][1, 2]
+
+
+def test_without_the_fill_off_diagonal_entries_are_untouched():
+    labels = ["Ex", "Ex"]
+    q = 2e-12
+    manager = _manager({(i, i): {"pert": (q, q)} for i in range(2)}, labels, groups=[[0], [1]])
+    manager.offdiag_from_diagonal = False
+    noise = SecondOrderNoise(out_of_plane=0.003, in_plane=0.006, n_out=10, n_in=10)
+    d = 2 * np.hypot(*noise.per_component("V2_0_pm")) * MHZ / q**2
+    coupling = _coupling([0, 0], [d, d], [d, d], labels)
+    out = denoised_couplings(manager, coupling, noise)
+    assert out["V2_0_pm"][0, 1] == coupling["V2_0_pm"][0, 1]
+    assert out["V2_0_pm"][0, 0] < d
+
+
+def test_denoising_needs_the_managers_computed_pairs():
+    manager = _manager({(0, 0): {"pert": (1e-12, 1e-12)}}, ["A1"])
+    manager.computed_pairs = None
+    with pytest.raises(ValueError, match="computed pairs"):
+        denoised_couplings(manager, _coupling([1.0], [0], [0], ["A1"]), SecondOrderNoise(1, 1, 1, 1))
