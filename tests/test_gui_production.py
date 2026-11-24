@@ -194,3 +194,37 @@ def test_figure_builders_draw_every_entry(session):
     fig = pplots.build_t1_figure([("A", "#1f77b4", t1), ("B", "#d62728", t1)], ratio=True)
     assert len(fig.axes) == 2
     assert np.allclose(fig.axes[1].lines[0].get_ydata(), 1.0)  # B / A of the same data
+
+
+def test_garbage_is_collected_on_the_tk_thread_only():
+    import gc
+
+    from spinlabs.gui.app import MainThreadCollector
+
+    class Root:
+        def __init__(self):
+            self.scheduled = []
+
+        def after(self, ms, fn):
+            self.scheduled.append(fn)
+
+    was_enabled = gc.isenabled()
+    try:
+        root = Root()
+        collector = MainThreadCollector(root)
+        assert not gc.isenabled() and root.scheduled  # automatic collection off, a poll on the event loop instead
+        gc.collect()
+        assert MainThreadCollector.collect() is None  # below the threshold: nothing to do
+        junk = []
+        for _ in range(gc.get_threshold()[0] + 10):
+            a, b = [], []
+            a.append(b)
+            b.append(a)
+            junk.append(a)
+        del junk, a, b
+        assert MainThreadCollector.collect() == 0
+        root.scheduled.pop()()  # the tick reschedules itself
+        assert root.scheduled and collector.root is root
+    finally:
+        if was_enabled:
+            gc.enable()

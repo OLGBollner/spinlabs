@@ -213,6 +213,11 @@ sizes and methods in one graph, one colour per entry.
   are computed on a background thread and cached on disk under
   `~/.spinlabs/gui_cache/`, keyed on the package's registered sha256 and the
   settings; the tab draws the entries that are ready and polls for the rest.
+- Tk objects must only be freed on the Tk thread, so `spinlabs gui` turns off
+  Python's automatic garbage collection and collects from the Tk event loop
+  instead (same generation thresholds, polled every 200 ms). Otherwise a
+  collection triggered on the worker thread by a large cell freed Tk variables
+  and images there and Tcl aborted the process.
 - If the Debye direct rate cannot be fitted to a spectrum, the Gaussian one is
   used and the Details tab says so.
 - Comparison tabs are saved and restored with the session like pack tabs.
