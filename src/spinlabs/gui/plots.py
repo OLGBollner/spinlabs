@@ -194,10 +194,11 @@ def build_norm_summary_figure(
                     marker1 = _CENTRAL_MARKER["o"] if both else "o"
                     marker2 = _CENTRAL_MARKER["s"] if both else "s"
                     fill = "white" if both else color
+                    size = 6 if both else 7
                     first_ax.plot(first[:, 0], first[:, 1], marker=marker1, ls="", color=color,
-                                  mfc=fill, mec=color, mew=1.2, ms=6, alpha=a1)
+                                  mfc=fill, mec=color, mew=1.2, ms=size, alpha=a1)
                     second_ax.plot(second[:, 0], second[:, 1], marker=marker2, ls="", color=color,
-                                   mfc=fill, mec=color, mew=1.2, ms=6, alpha=a2)
+                                   mfc=fill, mec=color, mew=1.2, ms=size, alpha=a2)
                     first_ax.axhline(report.b, color=color, lw=1, alpha=0.7 * a1,
                                      ls="--" if both else "-")
                     second_ax.axhline(2 * report.c, color=color, lw=1, alpha=0.7 * a2,
