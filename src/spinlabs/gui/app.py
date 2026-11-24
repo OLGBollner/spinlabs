@@ -419,7 +419,8 @@ class PackTab(ttk.Frame):
         ]
         self._summary_columns = columns
         return plots.build_norm_summary_figure(
-            columns, figsize=None if canonical else self.summary_view.target_figsize(), canonical=canonical
+            columns, target=self.target, tol=self.tol, weak_fraction=self.weak_fraction,
+            figsize=None if canonical else self.summary_view.target_figsize(), canonical=canonical,
         )
 
     def render_summary(self) -> None:

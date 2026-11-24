@@ -145,6 +145,8 @@ class PackSession:
             self.path, availability.modes, self.mode_cache, meta=self.metadata,
             phonon_file=self._phonon_choice.path,
         )
+        if info and self._phonon_choice.warning:
+            self._mode_warnings.append(self._phonon_choice.warning)
         if not info and availability.modes:
             detail = "; ".join(self._phonon_choice.notes[:3])
             self._mode_warnings.append(

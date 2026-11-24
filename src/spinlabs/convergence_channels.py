@@ -244,6 +244,31 @@ def _window(
     return value, window
 
 
+def _flag_weak(mode_results: list[ChannelMode], schemes, weak_fraction: float) -> None:
+    """Mark allowed channels weak whose coefficient is under ``weak_fraction`` of the strongest allowed,
+    resolved channel of the same order and difference scheme.
+
+    As the CLI's shade_safe_windows: an unresolved coefficient is noise and must not set the scale, and
+    forward and central differences are separate estimates. The note is added to the window's reason.
+    Forbidden channels are zero in the production results and take no part.
+    """
+    for order in (1, 2):
+        for scheme in schemes:
+            candidates = [
+                s for result in mode_results for s in result.series
+                if s.order == order and s.scheme == scheme and s.window.allowed and s.q0 is not None
+            ]
+            strongest = max((abs(s.q0) for s in candidates if s.window.resolved), default=0.0)
+            if strongest <= 0:
+                continue
+            for series in candidates:
+                if abs(series.q0) < weak_fraction * strongest:
+                    series.window.weak = True
+                    note = (f"coefficient {abs(series.q0):.3g} is {abs(series.q0) / strongest:.1%} "
+                            f"of the strongest resolved allowed channel ({strongest:.3g})")
+                    series.window.reason = (series.window.reason + "; " if series.window.reason else "") + note
+
+
 def analyse_channels(
     path: Path,
     *,
@@ -267,6 +292,7 @@ def analyse_channels(
         raise ValueError(f"{path} has no Q=0 point (no 0 in perts and no d0 key); cannot measure differences")
     frame = principal_frame(conv.q0)
     p0 = traceless_parts(conv.q0, frame)
+    # every mode has at least Q = 0: load_convergence copies the shared q0 into modes without their own
     finished = [~np.isnan(t).any(axis=(1, 2)) for t in conv.tensors]
     perts = [conv.perts[ok] for ok in finished]
     parts = [np.stack([traceless_parts(t, frame) for t in tensors[ok]]) for tensors, ok in zip(conv.tensors, finished)]
@@ -397,27 +423,7 @@ def analyse_channels(
         mode_results.append(result)
         warnings.extend(f"mode {mode_number}: {w}" for w in result.warnings)
 
-    # Weak-channel flags: compare each allowed channel with the strongest allowed
-    # channel of its order.  Forbidden channels are zero in the production results.
-    for order in (1, 2):
-        strongest = 0.0
-        for result in mode_results:
-            for series in result.series:
-                if series.order != order or not series.window.allowed or series.q0 is None:
-                    continue
-                strongest = max(strongest, abs(series.q0))
-        if strongest <= 0:
-            continue
-        for result in mode_results:
-            for series in result.series:
-                if series.order != order or not series.window.allowed or series.q0 is None:
-                    continue
-                if abs(series.q0) < weak_fraction * strongest:
-                    series.window.weak = True
-                    series.window.reason = (
-                        f"coefficient {abs(series.q0):.3g} is {abs(series.q0) / strongest:.1%} "
-                        f"of the strongest allowed channel ({strongest:.3g})"
-                    )
+    _flag_weak(mode_results, schemes, weak_fraction)
 
     # Common safe window per order and scheme over allowed, resolved, non-weak channels.
     common: dict[tuple[int, str], tuple[float, float, bool] | None] = {}

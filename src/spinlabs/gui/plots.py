@@ -623,7 +623,7 @@ def build_mode_figure(
         frame0 = principal_frame(q0_shared)
         fit = fit_points(perts, helper)
         finished = [~np.isnan(tensors[i]).any(axis=(1, 2)) & fit for i in range(tensors.shape[0])]
-        p_modes = [perts[ok] for ok in finished]
+        p_modes = [perts[ok] for ok in finished]  # never empty: every mode holds the shared Q = 0 (load_convergence)
         parts_modes = [np.stack([traceless_parts(t, frame0) for t in tensors[i][ok]]) for i, ok in enumerate(finished)]
         if noise is None:
             noise, n_dof = pooled_noise(p_modes, parts_modes)

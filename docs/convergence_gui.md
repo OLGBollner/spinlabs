@@ -8,7 +8,8 @@ second view.
 ## Scope
 
 - One window, Tkinter + embedded Matplotlib (`python3-tk` is the only extra
-  system requirement; there are no new pip dependencies).
+  system requirement; one new pip dependency, `sv-ttk`, for the theme, see
+  Appearance).
 - Convergence data only in this version. The shell is structured so another
   viewer can become another top-level tab later.
 - The registry is read-only. `spinlabs package --conv` remains the only way to

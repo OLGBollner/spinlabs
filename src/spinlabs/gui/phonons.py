@@ -25,9 +25,17 @@ class PhononChoice:
     path: Path | None = None
     aligned: bool | None = None
     notes: list[str] = field(default_factory=list)
+    warning: str | None = None  # a choice to show even when a spectrum was found (the wanted kind is missing)
 
 
-def _candidate_paths(pack_path: Path, meta: dict) -> list[Path]:
+def _candidate_paths(pack_path: Path, meta: dict, notes: list[str]) -> tuple[list[Path], Path | None]:
+    """Full spectra that may belong to the pack, and the one it records (its full spectrum), if found.
+
+    Looks at the recorded file, the registry, and the defect's own folders only: the pack's ancestor named
+    <defect>_<cell> and the defect folder of the stored ground state (without a defect and cell, the pack's
+    own folder and its parent), so another defect's spectrum is never picked up. A symmetry-reduced file is
+    replaced by its full spectrum; one that cannot be paired with it is left out, with a note.
+    """
     pack_path = Path(pack_path)
     out: list[Path] = []
     recorded = meta.get("phonon_file")
@@ -45,8 +53,10 @@ def _candidate_paths(pack_path: Path, meta: dict) -> list[Path]:
     if ground:
         ground_path = Path(str(ground))
         folders.append(ground_path.parent.parent)
-    for parent in list(pack_path.parents)[:5]:
-        folders.append(parent)
+    if defect is not None and cell is not None:
+        folders += [parent for parent in pack_path.parents if parent.name == f"{defect}_{cell}"]
+    else:
+        folders += list(pack_path.parents)[:2]
     for folder in folders:
         for base in (folder / "data", folder):
             if not base.is_dir():
@@ -59,19 +69,23 @@ def _candidate_paths(pack_path: Path, meta: dict) -> list[Path]:
     # Resolve symmetry-reduced files to their full spectrum and drop duplicates.
     resolved: list[Path] = []
     seen: set[Path] = set()
-    for candidate in out:
+    recorded_full: Path | None = None
+    for k, candidate in enumerate(out):
         candidate = Path(candidate)
         if not candidate.is_file():
             continue
         try:
             full = full_spectrum_of(candidate)
-        except ValueError:
-            full = candidate
+        except ValueError as error:  # never a reduced file in place of its full spectrum
+            notes.append(f"{candidate}: {error}; not used")
+            continue
+        if k == 0 and recorded:
+            recorded_full = full
         if not full.is_file() or full in seen:
             continue
         seen.add(full)
         resolved.append(full)
-    return resolved
+    return resolved, recorded_full
 
 
 def _is_aligned(path: Path, spectrum) -> bool:
@@ -98,7 +112,8 @@ def resolve_phonon(
     notes: list[str] = []
     best = None
     best_score = -10**9
-    for path in _candidate_paths(pack_path, meta):
+    candidates, recorded = _candidate_paths(pack_path, meta, notes)
+    for path in candidates:
         spectrum_key = ("phonon-spectrum", str(path))
         if spectrum_key in cache:
             spectrum = cache[spectrum_key]
@@ -121,6 +136,8 @@ def resolve_phonon(
             score += 100 if bool(wanted_aligned) == aligned else -100
         elif aligned:  # aligned spectra are the safer display default for old packs
             score += 5
+        if recorded is not None and path == recorded:
+            score += 50  # the spectrum the pack's runs were displaced along: first within its kind
         if path.name == ALIGNED_PHONON_NAME:
             score += 4
         elif path.name == PACKAGED_PHONON_NAME:
@@ -131,4 +148,9 @@ def resolve_phonon(
         if not notes:
             notes.append("no phonon .npz found in the registry, the pack's data folder or the ground-state folder")
         return PhononChoice(path=None, aligned=None, notes=notes)
-    return PhononChoice(path=best[0], aligned=best[1], notes=notes)
+    warning = None
+    if wanted_aligned is not None and best[1] != bool(wanted_aligned):
+        warning = (f"no {'aligned' if wanted_aligned else 'unaligned'} full spectrum covers the modes; mode "
+                   f"symmetry and frequency from the {'aligned' if best[1] else 'unaligned'} {best[0]}")
+        notes.append(warning)
+    return PhononChoice(path=best[0], aligned=best[1], notes=notes, warning=warning)

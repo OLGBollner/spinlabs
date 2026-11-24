@@ -10,6 +10,10 @@ import pytest
 from spinlabs.convergence import traceless_parts
 from spinlabs.convergence_channels import (
     CHANNELS,
+    ChannelMode,
+    ChannelSeries,
+    ChannelWindow,
+    _flag_weak,
     allowed_channels,
     analyse_channels,
     channel_value,
@@ -138,3 +142,56 @@ def test_unknown_symmetry_warns_and_shows_all_channels(tmp_path):
     analysis = analyse_channels(pack)
     assert any("symmetry unknown" in warning for warning in analysis.warnings)
     assert analysis.mode(5).allowed[1] == frozenset(CHANNELS)
+
+
+def _series(mode, q0, *, resolved=True, scheme="forward", reason=None):
+    window = ChannelWindow(resolved=resolved, reason=reason)
+    return ChannelSeries(mode, 1, "d1", scheme, np.array([0.1]), np.array([q0]), q0, window)
+
+
+def _modes(*series):
+    out = []
+    for s in series:
+        mode = ChannelMode(mode=s.mode)
+        mode.series.append(s)
+        out.append(mode)
+    return out
+
+
+def test_an_unresolved_channel_does_not_set_the_weak_scale():
+    noisy = _series(1, 50.0, resolved=False, reason="coefficient unresolved from noise")
+    real = _series(2, 3.0)
+    _flag_weak(_modes(noisy, real), ("forward",), 0.1)
+    assert real.window.weak is False  # 3 is the strongest resolved coefficient, not 6 % of the noisy 50
+    assert noisy.window.weak is False
+
+
+def test_weak_channels_are_flagged_per_scheme_and_keep_their_reason():
+    forward_strong, forward_weak = _series(1, 10.0), _series(2, 0.5, reason="next Taylor term unresolved")
+    central = _series(3, 0.5, scheme="central")  # the only central channel: its own scale
+    _flag_weak(_modes(forward_strong, forward_weak, central), ("forward", "central"), 0.1)
+    assert forward_weak.window.weak is True and central.window.weak is False
+    assert forward_weak.window.reason.startswith("next Taylor term unresolved; coefficient 0.5 is 5.0%")
+
+
+def test_a_mode_without_finished_runs_is_reported_not_fatal(tmp_path):
+    # No stored ground state: Q = 0 is mode 5's own run (as in packs where only some modes have <mode>_pert_0).
+    # Mode 7's runs all failed; load_convergence gives it the shared Q = 0, so it has a point and no fit.
+    steps = sorted(STEPS + [0.0])
+    b, c = 40.0 * E_PART + 10.0 * A1_PART, 300.0 * A1_PART + 20.0 * E_PART
+    mode5 = np.array([D0 + q * b + q**2 * c for q in steps])
+    failed = np.full((len(steps), 3, 3), np.nan)
+    path = tmp_path / "NV_512.npz"
+    scan = ConvergenceScan(tmp_path, [5, 7], steps, np.array([mode5, failed]), np.zeros((2, len(steps))),
+                           2 * len(steps), displacement="normalized")
+    pack = save_convergence(scan, path, defect="NV", cell="512", method="AO", method_key="test_AO")
+    analysis = analyse_channels(pack, mode_info={5: ("Ex", 10.0), 7: ("A1", 20.0)}, schemes=("forward", "central"))
+    assert analysis.mode(5).get(1, "d1", "forward").q0 is not None
+    assert analysis.mode(7).series == []
+    assert any("mode 7: fewer than 5 perturbed runs" in w for w in analysis.warnings)
+    # the mode figure of the other mode still builds (its noise and D0 offset span every mode)
+    from spinlabs.gui.analysis import PackSession
+    from spinlabs.gui.plots import build_mode_figure
+
+    result = build_mode_figure(PackSession(pack, "AO", "normalized"), 5)
+    assert result.figure is not None
