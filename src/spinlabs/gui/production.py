@@ -65,6 +65,9 @@ class ProductionPackage:
     method: str | None = None
     step: float | None = None
     date: str = "unknown"
+    # Whether it holds second-order data (pairs, or central -Q runs): without it there is no two-phonon spectral
+    # function, rate or T1. Older first-order-only packages (*_1d.npz) and empty ones are not complete.
+    complete: bool = True
 
     @property
     def key(self) -> str:
@@ -89,16 +92,30 @@ def _date_of(path: Path) -> str:
     return "unknown"
 
 
-def production_packages(conn=None) -> list[ProductionPackage]:
+def _has_second_order(pert_order) -> bool:
+    """Whether a registry pert_order ('[1, 2]', '[1]', legacy 12 or None) includes the second order."""
+    text = str(pert_order or "")
+    return "2" in text  # '[1, 2]' and the legacy '12'; '[1]' is first order only
+
+
+def production_packages(conn=None, *, complete_only: bool = True) -> list[ProductionPackage]:
     """Every registered production dataset that still exists: packaged ZFS files, and full-decontamination
-    sets (their sublevel files grouped by folder), newest first within each defect and cell."""
+    sets (their sublevel files grouped by folder), sorted by defect, cell, method and date.
+
+    ``complete_only`` (default) leaves out the packages without second-order data (registry pert_order [1]:
+    the older first-order-only *_1d.npz files, and empty ones): they have no two-phonon spectral function,
+    rates or T1. Central-difference packages are complete (their second order comes from the -Q runs).
+    """
     conn = conn or registry.ensure_db()
     rows = conn.execute(
-        "SELECT kind, path, defect, cell_size, calc_method, pert_scale FROM files "
+        "SELECT kind, path, defect, cell_size, calc_method, pert_scale, pert_order FROM files "
         "WHERE kind IN ('packaged_zfs', 'packaged_zfs_sublevel')"
     ).fetchall()
     out: dict[str, ProductionPackage] = {}
-    for kind, path, defect, cell, method, step in rows:
+    for kind, path, defect, cell, method, step, pert_order in rows:
+        complete = _has_second_order(pert_order)
+        if complete_only and not complete:
+            continue
         path = Path(path)
         if kind == "packaged_zfs_sublevel":
             path = path.parent  # the set is the folder of its sublevel files
@@ -111,21 +128,28 @@ def production_packages(conn=None) -> list[ProductionPackage]:
             step = None
         out[str(path)] = ProductionPackage(
             path=path, defect=str(defect or "?"), cell=int(cell) if cell else None, method=method, step=step,
-            date=_date_of(path),
+            date=_date_of(path), complete=complete,
         )
     return sorted(out.values(), key=lambda p: (p.defect, p.cell or 0, p.method or "", p.date), reverse=False)
 
 
 def package_for_path(path: Path) -> ProductionPackage:
-    """A package opened by hand: the registry's description if it is registered, else its own metadata."""
+    """A package opened by hand: the registry's description if it is registered, else its own metadata.
+
+    Raises ValueError for a package without second-order data (nothing to compare beyond the first order).
+    """
     path = Path(path).expanduser().resolve()
-    for package in production_packages():
-        if package.path == path:
-            return package
     from spinlabs.models import RawZFSData
 
     first = sorted(path.glob("*.npz"))[0] if path.is_dir() else path
     raw = RawZFSData.load(first)
+    if not (raw.second_order or raw.first_order_minus):
+        what = "no ZFS data at all (an empty package)" if not raw.first_order else "first-order data only"
+        raise ValueError(f"{path.name} has {what}: no second-order couplings, so no two-phonon spectral function, "
+                         "rates or T1. Use the package of the same step with both orders (*_12d.npz or central).")
+    for package in production_packages(complete_only=False):
+        if package.path == path:
+            return package
     method = "full_decont" if path.is_dir() else raw.calc_method
     return ProductionPackage(
         path=path, defect=str(raw.defect or path.stem), cell=int(raw.cell_size) if raw.cell_size else None,

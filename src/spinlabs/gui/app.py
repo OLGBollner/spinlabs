@@ -864,6 +864,8 @@ class ConvergenceApp:
         self.production_tree.pack(fill=tk.BOTH, expand=True, padx=6, pady=4)
         self._tip(self.production_tree, "Select one or more packages (Ctrl/Shift-click), then add them to a comparison.")
         self.production_tree.bind("<Double-1>", lambda _e: self.add_to_comparison())
+        self.production_hidden = ttk.Label(self.production_tab, text="", wraplength=320, style="CardMuted.TLabel")
+        self.production_hidden.pack(anchor=tk.W, padx=6)
         new = ttk.Button(self.production_tab, text="New comparison", command=self.new_comparison_from_selection,
                          style="Accent.TButton")
         new.pack(fill=tk.X, padx=6, pady=(6, 2))
@@ -880,10 +882,15 @@ class ConvergenceApp:
         self.production_tree.delete(*self.production_tree.get_children())
         self._production_by_row = {}
         try:
-            packages = production_packages()
+            every = production_packages(complete_only=False)
         except Exception:  # noqa: BLE001 -- an unreadable registry leaves the list empty
             LOGGER.exception("cannot list the production packages")
-            packages = []
+            every = []
+        packages = [p for p in every if p.complete]
+        hidden = len(every) - len(packages)
+        self.production_hidden.configure(
+            text=f"{hidden} package(s) without second-order data hidden (first-order-only *_1d files or empty "
+                 "ones: no two-phonon spectra, rates or T1)." if hidden else "")
         for package in packages:
             values = (package.defect, package.cell or "", package.method or "",
                       f"{package.step:g}" if package.step is not None else "", package.date)

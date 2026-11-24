@@ -190,6 +190,10 @@ sizes and methods in one graph, one colour per entry.
   entry per folder). *New comparison* opens a tab with the selected packages;
   *Add to comparison* adds them to the open comparison (a new one if none is
   open). An unregistered package can be added with *Add file…* in the tab.
+  Packages without second-order data (registry `pert_order` [1]: the older
+  first-order-only `*_1d.npz` files, and empty ones) are not listed, and a
+  file without it is refused: they have no two-phonon spectral function,
+  rates or T1. Central-difference packages are complete.
 - Views: **Couplings** (against the phonon energy, laid out as the spectral
   functions: one column per channel, first order |V| per mode on top and the
   diagonal second order |V^(ll)| below), **Spectral functions** (one-phonon J1(ω) and the

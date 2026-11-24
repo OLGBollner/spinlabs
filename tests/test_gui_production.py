@@ -120,17 +120,38 @@ def test_production_packages_list_files_and_decont_sets(tmp_path, monkeypatch):
     folder = tmp_path / "NV_64" / "pert_0.2" / "full_decont" / "20261119"
     single.parent.mkdir(parents=True)
     folder.mkdir(parents=True)
+    first_only = tmp_path / "NV_64" / "pert_0.05" / "AO" / "20261016" / "NV_64_raw_zfs_data_all_bands_1d.npz"
+    first_only.parent.mkdir(parents=True)
     single.write_bytes(b"x")
+    first_only.write_bytes(b"z")
     conn = registry.ensure_db()
-    registry.register_file(conn, single, "packaged_zfs", defect="NV", cell_size=64, calc_method="AO", pert_scale=0.1)
+    registry.register_file(conn, single, "packaged_zfs", defect="NV", cell_size=64, calc_method="AO", pert_scale=0.1,
+                           pert_order=[1, 2])
+    registry.register_file(conn, first_only, "packaged_zfs", defect="NV", cell_size=64, calc_method="AO",
+                           pert_scale=0.05, pert_order=[1])
     for level in ("ms_1", "ms_0_127"):
         f = folder / f"{level}.npz"
         f.write_bytes(b"y")
         registry.register_file(conn, f, "packaged_zfs_sublevel", defect="NV", cell_size=64,
-                               calc_method="full_decont", pert_scale=0.2, spin_sublevel=level)
+                               calc_method="full_decont", pert_scale=0.2, spin_sublevel=level, pert_order=[1, 2])
     packages = {p.path: p for p in production_packages(conn)}
-    assert set(packages) == {single, folder}
+    assert set(packages) == {single, folder}  # the first-order-only package is left out
     assert packages[single].date == "20261101" and packages[folder].method == "full_decont"
+    every = {p.path: p for p in production_packages(conn, complete_only=False)}
+    assert set(every) == {single, folder, first_only} and not every[first_only].complete
+
+
+def test_a_package_without_second_order_is_refused(tmp_path, monkeypatch):
+    from spinlabs.gui.production import package_for_path
+
+    monkeypatch.setattr(registry, "REGISTRY_PATH", tmp_path / "registry.db")
+    raw = _raw(2000.0)
+    raw.second_order = {}
+    path = tmp_path / "NV_64_raw_zfs_data_all_bands_1d.npz"
+    raw.save(path)
+    with pytest.raises(ValueError, match="first-order data only"):
+        package_for_path(path)
+    assert package_for_path(_save(tmp_path, _raw(2000.0))).defect == "NV"  # both orders: accepted
 
 
 def test_settings_validation_and_state_round_trip(tmp_path):
