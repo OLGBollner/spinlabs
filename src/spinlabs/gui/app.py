@@ -918,16 +918,36 @@ class ConvergenceApp:
             wraplength=320, style="CardMuted.TLabel",
         ).pack(anchor=tk.W, padx=6, pady=(0, 6))
 
+    def _checkbox_image(self, checked: bool) -> tk.PhotoImage:
+        """A small flat checkbox that does not depend on the UI font's glyph coverage."""
+        image = tk.PhotoImage(master=self.root, width=16, height=16)
+        fill = "#e8f1fb" if checked else "#ffffff"
+        border = "#005fb8" if checked else "#8a94a6"
+        image.put(fill, to=(0, 0, 16, 16))
+        for x in range(2, 14):
+            image.put(border, to=(x, 2))
+            image.put(border, to=(x, 13))
+        for y in range(2, 14):
+            image.put(border, to=(2, y))
+            image.put(border, to=(13, y))
+        if checked:
+            for x, y in ((4, 8), (5, 9), (6, 10), (7, 9), (8, 8), (9, 7), (10, 6), (11, 5)):
+                image.put("#005fb8", to=(x, y))
+        return image
+
     def _build_modes_tab(self) -> None:
         filter_box = ttk.Frame(self.modes_tab, style="Card.TFrame")
         filter_box.pack(fill=tk.X, pady=(0, 6))
         ttk.Label(filter_box, text="Filter", style="CardMuted.TLabel").pack(side=tk.LEFT)
         ttk.Entry(filter_box, textvariable=self.mode_filter).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=4)
+        self._mode_icons = (self._checkbox_image(False), self._checkbox_image(True))
         self.mode_tree = ttk.Treeview(
-            self.modes_tab, columns=("show", "mode", "sym", "freq"), show="headings", height=14, selectmode="browse"
+            self.modes_tab, columns=("mode", "sym", "freq"), show=("tree", "headings"), height=14,
+            selectmode="browse",
         )
-        for key, title, width in (("show", "Show", 45), ("mode", "Mode", 55),
-                                  ("sym", "Sym", 45), ("freq", "freq/meV", 75)):
+        self.mode_tree.heading("#0", text="Show")
+        self.mode_tree.column("#0", width=58, anchor=tk.W)
+        for key, title, width in (("mode", "Mode", 55), ("sym", "Sym", 45), ("freq", "freq/meV", 75)):
             self.mode_tree.heading(key, text=title)
             self.mode_tree.column(key, width=width, anchor=tk.W)
         self.mode_tree.pack(fill=tk.BOTH, expand=True, pady=4)
@@ -1388,7 +1408,7 @@ class ConvergenceApp:
         except ValueError:
             return
         column = self.mode_tree.identify_column(event.x)
-        if column == "#1":
+        if column == "#0":
             visible = mode in tab.visible_modes
             tab.set_visible({mode}, not visible)
             self._populate_mode_tree()
@@ -1411,9 +1431,9 @@ class ConvergenceApp:
             if needle and needle not in text.lower():
                 continue
             self.mode_tree.insert(
-                "", tk.END, iid=str(mode),
-                values=("☑" if mode in tab.visible_modes else "☐", str(mode), entry.symmetry or "",
-                        _fmt(entry.frequency, 3)),
+                "", tk.END, iid=str(mode), text="",
+                image=self._mode_icons[1 if mode in tab.visible_modes else 0],
+                values=(str(mode), entry.symmetry or "", _fmt(entry.frequency, 3)),
             )
         if tab.active_mode is not None and self.mode_tree.exists(str(tab.active_mode)):
             self.mode_tree.selection_set(str(tab.active_mode))
