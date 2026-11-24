@@ -104,13 +104,14 @@ def test_unweighted_tree_keeps_q_times_e_through_generation_structures_and_packa
     ref = Structure(Lattice.cubic(3.57), ["C", "C", "N"], [[0, 0, 0], [0.25, 0.25, 0.25], [0.5, 0.5, 0]])
     from spinlabs.models import PhononSpectrum
 
-    eig = np.random.default_rng(4).normal(size=(3, 3, 3))
-    eig /= np.linalg.norm(eig.reshape(3, -1), axis=1)[:, None, None]
+    # a full spectrum (the tree setup refuses a reduced one): 3 modes per atom; mode 1 is the one displaced
+    eig = np.random.default_rng(4).normal(size=(9, 3, 3))
+    eig /= np.linalg.norm(eig.reshape(9, -1), axis=1)[:, None, None]
     spec = PhononSpectrum(
-        frequencies_mev=np.array([10.0, 20.0, 30.0]), eigenvectors=eig,
+        frequencies_mev=np.linspace(10.0, 90.0, 9), eigenvectors=eig,
         atom_frac_coords=np.array([s.frac_coords for s in ref]), atom_symbols=["C", "C", "N"],
         atomic_masses=np.array([12.011, 12.011, 14.007]), lattice=np.eye(3) * 3.57,
-        symmetries=["A1", "Ex", "A2"], original_indices=np.arange(3),
+        symmetries=["A1", "Ex", "A2"] + ["A1"] * 6, original_indices=np.arange(9),
     )
     _save(spec, defect / "data" / "phonon_data.npz")
     for stage in ("ZFS_hyp", "ZFS_occup"):

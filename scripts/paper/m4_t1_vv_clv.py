@@ -1,5 +1,9 @@
 """M4: T1 against temperature for VV0 (128) and ClV+ (576), AO and UO, m_s = 0 and m_s = +-1. No experiment.
 
+Shaded: the effect of the mirror projection, from each curve to the T1 without it (dotted; config.projection_band).
+ClV+ is central data, so there the band is the mirror-forbidden SCF noise of the runs; VV0 is forward data, the
+odd-in-Q truncation error.
+
 Production settings (config.py). VV0: computed second-order pairs (|gap| up to ~20 meV AO, ~24 meV UO) + geometric-mean fill for
 the rest; ClV+ (576): diagonal pairs from central differences + fill for every off-diagonal pair.
 """
@@ -17,15 +21,17 @@ def main():
     plt = C.style()
     rec = Record("M4", "VV0 (128) and ClV+ (576) T1 vs temperature", "scripts/paper/m4_t1_vv_clv.py", "main")
     T = C.TEMPERATURES
-    res, debye = {}, {}
+    res, debye, band = {}, {}, {}
     for s in SYSTEMS:
         for sch in C.SCHEMES:
             r = rates(s, sch)
             debye[f"{s} {sch}"] = float(r["debye_C"])
+            rd = rates(s, sch, mirror_projection=False)  # the other edge of the band
             for st in STATES:
                 t1, eig, src = t1_details(T, directional(r), st)
                 rec.t1_curve(f"{s} {sch} {st}", T, t1, eig, src)
                 res[(s, sch, st)] = t1
+                band[(s, sch, st)] = t1_details(T, directional(rd), st)[0]
     rec.check_fallbacks()
 
     fig, axes = plt.subplots(2, 1, figsize=(C.SINGLE, 4.4), sharex=True)
@@ -35,8 +41,9 @@ def main():
                 t1 = res[(s, sch, st)]
                 ok = np.isfinite(t1) & (t1 > 0)
                 ax.plot(T[ok], t1[ok], color=C.COLORS[sch], ls=C.STATE_STYLES[st], label=f"{sch}, {C.STATE_LABELS[st]}")
+                C.projection_band(ax, T, t1, band[(s, sch, st)], C.COLORS[sch])
         ax.set_yscale("log")
-        lo = min(np.nanmin(res[(s, sch, st)]) for sch in C.SCHEMES for st in STATES)
+        lo = min(np.nanmin(d[(s, sch, st)]) for d in (res, band) for sch in C.SCHEMES for st in STATES)
         ax.set_ylim(lo / 3, 1e3)
         ax.set_ylabel(r"$T_1$ (s)")
         ax.text(0.97, 0.96, C.SYSTEMS[s]["label"], transform=ax.transAxes, ha="right", va="top")
@@ -58,9 +65,12 @@ def main():
         "temperatures": f"{T[0]:g}-{T[-1]:g} K, step {T[1] - T[0]:g} K",
         "T1 extraction": "rate matrix, population fit a exp(-t/T1) + c (eigenvalue only as fallback)",
         "Debye C (1/meV^2)": debye,
+        "mirror projection": C.MIRROR_PROJECTION, "band": C.BAND_NOTE,
     }
     rec.data["numbers"] = {f"T1 {s} {sch} {st} (s)": at(T, res[(s, sch, st)], C.QUOTE_T)
                            for s in SYSTEMS for sch in C.SCHEMES for st in STATES}
+    rec.data["numbers"].update({f"T1 {s} {sch} {st}, no mirror projection (s)": at(T, band[(s, sch, st)], C.QUOTE_T)
+                                for s in SYSTEMS for sch in C.SCHEMES for st in STATES})
     rec.write()
     for k, v in rec.data["numbers"].items():
         print(k, {t: f"{x:.3g}" for t, x in v.items()})

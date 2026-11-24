@@ -23,10 +23,9 @@ from matplotlib.gridspec import GridSpec
 from matplotlib.lines import Line2D
 
 from spinlabs.constants import CONSTANTS
-from spinlabs.pipeline import load_raw_inputs
+from spinlabs.pipeline import build_manager, load_raw_inputs
 from spinlabs.registry import ensure_db, find_packaged
 from spinlabs.utils import MathUtils
-from spinlabs.zfs_manager import ZFSManager
 
 # One categorical slot per perturbation scale, largest first
 COLORS = ["#2a78d6", "#eb6834", "#1baf7a", "#eda100"]
@@ -65,7 +64,7 @@ def load_scale(path, defect, cell, phonon_file=None):
     raw, spectrum, ph_path = load_raw_inputs(raw_zfs_file=path, phonon_file=phonon_file, defect=defect, cell_size=cell)
     if spectrum is None:
         raise SystemExit(f"No phonon spectrum found for {path}; pass --phonon-file")
-    manager = ZFSManager(raw_data=raw, spectrum=spectrum)
+    manager = build_manager(raw, spectrum)  # production coupling options, as `spinlabs run`
     d1, *V1 = manager.calculate_first_order_derivatives()
     _, *V2 = manager.calculate_second_order_derivatives(d1)
     # ZFSManager holds tensors and couplings in J

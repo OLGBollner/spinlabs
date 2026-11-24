@@ -82,8 +82,7 @@ def load_manager(args: argparse.Namespace, command: str):
     Returns ``(manager, phonon_path, orders)``; ``orders`` is what to compute.
     """
     from spinlabs.cli.run import _METHOD_MAP, _infer_method
-    from spinlabs.pipeline import load_raw_inputs
-    from spinlabs.zfs_manager import ZFSManager
+    from spinlabs.pipeline import build_manager, load_raw_inputs
 
     given = [
         flag
@@ -135,8 +134,7 @@ def load_manager(args: argparse.Namespace, command: str):
         defect=args.defect,
         cell_size=args.cell_size,
     )
-    manager = ZFSManager(raw_data=raw_data, spectrum=spectrum, **coupling_options(args))
-    manager.calc_method = calc_method
+    manager = build_manager(raw_data, spectrum, calc_method=calc_method, **coupling_options(args))
     if not manager.zfs_tensors:
         raise SystemExit("No first-order tensors in the input; every coupling needs the first-order derivatives.")
     if 2 in orders and not manager.zfs_tensors_2d and args.order:
@@ -196,8 +194,12 @@ def _summary(manager, ph_path, first, second, top: int, modes: list[int]) -> str
             + (" -- " + ", ".join(f"{i + 1}_{j + 1} (alpha={a:.2f})" for i, j, a, _ in bad) if bad else "")
         )
         if manager.mirror_projection:
+            syms = [str(s) for s in manager.spectrum.symmetries] if manager.spectrum is not None else []
+            central_e = sum(1 for i in manager.mirror_projected_central if i < len(syms) and syms[i] in ("Ex", "Ey"))
             lines.append(
-                f"  mirror projection: {len(manager.mirror_projected)} forward diagonals projected, "
+                f"  mirror projection: {len(manager.mirror_projected)} forward and "
+                f"{central_e} central E diagonals projected "
+                f"(+{len(manager.mirror_projected_central) - central_e} central A), "
                 f"{len(manager.mirror_inherited)} even partners from their odd twin, "
                 f"{len(manager.mirror_uncorrected)} E diagonals uncorrected"
             )

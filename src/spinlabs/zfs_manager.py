@@ -35,6 +35,10 @@ MIN_EXPECTED_MHZ = 0.05
 # counts as mirror-odd when its overlap with its best sigma_v (symmetry.mirror_parities) is at most
 # minus this. Every E partner reaches |chi| >= 0.866 with one of the three planes, A modes +-1.
 MIRROR_MIN_OVERLAP = 0.8
+# Central second differences are projected for every mode aligned with its mirror to at least this
+# |overlap|, whatever its parity (see _mirror_project_central). For a mode rotated inside its degenerate
+# pair the projection also cuts real coupling, by about 1 - |overlap|; the threshold keeps that below 1 %.
+MIRROR_MIN_OVERLAP_CENTRAL = 0.99
 
 
 class ZFSManager:
@@ -61,18 +65,24 @@ class ZFSManager:
             # When the structure cannot be symmetry-detected (e.g. synthetic
             # test fixtures with all atoms at the origin), fall back to the
             # stored labels rather than failing the whole pipeline.
+            from .models import DefectCentreError
             from .symmetry import SymmetryDetectionError, classify_and_pair
 
             stored_syms = list(spectrum.symmetries) if spectrum.symmetries is not None else None
             try:
                 fresh_labels, deg_groups = classify_and_pair(spectrum, force=True)
-            except (SymmetryDetectionError, NotImplementedError) as exc:
+            except (SymmetryDetectionError, NotImplementedError, DefectCentreError) as exc:
                 # NotImplementedError: point group detected but no character
-                # table; SymmetryDetectionError: no symmetry found at all.
-                # Both mean "cannot classify this structure" — a genuine bug
-                # in the classifier must NOT be caught here.
+                # table; SymmetryDetectionError: no symmetry found at all;
+                # DefectCentreError: no single defect to centre the operations on.
+                # All mean "cannot classify this structure" — a genuine bug
+                # in the classifier must NOT be caught here. Without stored labels
+                # there is nothing to fall back on: the couplings need the labels.
                 if stored_syms is None:
-                    raise
+                    raise ValueError(
+                        f"the phonon modes have no symmetry labels and cannot be classified ({exc}); "
+                        "the couplings need them"
+                    ) from exc
                 LOGGER.warning(f"symmetry classification of the phonon modes failed ({exc}); using the stored labels")
                 fresh_labels = stored_syms
                 # Stored labels are trusted as-is here, so sym_check cannot be
@@ -138,10 +148,12 @@ class ZFSManager:
         self.offdiag_from_diagonal = offdiag_from_diagonal
         self.n_offdiag_filled = 0  # pairs (i < j) filled that way
         self.n_offdiag_filled_a_x_e = 0  # of which A x E pairs, filled by the mixed-type root
+        self.computed_pairs: set[tuple[int, int]] | None = None  # (i, j), i <= j, set by second order
         # Remove the odd-in-Q error of forward diagonal second differences by the mode's mirror
         # symmetry; see calculate_second_order_derivatives. 0-based modes, filled per call:
         self.mirror_projection = mirror_projection
         self.mirror_projected: list[int] = []  # mirror-odd modes whose d2D was projected
+        self.mirror_projected_central: list[int] = []  # aligned modes whose central d2D was projected
         self.mirror_inherited: list[tuple[int, int]] = []  # (even partner, odd twin) taking the twin's couplings
         self.mirror_uncorrected: list[int] = []  # forward E diagonals neither projected nor inherited
         # {mode: (mirror matrix in the cell frame, overlap)}, computed on first use; None until then.
@@ -211,7 +223,8 @@ class ZFSManager:
         self.defect = raw.defect
         self.cell_size = raw.cell_size
         self.pert_scale = raw.pert_scale
-        self.calc_method = normalize_calc_method(raw.metadata.get("calc_method")) or "calc"
+        # the data's own method (a full-decont set combined on load has it only there), the metadata as fallback
+        self.calc_method = normalize_calc_method(raw.calc_method or raw.metadata.get("calc_method")) or "calc"
 
         if raw.ground_state_zfs is not None:
             D_xx, D_yy, D_zz, R = raw.ground_state_zfs.principal_components()
@@ -531,6 +544,7 @@ class ZFSManager:
 
         no_first_order = []
         self.mirror_projected, self.mirror_inherited, self.mirror_uncorrected = [], [], []
+        self.mirror_projected_central = []
         forward_diagonal: set[int] = set()  # modes whose (i, i) came from a forward (pair) run
         diagonal_done: set[int] = set()  # modes whose own (i, i) coupling was computed
         computed_pairs: set[tuple[int, int]] = set()  # (i, j), i <= j, whose coupling came from a run
@@ -600,6 +614,8 @@ class ZFSManager:
                 forward_diagonal.add(i)
                 if self.mirror_projection:
                     d2D_dqidqj = self._mirror_project(i, d2D_dqidqj)
+            elif i == j and self.mirror_projection:
+                d2D_dqidqj = self._mirror_project_central(i, d2D_dqidqj)
 
             zfs_2nd_derivs[i, j] = d2D_dqidqj
             zfs_2nd_derivs[j, i] = d2D_dqidqj
@@ -653,6 +669,20 @@ class ZFSManager:
 
         if self.mirror_projection:
             self._mirror_inherit(forward_diagonal, V_0_0_2nd, V_p_m_2nd, V_0_pm_2nd)
+            central_e = [
+                i for i in diagonal_done - forward_diagonal
+                if self.spectrum is not None and str(self.spectrum.symmetries[i]) in ("Ex", "Ey")
+            ]
+            if central_e or self.mirror_projected_central:
+                projected_e = set(central_e) & set(self.mirror_projected_central)
+                skipped = len(set(central_e) - projected_e)
+                n_a = len(self.mirror_projected_central) - len(projected_e)
+                LOGGER.info(
+                    f"mirror projection: {len(projected_e)} central E diagonals projected (the noise in their "
+                    f"mirror-forbidden part removed)" + (f", and {n_a} central A diagonals" if n_a else "")
+                    + (f"; {skipped} central E diagonals not aligned with a mirror "
+                       f"(|overlap| < {MIRROR_MIN_OVERLAP_CENTRAL}) left as they are" if skipped else "")
+                )
 
         # A degenerate twin without its own diagonal run inherits its partner's diagonal
         # coupling (the spectrum owns the pairing). Fill-only, as for first order: a twin
@@ -668,6 +698,9 @@ class ZFSManager:
             self._degenerate_pairs_from_symmetry(zfs_2nd_derivs, V_0_0_2nd, V_p_m_2nd, V_0_pm_2nd)
             computed_pairs.update((min(x, y), max(x, y)) for x, y in self.symmetry_derived_pairs)
 
+        # The pairs whose coupling came from a run (or symmetry): every other off-diagonal entry is either
+        # zero or filled from the diagonal, and denoised_couplings refills those from the denoised diagonal.
+        self.computed_pairs = computed_pairs
         if self.offdiag_from_diagonal:
             self._offdiag_from_diagonal(computed_pairs, V_0_0_2nd, V_p_m_2nd, V_0_pm_2nd)
 
@@ -729,7 +762,7 @@ class ZFSManager:
             if symbol != "3m":
                 LOGGER.warning(
                     f"mirror projection needs a C3v structure in the phonon spectrum ({reason}); "
-                    "the forward second differences are left as they are"
+                    "the diagonal second differences (forward and central) are left as they are"
                 )
                 return self._mirror_parity
             try:
@@ -754,6 +787,25 @@ class ZFSManager:
         rot = self.eigen_rotation if self.eigen_rotation is not None else np.eye(3)
         M = rot.T @ parity[0] @ rot  # the stored tensors are in the D0 principal frame (R.T D R)
         self.mirror_projected.append(i)
+        return 0.5 * (d2D + M @ d2D @ M.T)
+
+    def _mirror_project_central(self, i: int, d2D: np.ndarray) -> np.ndarray:
+        """The central diagonal second derivative of mode i without the noise in its mirror-forbidden part.
+
+        A mode aligned with a mirror M (|overlap| >= MIRROR_MIN_OVERLAP_CENTRAL) is mapped by it onto +Q
+        or -Q, so its true second derivative obeys D'' = M D'' M whatever its parity. The central
+        difference (D(Q) + D(-Q) - 2 D0) / Q^2 has no odd terms, so its M-antisymmetric part is the
+        SCF noise of the runs alone (for E modes, one of the two components of Delta1 and of Delta2,
+        which the magnitudes |p|, |w| would otherwise add in quadrature); (d2D + M d2D M) / 2 drops it.
+        Modes rotated inside their degenerate pair (phonon files that are not mirror-aligned) are left
+        as they are: there the projection would also cut real coupling.
+        """
+        parity = self._mirror_parities().get(i)
+        if parity is None or abs(parity[1]) < MIRROR_MIN_OVERLAP_CENTRAL:
+            return d2D
+        rot = self.eigen_rotation if self.eigen_rotation is not None else np.eye(3)
+        M = rot.T @ parity[0] @ rot
+        self.mirror_projected_central.append(i)
         return 0.5 * (d2D + M @ d2D @ M.T)
 
     def _mirror_inherit(
@@ -869,35 +921,13 @@ class ZFSManager:
         if len(labels) != n:
             LOGGER.warning("off-diagonal couplings from the diagonal need the modes' symmetry labels; option ignored")
             return
-        irrep = np.array([str(s).upper() for s in labels])
-        is_ex, is_ey = irrep == "EX", irrep == "EY"
-        same = irrep[:, None] == irrep[None, :]
-        a_pair = same & np.isin(irrep, ["A1", "A2"])[:, None]  # A1 x A1, A2 x A2: product A1
-        e_same = same & (is_ex | is_ey)[:, None]  # Ex x Ex, Ey x Ey
-        e_mixed = (is_ex[:, None] & is_ey[None, :]) | (is_ey[:, None] & is_ex[None, :])  # Ex x Ey
-        is_a, is_e = np.isin(irrep, ["A1", "A2"]), is_ex | is_ey
-        a_x_e = (is_a[:, None] & is_e[None, :]) | (is_e[:, None] & is_a[None, :])  # A1 x E, A2 x E
-        allowed = {"V_00": a_pair | e_same, "V_pm": e_same | e_mixed, "V_0pm": e_same | e_mixed}
-
-        keep = np.eye(n, dtype=bool)
-        for i, j in computed:
-            keep[i, j] = keep[j, i] = True
-        v00_diag = np.abs(np.diag(V_0_0_2nd))  # before the loop: it fills only off-diagonal entries
-        for name, V in (("V_00", V_0_0_2nd), ("V_pm", V_p_m_2nd), ("V_0pm", V_0_pm_2nd)):
-            diag = np.abs(np.diag(V))
-            fill = ~keep & allowed[name]
-            V[fill] = np.sqrt(np.outer(diag, diag))[fill]
-            if name != "V_00":  # A x E: the A mode's V_00 with the E mode's spin-flip coupling
-                a_side, e_side = np.where(is_a, v00_diag, 0.0), np.where(is_e, diag, 0.0)
-                fill = ~keep & a_x_e
-                V[fill] = np.sqrt(np.outer(a_side, e_side) + np.outer(e_side, a_side))[fill]
-        any_allowed = allowed["V_00"] | allowed["V_pm"] | a_x_e
-        self.n_offdiag_filled = int(np.count_nonzero(np.triu(~keep & any_allowed, 1)))
-        self.n_offdiag_filled_a_x_e = int(np.count_nonzero(np.triu(~keep & a_x_e, 1)))
+        self.n_offdiag_filled, self.n_offdiag_filled_a_x_e, n_kept = fill_offdiag_from_diagonal(
+            labels, computed, V_0_0_2nd, V_p_m_2nd, V_0_pm_2nd
+        )
         LOGGER.info(
             f"off-diagonal couplings from the diagonal, symmetry-allowed types only: {self.n_offdiag_filled} "
             f"pairs filled ({self.n_offdiag_filled_a_x_e} A x E by sqrt(V00_aa V_ee), the rest by sqrt(V_ii V_jj)), "
-            f"{int(np.count_nonzero(np.triu(keep, 1)))} computed off-diagonal pairs kept"
+            f"{n_kept} computed off-diagonal pairs kept"
         )
 
     def process_first_order_perturbations(self, output_filename: Optional[str] = None) -> list[str]:
@@ -1156,3 +1186,43 @@ class ZFSManager:
             formatted_row = "  ".join(f"{val:>{col_width}.6f}" for val in row)
             LOGGER.debug(f"  [ {formatted_row} ]")
         LOGGER.debug(f"{double_line}\n")
+
+
+def fill_offdiag_from_diagonal(
+    labels, computed, V_0_0: np.ndarray, V_p_m: np.ndarray, V_0_pm: np.ndarray
+) -> tuple[int, int, int]:
+    """Fill, in place, the symmetry-allowed off-diagonal second-order couplings not in ``computed``.
+
+    The rules of ZFSManager._offdiag_from_diagonal (see there), from the diagonals of V_0_0, V_p_m and
+    V_0_pm in whatever unit they are in. Entries in ``computed`` ((i, j) pairs, either order) and the
+    diagonal are left alone. Returns (pairs filled, of them A x E, computed off-diagonal pairs kept).
+    """
+    n = V_0_0.shape[0]
+    irrep = np.array([str(s).upper() for s in labels])
+    is_ex, is_ey = irrep == "EX", irrep == "EY"
+    same = irrep[:, None] == irrep[None, :]
+    a_pair = same & np.isin(irrep, ["A1", "A2"])[:, None]  # A1 x A1, A2 x A2: product A1
+    e_same = same & (is_ex | is_ey)[:, None]  # Ex x Ex, Ey x Ey
+    e_mixed = (is_ex[:, None] & is_ey[None, :]) | (is_ey[:, None] & is_ex[None, :])  # Ex x Ey
+    is_a, is_e = np.isin(irrep, ["A1", "A2"]), is_ex | is_ey
+    a_x_e = (is_a[:, None] & is_e[None, :]) | (is_e[:, None] & is_a[None, :])  # A1 x E, A2 x E
+    allowed = {"V_00": a_pair | e_same, "V_pm": e_same | e_mixed, "V_0pm": e_same | e_mixed}
+
+    keep = np.eye(n, dtype=bool)
+    for i, j in computed:
+        keep[i, j] = keep[j, i] = True
+    v00_diag = np.abs(np.diag(V_0_0))  # before the loop: it fills only off-diagonal entries
+    for name, V in (("V_00", V_0_0), ("V_pm", V_p_m), ("V_0pm", V_0_pm)):
+        diag = np.abs(np.diag(V))
+        fill = ~keep & allowed[name]
+        V[fill] = np.sqrt(np.outer(diag, diag))[fill]
+        if name != "V_00":  # A x E: the A mode's V_00 with the E mode's spin-flip coupling
+            a_side, e_side = np.where(is_a, v00_diag, 0.0), np.where(is_e, diag, 0.0)
+            fill = ~keep & a_x_e
+            V[fill] = np.sqrt(np.outer(a_side, e_side) + np.outer(e_side, a_side))[fill]
+    any_allowed = allowed["V_00"] | allowed["V_pm"] | a_x_e
+    return (
+        int(np.count_nonzero(np.triu(~keep & any_allowed, 1))),
+        int(np.count_nonzero(np.triu(~keep & a_x_e, 1))),
+        int(np.count_nonzero(np.triu(keep, 1))),
+    )

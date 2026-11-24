@@ -26,10 +26,8 @@ from matplotlib.legend_handler import HandlerTuple  # noqa: E402
 import numpy as np  # noqa: E402
 from plot_t1_comparison import coupling_manager  # noqa: E402
 
-from spinlabs.constants import CONSTANTS  # noqa: E402
 from spinlabs.experimental import load_experimental_data, relaxation_series  # noqa: E402
-from spinlabs.pipeline import solve_t1  # noqa: E402
-from spinlabs.transition_rate import TransitionRate  # noqa: E402
+from spinlabs.pipeline import rate_series, t1_details  # noqa: E402
 
 # ============================== settings: edit these ==============================
 DATA = Path("data")  # raw ZFS packages, as data/<defect>_<cell>/pert_<step>/<method>/<date>/
@@ -151,29 +149,16 @@ def t1_curve(case):
     with tempfile.TemporaryDirectory() as tmp:
         base = str(Path(tmp) / "coupling")
         manager.process_both_orders(output_filename=base)
-        calc = TransitionRate(f"{base}.npz")
-        if INCLUDE_DIRECT and DIRECT_MODEL == "debye":
-            fit = calc.set_debye_from_spectrum(manager.spectrum)
-            branches = ", ".join(f"{len(b['modes'])} {name} at {b['energy_mev']:.0f} meV" for name, b in fit.branches.items())
-            print(f"  Debye fit: C = {fit.C:.3e} 1/meV^2 from {branches}")
-        else:
-            calc.direct = DIRECT_MODEL if INCLUDE_DIRECT else "none"
-        omega, j0pm, jpm, j00 = calc.get_spectral_density(res=0.02, sigma=case["sigma"])
+        direct = DIRECT_MODEL if INCLUDE_DIRECT else "none"
         # nogap: leave out the pairs at zero gap by symmetry, (i, i) and degenerate E partners
         groups = (manager.spectrum.deg_groups or []) if case["nogap"] else None
-        lines = calc.get_line_spectral_density(case["sigma"], degenerate_groups=groups)
-        zfs = calc.data["zfs"] / CONSTANTS["meV2J"]
+        rs = rate_series(f"{base}.npz", TEMPERATURES, sigma=case["sigma"], has_second_order=True,
+                         degenerate_groups=groups, direct=direct, spectrum=manager.spectrum)
+        if rs.debye_C is not None:
+            print(f"  Debye fit: C = {rs.debye_C:.3e} 1/meV^2")
         processes = ["two_phonon"] + (["first_order"] if INCLUDE_DIRECT else []) + (
             ["second_order"] if INCLUDE_VIRTUAL_RAMAN else [])
-        directional = {d: [] for d in DIRECTIONS}
-        for T in TEMPERATURES:
-            calc.compute_transition_rates(T, omega, j0pm, jpm, j00, zfs)  # first and second order
-            calc.compute_two_phonon_rates(T, lines)
-            for d in DIRECTIONS:
-                directional[d].append(sum(calc.transition_rate[p].get(d, 0.0) for p in processes))
-        rates_file = Path(tmp) / "directional.npz"
-        np.savez(rates_file, temperatures=TEMPERATURES, **directional)
-        t1, _ = solve_t1(rates_file, INIT_STATE)
+        t1, _, _ = t1_details(rs.temperatures, rs.directional(processes), INIT_STATE, rs.spin)
     return np.asarray(t1, dtype=float), convention
 
 

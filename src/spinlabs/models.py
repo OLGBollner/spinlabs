@@ -17,6 +17,14 @@ from spinlabs.logging_utils import get_logger
 
 LOGGER = get_logger(__name__)
 
+
+class DefectCentreError(ValueError):
+    """The structure has no single defect to centre the symmetry analysis on (PhononSpectrum.defect_centre)."""
+
+# PhononSpectrum.defect_centre per structure (lattice, positions, species): the centre, or the
+# ValueError raised when there is no single one.
+_DEFECT_CENTRES: dict[tuple, np.ndarray | ValueError] = {}
+
 DEFECT_RADIUS_BONDS = 2.0  # defect_participation: the weight within this many bond lengths of the defect centre
 
 
@@ -288,6 +296,33 @@ def check_original_indices(
         raise ValueError(f"original_indices must be < n_full ({n_full}); the 0-based idx convention is broken")
 
 
+def reduced_spectrum_reason(spectrum) -> Optional[str]:
+    """Why ``spectrum`` is a symmetry-reduced spectrum (one mode per degenerate set), None for a full one.
+
+    A full spectrum has every mode of the supercell, 3 per atom, each at its own index. A reduced one
+    (spinlabs symmetrize, resolve_sym_phonon, filter_degenerate_partners) has fewer, with
+    ``original_indices`` into the full spectrum it was reduced from (``n_full`` modes); older reduced
+    files carry only the indices, or nothing but the lower mode count.
+    """
+    return reduced_reason(spectrum.n_modes, spectrum.n_atoms, spectrum.n_full, spectrum.original_indices)
+
+
+def reduced_reason(
+    n_modes: int, n_atoms: Optional[int], n_full: Optional[int] = None, original_indices=None
+) -> Optional[str]:
+    """reduced_spectrum_reason from the numbers alone (a phonon file's keys, without loading it):
+    the mode count, the atom count (None: unknown), the recorded full size and the mode indices."""
+    n = n_modes
+    if n_full is not None and n_full > n:
+        return f"{n} of {n_full} modes"
+    if original_indices is not None and not np.array_equal(np.asarray(original_indices), np.arange(n)):
+        full = n_full if n_full is not None else (3 * n_atoms if n_atoms else "more")
+        return f"{n} modes, at indices into a larger spectrum of {full} modes"
+    if n_atoms and n < 3 * n_atoms:
+        return f"{n} modes for {n_atoms} atoms (a full spectrum has {3 * n_atoms})"
+    return None
+
+
 @dataclass
 class PhononMode:
     """Represents a single vibrational mode."""
@@ -331,21 +366,30 @@ class PhononSpectrum:
     # Whether every degenerate E set was rotated onto one mirror plane (symmetry.align_degenerate_pairs):
     # True for an aligned file, False for a symmetrized file whose sets are only classified, None unstated.
     aligned: Optional[bool] = None
+    # The defect frame the modes were classified in (symmetry.defect_frame): a rotation whose columns
+    # are the sigma_v1 mirror normal n, z x n and the C3 axis z, in the cell's Cartesian frame. The
+    # symmetry operations, the Ex/Ey labels and the alignment mirror all follow from it.
+    frame: Optional[np.ndarray] = None  # Shape (3, 3)
     frequency_unit: str = "meV"
 
     def __post_init__(self):
         # Symmetry labels + degeneracy groups come from the general symmetry module.
         # Stored labels are trusted; classification only runs when labels are absent.
         if self.symmetries is None and self.eigenvectors is not None and len(self.eigenvectors) > 0:
-            try:
-                from .symmetry import classify_and_pair
+            from .symmetry import SymmetryDetectionError, classify_and_pair
 
+            try:
                 self.symmetries, self.deg_groups = classify_and_pair(self)
-            except Exception:
-                # General detection unavailable (no table, or structure too
-                # degenerate for spglib, e.g. synthetic test data); fall back
-                # to the legacy pattern-based C3v analyzer.
+            except SymmetryDetectionError:
+                # Structure too degenerate for spglib (synthetic test data): fall back to the
+                # legacy pattern-based C3v analyzer.
                 self.analyze_c3v_symmetry()
+            except Exception as exc:
+                # A real structure the classifier cannot handle (no character table for its point group,
+                # no single defect centre), or a classifier error: leave the modes unlabelled rather than
+                # guess. Parsing still works (frequencies, plots); ZFSManager reclassifies and refuses a
+                # spectrum it cannot label, so no coupling is computed from unlabelled modes.
+                LOGGER.warning(f"phonon modes not classified by symmetry ({type(exc).__name__}: {exc})")
         if self.e_pair_complete is None and self.symmetries is not None and len(self.frequencies_mev) > 0:
             self.check_e_pair_completeness()
         if self.original_indices is None:
@@ -592,28 +636,13 @@ class PhononSpectrum:
         frac_atoms = self.atom_frac_coords
         lattice = self.lattice
         inv_lat = np.linalg.inv(lattice)
-        symbols = self.atom_symbols
 
         if defect_pos is None:
-            if "N" in symbols and "C" in symbols:
-                n_indices = [i for i, s in enumerate(symbols) if s == "N"]
-                if len(n_indices) != 1:
-                    raise ValueError(f"Expected exactly one N, found {len(n_indices)}")
-                defect_frac = frac_atoms[n_indices[0]]
-            elif "Cl" in symbols and "Si" in symbols:
-                cl_indices = [i for i, s in enumerate(symbols) if s == "Cl"]
-                defect_frac = frac_atoms[cl_indices].mean(axis=0)
-            else:
-                # Generic fallback: self-contained point-defect localizer
-                # (local import avoids the structures -> models cycle).
-                from spinlabs.vasp.structures import detect_defect_position
-
-                detected = detect_defect_position(self)
-                if detected is not None:
-                    defect_frac = detected
-                else:
-                    LOGGER.warning("could not identify the defect centre; no shift applied")
-                    return frac_atoms, np.zeros(3)
+            try:
+                defect_frac = self.defect_centre()
+            except ValueError as exc:
+                LOGGER.warning(f"could not identify the defect centre ({exc}); no shift applied")
+                return frac_atoms, np.zeros(3)
         else:
             defect_pos = np.asarray(defect_pos, dtype=float)
             defect_frac = defect_pos @ inv_lat
@@ -817,18 +846,31 @@ class PhononSpectrum:
 
         For a defect with a vacancy (NV, ClV, the divacancy, V_Si) that is the vacancy: the centroid of
         the under-coordinated atoms around it, as find_defect reports it, not an atom substituted next
-        to it. Without a vacancy, the single defect find_defect finds. Raises ValueError when there is
-        no defect, or no single one to choose.
+        to it. Without a vacancy, the single defect find_defect finds. Raises DefectCentreError (a
+        ValueError) when there is no defect, or no single one to choose.
         """
         from spinlabs.vasp.structures import find_defect, spectrum_structure
 
-        defects = find_defect(spectrum_structure(self))
-        vacancies = [d for d in defects if d.defect_class in ("vacancy", "divacancy")]
-        chosen = vacancies or defects
-        if len(chosen) != 1:
-            found = ", ".join(sorted(d.defect_class for d in defects)) or "none"
-            raise ValueError(f"no single defect centre (find_defect found: {found})")
-        return np.asarray(chosen[0].frac_coords, dtype=float)
+        # find_defect takes 1-20 s (64-576 atoms) and the symmetry analysis asks for the centre several
+        # times per file, also on copies (dataclasses.replace) of the same structure: cache per structure.
+        key = (
+            np.asarray(self.lattice, dtype=float).tobytes(),
+            np.asarray(self.atom_frac_coords, dtype=float).tobytes(),
+            tuple(self.atom_symbols),
+        )
+        if key not in _DEFECT_CENTRES:
+            defects = find_defect(spectrum_structure(self))
+            vacancies = [d for d in defects if d.defect_class in ("vacancy", "divacancy")]
+            chosen = vacancies or defects
+            if len(chosen) != 1:
+                found = ", ".join(sorted(d.defect_class for d in defects)) or "none"
+                _DEFECT_CENTRES[key] = DefectCentreError(f"no single defect centre (find_defect found: {found})")
+            else:
+                _DEFECT_CENTRES[key] = np.asarray(chosen[0].frac_coords, dtype=float)
+        centre = _DEFECT_CENTRES[key]
+        if isinstance(centre, DefectCentreError):
+            raise DefectCentreError(str(centre))
+        return centre.copy()
 
     def defect_distances(self) -> np.ndarray:
         """Distance (Angstrom) of every atom from the defect centre (defect_centre), at its nearest image.
@@ -939,6 +981,7 @@ class PhononSpectrum:
             # code can map each reduced mode back to its source position.
             original_indices=kept,
             n_full=((self.n_full if self.n_full is not None else len(original)) if original is not None else n),
+            frame=self.frame,
         )
         n_full = self.n_full if self.n_full is not None else (len(original) if original is not None else n)
         check_original_indices(reduced.original_indices, reduced.n_modes, n_full=n_full)
@@ -966,6 +1009,7 @@ class PhononSpectrum:
         FieldSpec("original_indices", "array", shape=("n_modes",), optional=True, save_aliases=("idx",)),
         FieldSpec("n_full", "int", optional=True),
         FieldSpec("aligned", "bool", optional=True),
+        FieldSpec("frame", "array", shape=(3, 3), optional=True),
     ]
 
     def save(self, out_path: Union[str, Path]) -> str:

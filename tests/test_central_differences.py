@@ -155,9 +155,10 @@ def test_central_tree_builds_first_order_at_plus_and_minus_p_only(tmp_path):
 
     defect = tmp_path / "NV_512"
     (defect / "data").mkdir(parents=True)
-    spec = PhononSpectrum(
-        frequencies_mev=np.array([10.0, 20.0]), eigenvectors=np.zeros((2, 1, 3)), atom_frac_coords=np.zeros((1, 3)),
-        atom_symbols=["C"], atomic_masses=np.array([12.0]), lattice=np.eye(3), symmetries=["A1", "A1"],
+    spec = PhononSpectrum(  # a full spectrum: 3 modes for the cell's 1 atom
+        frequencies_mev=np.array([10.0, 20.0, 30.0]), eigenvectors=np.zeros((3, 1, 3)),
+        atom_frac_coords=np.zeros((1, 3)), atom_symbols=["C"], atomic_masses=np.array([12.0]), lattice=np.eye(3),
+        symmetries=["A1", "A1", "A1"],
     )
     save_phonon_npz(spec, defect / "data" / "phonon_data.npz")
     for stage in ("ZFS_hyp", "ZFS_occup"):

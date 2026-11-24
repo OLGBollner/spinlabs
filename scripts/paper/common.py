@@ -13,16 +13,12 @@ import scipy.constants as Cn
 
 import config as C
 
-sys.path.insert(0, str(C.ROOT / "scripts"))  # coupling_manager and the spectral helpers live in scripts/
-from plot_t1_comparison import coupling_manager  # noqa: E402
+sys.path.insert(0, str(C.ROOT / "scripts"))  # the spectral helpers live in scripts/
 from plot_spectral_comparison import computed_pair_mask  # noqa: E402
 
-from spinlabs import registry  # noqa: E402
-from spinlabs.constants import CONSTANTS  # noqa: E402
+from spinlabs import pipeline, registry  # noqa: E402
 from spinlabs.models import SpinPhononCouplingData  # noqa: E402
-from spinlabs.relaxation_dynamics import RelaxationDynamics, init_populations  # noqa: E402
 from spinlabs.spin import directions  # noqa: E402
-from spinlabs.transition_rate import TransitionRate  # noqa: E402
 
 logging.disable(logging.WARNING)  # per-run pipeline warnings would bury the summaries
 
@@ -30,26 +26,20 @@ DIRECTIONS = ("0_to_1", "0_to_-1", "1_to_0", "-1_to_0", "1_to_-1", "-1_to_1")
 ALL_PROCESSES = ("first_order", "second_order", "two_phonon")
 
 
-def drop_a_x_e(manager):
-    """Leave out the computed A x E pairs (as plot_spectral_comparison.drop_a_x_e)."""
-    a, e = {"A1", "A2"}, {"Ex", "Ey"}
-    manager.zfs_tensors_2d = {k: v for k, v in manager.zfs_tensors_2d.items()
-                              if not (set(v["symmetry"]) & a and set(v["symmetry"]) & e)}
-    return manager
+def manager_for(system, scheme, pairs, mirror_projection=None):
+    """ZFSManager of a production package (or full-decont set) with a second-order pair treatment.
 
-
-def manager_for(system, scheme, pairs):
-    """ZFSManager of a production package with a second-order pair treatment.
-
-    pairs: "sqrt" (computed + fill for the rest: production), "computed", "diagonal", "diagonal-sqrt"
-    (diagonal + fill everywhere off the diagonal), "no_axe" (computed without the A x E pairs),
+    Built by spinlabs.pipeline.coupling_manager, as `spinlabs run` builds it: production coupling options
+    (PRODUCTION_COUPLING_OPTIONS), method from the data. ``pairs``: a spinlabs.pipeline.PAIR_MODES treatment
+    ("sqrt" computed + fill for the rest: production; "computed", "diagonal", "diagonal-sqrt", "no_axe") or
     "fill-on-computed" (diagonal + fill, kept on the computed pairs only: the S3 filter, see mask_to_computed).
+    ``mirror_projection``: None for config.MIRROR_PROJECTION. Returns the manager and its convention label.
     """
-    mode = {"no_axe": "computed", "fill-on-computed": "diagonal-sqrt"}.get(pairs, pairs)
-    manager, convention = coupling_manager(C.package(system, scheme), mode)
-    if pairs == "no_axe":
-        drop_a_x_e(manager)
-    return manager, convention
+    mode = "diagonal-sqrt" if pairs == "fill-on-computed" else pairs
+    proj = C.MIRROR_PROJECTION if mirror_projection is None else bool(mirror_projection)
+    manager, _ = pipeline.coupling_manager(raw_zfs_file=C.package(system, scheme), pairs=mode, mirror_projection=proj)
+    raw = manager.raw_data
+    return manager, f"{raw.defect}_{raw.cell_size} step {raw.pert_scale:g}: {manager.displacement}"
 
 
 def mask_to_computed(system, scheme, coupling_npz):
@@ -117,6 +107,7 @@ def pair_coverage(system, scheme):
 
 
 def _key(*parts):
+    parts = (*parts, {"mirror_projection": C.MIRROR_PROJECTION})  # every cache depends on it
     return hashlib.sha1(json.dumps(parts, sort_keys=True, default=str).encode()).hexdigest()[:12]
 
 
@@ -159,46 +150,56 @@ def couplings(system, scheme, pairs=C.PAIRS):
     return {k: d[k] for k in d.files}
 
 
-def rates(system, scheme, pairs=C.PAIRS, nogap=C.NOGAP, sigma=C.SIGMA, direct=C.DIRECT, temps=C.TEMPERATURES):
-    """Directional rates (1/s) per process at ``temps``: {"temperatures", "<process>:<direction>", "debye_C", ...}."""
+def rates(system, scheme, pairs=C.PAIRS, nogap=C.NOGAP, sigma=C.SIGMA, direct=C.DIRECT, temps=C.TEMPERATURES,
+          denoise=False, mirror_projection=None):
+    """Directional rates (1/s) per process at ``temps``: {"temperatures", "<process>:<direction>", "debye_C", ...}.
+
+    ``denoise``: the second-order couplings with the noise of the dataset's runs removed (spinlabs.noise), the
+    other end of the noise band next to the production rates; the measured noise is recorded ("noise_*").
+    ``mirror_projection``: None for config.MIRROR_PROJECTION; False gives the raw second differences (for forward
+    data: with the odd-in-Q truncation error, the other end of M2's band).
+    """
+    proj = C.MIRROR_PROJECTION if mirror_projection is None else bool(mirror_projection)
     pkg = C.package(system, scheme)
-    key = _key(package_key(system, scheme), pairs, nogap, sigma, direct, list(map(float, temps)))
-    cache = C.CACHE / f"rates_{system}_{scheme}_{pairs}_{'nogap' if nogap else 'gap'}_s{sigma:g}_{direct}_{key}.npz"
+    key = _key(package_key(system, scheme), pairs, nogap, sigma, direct, list(map(float, temps)),
+               *(["denoised"] if denoise else []), *([] if proj == C.MIRROR_PROJECTION else [f"projection {proj}"]))
+    stem = f"rates_{system}_{scheme}_{pairs}_{'nogap' if nogap else 'gap'}_s{sigma:g}_{direct}"
+    cache = C.CACHE / f"{stem}{'_denoised' if denoise else ''}{'' if proj else '_unprojected'}_{key}.npz"
     if cache.exists():
         d = np.load(cache, allow_pickle=True)
         return {k: d[k] for k in d.files}
-    print(f"  computing rates: {system} {scheme} pairs={pairs} nogap={nogap} sigma={sigma:g} direct={direct}")
-    manager, convention = manager_for(system, scheme, pairs)
+    print(f"  computing rates: {system} {scheme} pairs={pairs} nogap={nogap} sigma={sigma:g} direct={direct}"
+          + (" (noise removed)" if denoise else "") + ("" if proj else " (no mirror projection)"))
+    manager, convention = manager_for(system, scheme, pairs, mirror_projection=proj)
     out = {"temperatures": np.asarray(temps, dtype=float), "convention": convention, "package": str(pkg)}
     with tempfile.TemporaryDirectory() as tmp:
         base = str(Path(tmp) / "coupling")
         manager.process_both_orders(output_filename=base)
+        if denoise:
+            from spinlabs.noise import denoised_couplings, second_difference_noise
+
+            noise = second_difference_noise(manager)
+            np.savez(f"{base}.npz", **denoised_couplings(manager, dict(np.load(f"{base}.npz", allow_pickle=True)), noise))
+            out.update(noise_out_of_plane_mhz=noise.out_of_plane, noise_in_plane_mhz=noise.in_plane,
+                       noise_from_e_modes=noise.from_e_modes)
+            print(f"    noise of the second differences: out-of-plane {noise.out_of_plane:.2g} MHz, "
+                  f"in-plane {noise.in_plane:.2g} MHz")
         if pairs == "fill-on-computed":
             kept, total = mask_to_computed(system, scheme, f"{base}.npz")
             out["pairs_kept"] = f"{kept} of {total}"
             print(f"    fill kept on {kept} of {total} pairs (the computed ones)")
-        calc = TransitionRate(f"{base}.npz")
-        calc.data_2ph = calc.data  # the coupling file carries the second-order coefficients
-        if direct == "debye":
-            fit = calc.set_debye_from_spectrum(manager.spectrum)
-            out["debye_C"] = fit.C
-        else:
-            calc.direct = direct
-        omega, j0pm, jpm, j00 = calc.get_spectral_density(res=0.02, sigma=sigma)
         groups = (manager.spectrum.deg_groups or []) if nogap else None
-        lines = calc.get_line_spectral_density(sigma, degenerate_groups=groups)
-        zfs = calc.data["zfs"] / CONSTANTS["meV2J"]
-        out["zfs_mev"] = float(zfs)
-        out["spin"] = calc.spin
-        if calc.debye_fit_pm is not None:
-            out["debye_C_pm"] = calc.debye_fit_pm.C
-        series = {f"{p}:{d}": [] for p in ALL_PROCESSES for d in calc.directions}  # DIRECTIONS for S = 1
-        for T in temps:
-            calc.compute_transition_rates(T, omega, j0pm, jpm, j00, zfs)
-            calc.compute_two_phonon_rates(T, lines)
-            for p in ALL_PROCESSES:
-                for d in calc.directions:
-                    series[f"{p}:{d}"].append(float(calc.transition_rate[p].get(d, 0.0)))
+        rs = pipeline.rate_series(f"{base}.npz", temps, sigma=sigma, has_second_order=True, degenerate_groups=groups,
+                                  direct=direct, spectrum=manager.spectrum)
+        if len(rs.temperatures) != len(temps):
+            raise SystemExit(f"{system} {scheme}: rates missing at some temperatures")
+        if direct == "debye":
+            out["debye_C"] = rs.debye_C
+        out["zfs_mev"] = rs.zfs_mev
+        out["spin"] = rs.spin
+        if rs.debye_C_pm is not None:
+            out["debye_C_pm"] = rs.debye_C_pm
+        series = {f"{p}:{d}": rs.rates[p][d] for p in ALL_PROCESSES for d in rs.directions}  # DIRECTIONS for S = 1
     out.update({k: np.asarray(v) for k, v in series.items()})
     C.CACHE.mkdir(parents=True, exist_ok=True)
     np.savez(cache, **out)
@@ -212,18 +213,12 @@ def directional(rate_data, processes=C.PROCESSES):
 
 
 def t1_details(temps, directional_rates, state, spin=1.0):
-    """T1 (s) by the population fit, T1 by the eigenvalue, and the source per temperature
-    (RelaxationDynamics.get_T1_fit_details: "fit", "eigenvalue" fallback, or "none" at 0 K).
+    """T1 (s) by the population fit, T1 by the eigenvalue, and the source per temperature: spinlabs.pipeline.t1_details,
+    the T1 solver of `spinlabs run` ("fit", "eigenvalue" fallback, or "none" at 0 K).
 
     ``state`` is a state of ``spin`` (spinlabs.relaxation_dynamics.init_populations: ms_0, ms_1 for S = 1;
     ms_pm1_2, ms_pm3_2 for S = 3/2, fitted to the doublet's summed population)."""
-    with tempfile.TemporaryDirectory() as tmp:
-        path = Path(tmp) / "directional.npz"
-        np.savez(path, temperatures=np.asarray(temps, dtype=float), spin=float(spin), **directional_rates)
-        dyn = RelaxationDynamics(init_populations(spin)[state], str(path))
-        rows = [dyn.get_T1_fit_details(temp_index=i) for i in range(len(dyn.temperatures))]
-    t1, t1_eig, source = zip(*rows)
-    return np.asarray(t1, dtype=float), np.asarray(t1_eig, dtype=float), list(source)
+    return pipeline.t1_details(temps, directional_rates, state, spin)
 
 
 def cambria_rates(temps, p=C.CAMBRIA):

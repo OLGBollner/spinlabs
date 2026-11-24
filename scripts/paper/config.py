@@ -26,8 +26,11 @@ SIGMA = 3.5  # meV, Gaussian broadening of the spectral functions, all systems
 DIRECT = "debye"  # one-phonon rate: J(E) = C E^3, C fitted to the folded acoustic modes (spinlabs.debye)
 NOGAP = True  # two-phonon: zero-gap pairs left out by symmetry ((l, l) and Ex-Ey partners), no energy tolerance
 # Second-order pairs: computed where a package has them, sqrt(V_ii V_jj) fill (E x E: V_T; A x E:
-# sqrt(V00(a,a) V_T(e,e))) for the rest. "sqrt" in plot_t1_comparison.coupling_manager.
+# sqrt(V00(a,a) V_T(e,e))) for the rest. "sqrt" in spinlabs.pipeline.PAIR_MODES.
 PAIRS = "sqrt"
+# Mirror projection of the diagonal second differences (as `spinlabs run`): forward data loses the odd-in-Q
+# truncation error of mirror-odd modes (partners inherit), central data the noise of aligned modes.
+MIRROR_PROJECTION = True
 PROCESSES = ("first_order", "two_phonon")  # direct + two-phonon; the first-order Raman term (second_order) is out
 TEMPERATURES = np.arange(0.0, 601.0, 5.0)  # K
 PHONON_LIMITED_K = 125.0  # NV-: onset of the phonon-limited regime (Cambria et al. 2023), dashed line in M2
@@ -44,6 +47,10 @@ CAMBRIA = dict(A1=0.0700e3, B1=0.910e3, Delta1=62.5, A2=0.169e3, B2=2.94e3, Delt
 
 # ------------------------------------------------------------------ systems and packages
 SCHEMES = {"AO": "AO", "UO": "UO"}  # all orbitals / unpaired orbitals (spinlabs.methods calc_method)
+# Every scheme a package can be given under: FD is the full spin decontamination (calc_method full_decont), a folder
+# of per-sublevel packages that loads as one dataset. All schemes go through the same loading and analysis code
+# (spinlabs.pipeline.coupling_manager, rate_series, t1_details); only how the D tensors are built differs.
+ALL_SCHEMES = {**SCHEMES, "FD": "full_decont"}
 
 
 # The packages below were written before the rename: their folders and names still say all_bands /
@@ -56,7 +63,8 @@ SYSTEMS = {
     # NV_64 all bands: the 20261029 repackage (unweighted); defect band approx: 20261021 (diagonal pairs only)
     "NV_64": dict(defect="NV", cell=64, step=0.1, label=r"NV$^-$ (64)", packages={
         "AO": _pkg("NV_64", 0.1, "all_bands", "20261029"),
-        "UO": _pkg("NV_64", 0.1, "defect_band_approx", "20261021")}),
+        "UO": _pkg("NV_64", 0.1, "defect_band_approx", "20261021"),
+        "FD": "NV_64/pert_0.2/full_decont/20261119"}),  # step 0.2, normalized, central: a folder of sublevels
     "NV_512": dict(defect="NV", cell=512, step=0.05, label=r"NV$^-$ (512)", packages={
         "AO": _pkg("NV_512", 0.05, "all_bands", "20261030"),
         "UO": _pkg("NV_512", 0.05, "defect_band_approx", "20261030")}),
@@ -96,7 +104,7 @@ PAIR_LABELS = {  # second-order pair treatments of S2, S4, S5
 
 # ------------------------------------------------------------------ style: one colour per quantity, everywhere
 COLORS = {
-    "AO": "#2a78d6", "UO": "#eb6834",  # ZFS schemes
+    "AO": "#2a78d6", "UO": "#eb6834", "FD": "#2f9e44",  # ZFS schemes
     "cambria": "#2b2b2b",  # analytical model
     "V00": "#0f766e", "Vpm": "#7048e8", "V0pm": "#c9a227",  # coupling channels
     "computed": "#0b0b0b", "fill": "#1baf7a", "diagonal-sqrt": "#8a5a2b", "diagonal": "#898781",
@@ -144,6 +152,21 @@ def panel_letter(ax, k, x=-0.02, y=1.02, **kw):
     """(a), (b), ... above the top-left corner of the axes."""
     ax.text(x, y, f"({'abcdefghijklmnop'[k]})", transform=ax.transAxes, ha="right", va="bottom",
             fontweight="bold", **kw)
+
+
+BAND_ALPHA = 0.18
+BAND_NOTE = ("shaded: the effect of the mirror projection, from each curve (projection on: forward data without the "
+             "odd-in-Q truncation error of the second differences, central data without the mirror-forbidden SCF "
+             "noise) to the same quantity without it (dotted edge; common.rates(mirror_projection=False))")
+
+
+def projection_band(ax, x, y, y_raw, color, ok=None, zorder=1):
+    """Shade from ``y`` (the drawn curve, mirror projection on) to ``y_raw`` (projection off), dotted at y_raw."""
+    m = np.isfinite(y) & np.isfinite(y_raw) & (y > 0) & (y_raw > 0)
+    if ok is not None:
+        m &= ok
+    ax.fill_between(x[m], y[m], y_raw[m], color=color, alpha=BAND_ALPHA, lw=0, zorder=zorder)
+    ax.plot(x[m], y_raw[m], color=color, ls=":", lw=0.8, zorder=zorder)
 
 
 def phonon_limited_line(ax, temperature=PHONON_LIMITED_K, label="phonon-limited"):
