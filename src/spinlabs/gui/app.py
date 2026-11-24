@@ -33,6 +33,7 @@ from spinlabs.gui.catalog import Catalog, Group, Scheme
 from spinlabs.gui.state import GuiState, TabState, load_state, save_state
 from spinlabs.gui.tabs import TabView
 from spinlabs.gui.tooltips import Tooltip
+from spinlabs.gui.widgets import ScrollableFrame
 from spinlabs.logging_utils import get_logger
 
 LOGGER = get_logger(__name__)
@@ -668,8 +669,6 @@ class ConvergenceApp:
         self._build_layout()
         self._build_registry_tab()
         self._build_view_tab()
-        self._build_modes_tab()
-        self._build_advanced_tab()
         self._build_report()
         self.refresh_registry(initial=True)
         self._restore_or_open(paths)
@@ -834,13 +833,9 @@ class ConvergenceApp:
         self.side_notebook = ttk.Notebook(self.sidebar)
         self.side_notebook.pack(fill=tk.BOTH, expand=True, padx=(8, 4), pady=(4, 4))
         self.registry_tab = ttk.Frame(self.side_notebook, style="Card.TFrame", padding=(8, 8))
-        self.view_tab = ttk.Frame(self.side_notebook, style="Card.TFrame", padding=(8, 8))
-        self.modes_tab = ttk.Frame(self.side_notebook, style="Card.TFrame", padding=(8, 8))
-        self.advanced_tab = ttk.Frame(self.side_notebook, style="Card.TFrame", padding=(8, 8))
+        self.view_tab = ttk.Frame(self.side_notebook, style="Card.TFrame", padding=0)
         self.side_notebook.add(self.registry_tab, text="Registry")
         self.side_notebook.add(self.view_tab, text="View")
-        self.side_notebook.add(self.modes_tab, text="Modes")
-        self.side_notebook.add(self.advanced_tab, text="Advanced")
         self.report_frame = ttk.Frame(self.paned, style="Card.TFrame")
         self.paned.add(self.report_frame, height=_REPORT_HEIGHT, stretch="never")
         self.welcome = ttk.Frame(self.content, style="Card.TFrame")
@@ -917,7 +912,11 @@ class ConvergenceApp:
         parent.columnconfigure(1, weight=1)
 
     def _build_view_tab(self) -> None:
-        box = ttk.LabelFrame(self.view_tab, text="Difference scheme")
+        self.view_scroll = ScrollableFrame(self.view_tab, palette=self.palette)
+        self.view_scroll.pack(fill=tk.BOTH, expand=True)
+        content = self.view_scroll.content
+
+        box = ttk.LabelFrame(content, text="Difference scheme")
         box.pack(fill=tk.X, padx=6, pady=4)
         forward = ttk.Checkbutton(box, text="Forward", variable=self.forward_var)
         forward.pack(anchor=tk.W, padx=6, pady=2)
@@ -925,15 +924,17 @@ class ConvergenceApp:
         self.central_check = ttk.Checkbutton(box, text="Central (−Q runs)", variable=self.central_var)
         self.central_check.pack(anchor=tk.W, padx=6, pady=2)
         self._tip(self.central_check, "Central differences from +Q and −Q runs. Needs −Q data; disabled when none is selected.")
-        quality = ttk.LabelFrame(self.view_tab, text="Summary quantity")
+
+        quality = ttk.LabelFrame(content, text="Summary quantity")
         quality.pack(fill=tk.X, padx=6, pady=4)
         self.display_combo = ttk.Combobox(
             quality, textvariable=self.display_var, values=("Norm", "Coupling channels"), state="readonly"
         )
         self.display_combo.pack(fill=tk.X, padx=6, pady=4)
         self._tip(self.display_combo, "Norm shows the usual norm summary. Coupling channels shows V_Δ0, V_Δ±1 and V_Δ±2 separately for every mode.")
-        columns = ttk.LabelFrame(self.view_tab, text="Columns and dates")
-        columns.pack(fill=tk.BOTH, expand=True, padx=6, pady=4)
+
+        columns = ttk.LabelFrame(content, text="Columns and dates")
+        columns.pack(fill=tk.X, padx=6, pady=4)
         self.columns_frame = ttk.Frame(columns, style="Card.TFrame")
         self.columns_frame.pack(fill=tk.X, padx=4, pady=4)
         ttk.Label(columns, text="Active column (Mode detail)", style="Card.TLabel").pack(
@@ -946,6 +947,27 @@ class ConvergenceApp:
             columns, text="Change columns in the Registry tab: select the group, then Open / update.",
             wraplength=320, style="CardMuted.TLabel",
         ).pack(anchor=tk.W, padx=6, pady=(0, 6))
+
+        self._build_modes_section(content)
+
+        self.advanced_toggle = ttk.Button(
+            content, text="Advanced settings  ▸", command=self._toggle_advanced
+        )
+        self.advanced_toggle.pack(fill=tk.X, padx=6, pady=(12, 4))
+        self._tip(self.advanced_toggle, "Open the analysis parameters, Mode-detail flags and phonon-spectrum choice.")
+        self.advanced_frame = ttk.Frame(content, style="Card.TFrame")
+        self._build_advanced_section(self.advanced_frame)
+        self._advanced_visible = False
+
+    def _toggle_advanced(self) -> None:
+        if self._advanced_visible:
+            self.advanced_frame.pack_forget()
+            self.advanced_toggle.configure(text="Advanced settings  ▸")
+        else:
+            self.advanced_frame.pack(fill=tk.X, pady=(0, 6))
+            self.advanced_toggle.configure(text="Advanced settings  ▾")
+        self._advanced_visible = not self._advanced_visible
+        self.view_scroll.refresh()
 
     def _checkbox_image(self, checked: bool) -> tk.PhotoImage:
         """A small flat checkbox that does not depend on the UI font's glyph coverage."""
@@ -964,16 +986,18 @@ class ConvergenceApp:
                 image.put("#005fb8", to=(x, y))
         return image
 
-    def _build_modes_tab(self) -> None:
-        filter_box = ttk.Frame(self.modes_tab, style="Card.TFrame")
-        filter_box.pack(fill=tk.X, pady=(0, 6))
+    def _build_modes_section(self, parent) -> None:
+        section = ttk.LabelFrame(parent, text="Modes")
+        section.pack(fill=tk.X, padx=6, pady=(12, 4))
+        filter_box = ttk.Frame(section, style="Card.TFrame")
+        filter_box.pack(fill=tk.X, padx=4, pady=(2, 6))
         ttk.Label(filter_box, text="Filter", style="CardMuted.TLabel").pack(side=tk.LEFT)
         mode_filter = ttk.Entry(filter_box, textvariable=self.mode_filter)
         mode_filter.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=4)
         self._tip(mode_filter, "Filter the mode list by mode number, symmetry or frequency.")
         self._mode_icons = (self._checkbox_image(False), self._checkbox_image(True))
         self.mode_tree = ttk.Treeview(
-            self.modes_tab, columns=("mode", "sym", "freq"), show=("tree", "headings"), height=14,
+            section, columns=("mode", "sym", "freq"), show=("tree", "headings"), height=10,
             selectmode="browse",
         )
         self.mode_tree.heading("#0", text="Show")
@@ -981,11 +1005,11 @@ class ConvergenceApp:
         for key, title, width in (("mode", "Mode", 55), ("sym", "Sym", 45), ("freq", "freq/meV", 75)):
             self.mode_tree.heading(key, text=title)
             self.mode_tree.column(key, width=width, anchor=tk.W)
-        self.mode_tree.pack(fill=tk.BOTH, expand=True, pady=4)
+        self.mode_tree.pack(fill=tk.X, padx=4, pady=4)
         self._tip(self.mode_tree, "Click the checkbox to include a mode in Summary; click another cell to open that mode in Mode detail.")
         self.mode_tree.bind("<ButtonRelease-1>", self._on_mode_click)
-        buttons = ttk.Frame(self.modes_tab, style="Card.TFrame")
-        buttons.pack(fill=tk.X, pady=(0, 4))
+        buttons = ttk.Frame(section, style="Card.TFrame")
+        buttons.pack(fill=tk.X, padx=4, pady=(0, 4))
         all_button = ttk.Button(buttons, text="All", command=lambda: self._mode_bulk(True))
         all_button.pack(side=tk.LEFT, expand=True, fill=tk.X)
         self._tip(all_button, "Include every mode currently shown by the filter in Summary.")
@@ -996,12 +1020,12 @@ class ConvergenceApp:
         invert_button.pack(side=tk.LEFT, expand=True, fill=tk.X)
         self._tip(invert_button, "Reverse the Summary visibility of the filtered modes.")
         ttk.Label(
-            self.modes_tab, text="Click a row for Mode detail; click Show to toggle Summary visibility.",
-            wraplength=320, style="CardMuted.TLabel",
-        ).pack(anchor=tk.W, pady=(0, 4))
+            section, text="Click a row for Mode detail; click Show to toggle Summary visibility.",
+            wraplength=300, style="CardMuted.TLabel",
+        ).pack(anchor=tk.W, padx=6, pady=(0, 6))
 
-    def _build_advanced_tab(self) -> None:
-        box = ttk.LabelFrame(self.advanced_tab, text="Analysis parameters")
+    def _build_advanced_section(self, parent) -> None:
+        box = ttk.LabelFrame(parent, text="Analysis parameters")
         box.pack(fill=tk.X, padx=6, pady=4)
         rows = [
             ("Noise σ / MHz", self.noise_var, "auto"),
@@ -1026,7 +1050,7 @@ class ConvergenceApp:
                 self._tip(auto, "Estimate σ from the pooled convergence residuals; untick to enter a fixed value.")
                 self.noise_entry = entry
         box.columnconfigure(1, weight=1)
-        flags = ttk.LabelFrame(self.advanced_tab, text="Mode detail")
+        flags = ttk.LabelFrame(parent, text="Mode detail")
         flags.pack(fill=tk.X, padx=6, pady=4)
         drop = ttk.Checkbutton(flags, text="Drop Q=0 anchor from fits", variable=self.drop_anchor_var)
         drop.pack(anchor=tk.W, padx=6, pady=2)
@@ -1037,7 +1061,7 @@ class ConvergenceApp:
         quad = ttk.Checkbutton(flags, text="Quadratic fit", variable=self.quad_var)
         quad.pack(anchor=tk.W, padx=6, pady=2)
         self._tip(quad, "Add the second-order fit values and central d²D/dQ² estimates to Details.")
-        phonon = ttk.LabelFrame(self.advanced_tab, text="Phonon symmetry")
+        phonon = ttk.LabelFrame(parent, text="Phonon symmetry")
         phonon.pack(fill=tk.X, padx=0, pady=(8, 0))
         ttk.Label(
             phonon, text="Full spectrum for labels and frequencies", style="CardMuted.TLabel",
@@ -1049,14 +1073,14 @@ class ConvergenceApp:
         phonon_combo.pack(fill=tk.X, padx=4, pady=(4, 4))
         self._tip(phonon_combo, "Choose the full phonon spectrum used for symmetry labels and frequencies. Auto follows the pack's aligned tag and packaged phonon files.")
         apply_button = ttk.Button(
-            self.advanced_tab, text="Apply", command=self.apply_advanced, style="Accent.TButton"
+            parent, text="Apply", command=self.apply_advanced, style="Accent.TButton"
         )
         apply_button.pack(fill=tk.X, pady=(10, 6))
         self._tip(apply_button, "Apply the advanced settings and the selected phonon spectrum.")
         ttk.Label(
-            self.advanced_tab, text="Defaults match `spinlabs plot convergence`.",
+            parent, text="Defaults match `spinlabs plot convergence`.",
             wraplength=320, style="CardMuted.TLabel",
-        ).pack(anchor=tk.W)
+        ).pack(anchor=tk.W, padx=6, pady=(0, 6))
         self._update_noise_sensitivity()
 
     def _build_report(self) -> None:

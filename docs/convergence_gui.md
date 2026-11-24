@@ -49,7 +49,8 @@ Each tab has nested **Summary** and **Mode detail** views.
 - The mode list shows mode number, symmetry and frequency when a registered
   phonon file provides them. Checkboxes choose which modes appear in Summary;
   All / None / Invert and a text filter are provided. The active mode for Mode
-  detail is independent of the checkbox state.
+  detail is independent of the checkbox state.  View settings, the mode list
+  and the collapsible Advanced settings share one scrollable sidebar tab.
 
 ## Difference schemes and norm view
 
