@@ -161,3 +161,35 @@ def test_sim_folder_without_a_method_is_an_error(folders):
         sim_folder_method(folders)
     with pytest.raises(ValueError, match="pass calc_method"):
         coupling_manager(sim_folder=folders)
+
+
+def test_build_manager_leaves_the_callers_raw_data_alone():
+    raw = _raw(2000.0)
+    raw.displacement = "unweighted"
+    m = pipeline.build_manager(raw, None, displacement="mass_weighted")
+    assert raw.displacement == "unweighted" and m.raw_data.displacement == "mass_weighted"
+
+
+def _unclassifiable(monkeypatch):
+    from spinlabs import symmetry
+    from spinlabs.models import DefectCentreError
+
+    def classify(*args, **kwargs):
+        raise DefectCentreError("no single defect centre (find_defect found: none)")
+
+    monkeypatch.setattr(symmetry, "classify_and_pair", classify)
+
+
+def test_a_manager_refuses_modes_it_cannot_label(tmp_path, monkeypatch):
+    spectrum = PhononSpectrum.load(_phonons(tmp_path / "ph.npz"))
+    spectrum.symmetries = None
+    _unclassifiable(monkeypatch)
+    with pytest.raises(ValueError, match="no symmetry labels and cannot be classified"):
+        pipeline.build_manager(_raw(2000.0), spectrum)
+
+
+def test_a_manager_falls_back_on_stored_labels_without_a_defect_centre(tmp_path, monkeypatch):
+    spectrum = PhononSpectrum.load(_phonons(tmp_path / "ph.npz"))
+    _unclassifiable(monkeypatch)
+    m = pipeline.build_manager(_raw(2000.0), spectrum)
+    assert [str(s) for s in m.spectrum.symmetries] == SYMS

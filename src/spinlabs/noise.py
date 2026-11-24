@@ -17,7 +17,8 @@ larger errors).
 denoised_couplings removes the noise expected in each diagonal coupling in quadrature,
 V -> sqrt(max(V^2 - sigma_V^2, 0)): sigma_V is the noise of the components the coupling is made of, over
 the mode's amplitude q^2; for modes the mirror projection treated (ZFSManager mirror_projection), only the
-allowed component. The filled pairs follow the diagonals (E x E: sqrt(V_ii V_jj); A x E: sqrt(V00_aa V_ee)).
+allowed component. Only the diagonals are corrected: the pairs filled from them (E x E: sqrt(V_ii V_jj);
+A x E: sqrt(V00_aa V_ee)) are refilled from the denoised diagonals, and computed pairs keep their values.
 It is an estimate (the quadrature subtraction assumes noise of this size in every mode), for an error band
 next to the production values, not a replacement for them.
 """
@@ -156,11 +157,16 @@ def mode_amplitudes(manager) -> np.ndarray:
 def denoised_couplings(manager, coupling: dict, noise: SecondOrderNoise | None = None) -> dict:
     """``coupling`` (a coupling npz as a dict, the manager's output) with the noise removed from V2_*.
 
-    Every diagonal coupling loses its expected noise in quadrature; the filled pairs (sqrt(V_ii V_jj)) follow
-    by sqrt(s_i s_j). Off-diagonal pairs the dataset computed keep their values: their own noise is not
-    estimated, and the diagonals' factors do not apply to them. Modes the manager's mirror projection treated
-    carry only the allowed component's noise.
+    Only the diagonal couplings are corrected: each loses its expected noise in quadrature. Modes the
+    manager's mirror projection treated carry only the allowed component's noise. The off-diagonal
+    pairs the dataset computed (manager.computed_pairs) keep their values: their own noise is not
+    estimated. The pairs the manager filled from the diagonal (offdiag_from_diagonal) get no
+    correction of their own: the fill, the last step before the rates, is redone from the denoised
+    diagonals.
     """
+    computed = getattr(manager, "computed_pairs", None)
+    if computed is None:
+        raise ValueError("denoised_couplings needs the manager's computed pairs: run its second order first")
     noise = noise or second_difference_noise(manager)
     labels = [str(s) for s in manager.spectrum.symmetries]
     n = len(labels)
@@ -175,23 +181,18 @@ def denoised_couplings(manager, coupling: dict, noise: SecondOrderNoise | None =
     if stored not in ("J", "MHz"):
         raise ValueError(f"couplings in {stored}: denoised_couplings handles J or MHz")
     to_stored = 1.0 if stored == "J" else 1.0 / CONSTANTS["MHz2J"]
-    scale: dict[str, np.ndarray] = {}
+    out = dict(coupling)
     for channel in ("V2_0_0", "V2_0_pm", "V2_p_m"):
         allowed, forbidden = noise.per_component(channel)
         power = np.array([allowed**2 + (0.0 if k in projected else forbidden**2) for k in range(n)])
         # noise of the coupling (J): sigma in MHz -> J, over q^2; then into the file's unit
         sigma_v = np.where(q > 0, np.sqrt(power) * CONSTANTS["MHz2J"] / np.where(q > 0, q, 1.0) ** 2, 0.0) * to_stored
-        diag = np.abs(np.diag(np.asarray(coupling[channel], dtype=float)))
-        clean = np.sqrt(np.maximum(diag**2 - sigma_v**2, 0.0))
-        scale[channel] = np.where(diag > 0, clean / np.where(diag > 0, diag, 1.0), 1.0)
-    out = dict(coupling)
-    for channel in ("V2_0_pm", "V2_p_m"):  # A modes enter Delta1/Delta2 through their Delta0 (A x E fill)
-        vec = np.where([lab.startswith("A") for lab in labels], scale["V2_0_0"], scale[channel])
-        out[channel] = np.asarray(coupling[channel], dtype=float) * np.sqrt(np.outer(vec, vec))
-    out["V2_0_0"] = np.asarray(coupling["V2_0_0"], dtype=float) * np.sqrt(np.outer(scale["V2_0_0"], scale["V2_0_0"]))
-    computed = [(i, j) for (i, j) in manager.zfs_tensors_2d if i != j]
-    for channel in ("V2_0_0", "V2_0_pm", "V2_p_m"):
-        original = np.asarray(coupling[channel], dtype=float)
-        for i, j in computed:
-            out[channel][i, j], out[channel][j, i] = original[i, j], original[j, i]
+        V = np.array(coupling[channel], dtype=float)
+        diag = np.diag(V)
+        np.fill_diagonal(V, np.sign(diag) * np.sqrt(np.maximum(diag**2 - sigma_v**2, 0.0)))
+        out[channel] = V
+    if getattr(manager, "offdiag_from_diagonal", False):
+        from spinlabs.zfs_manager import fill_offdiag_from_diagonal
+
+        fill_offdiag_from_diagonal(labels, computed, out["V2_0_0"], out["V2_p_m"], out["V2_0_pm"])
     return out

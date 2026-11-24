@@ -22,7 +22,7 @@ from typing import Any, Optional
 import numpy as np
 
 
-from spinlabs.models import PhononSpectrum, check_original_indices
+from spinlabs.models import DefectCentreError, PhononSpectrum, check_original_indices
 from pymatgen.core import Structure
 from pymatgen.symmetry.analyzer import SpacegroupAnalyzer
 
@@ -286,9 +286,12 @@ def classify_and_pair(
     if table:
         try:
             ops = defect_frame_operations(spectrum)
-        except NotImplementedError:  # no C3v frame (another point group): nothing to verify against
+            chars = _mode_characters(spectrum, ops)
+        except (NotImplementedError, SymmetryDetectionError, DefectCentreError) as exc:
+            # No C3v frame (another point group) or no single defect centre: nothing to verify the
+            # stored labels against, so they are kept unverified (sym_check stays None).
+            LOGGER.debug(f"stored symmetry labels not verified: {exc}")
             return labels, deg_groups
-        chars = _mode_characters(spectrum, ops)
         spectrum.sym_check = verify_deg_groups(chars, labels, deg_groups, table)
     return labels, deg_groups
 
@@ -664,7 +667,8 @@ def filter_degenerate_partners(
     (align_degenerate_pairs) the surviving member is the one odd under the
     alignment mirror (sigma_v2, ALIGN_MIRROR): the one whose forward second
     difference the mirror projection can clean; a set without exactly one
-    such member raises ValueError. Otherwise it is the one with the
+    such member raises ValueError, as does an aligned spectrum without a
+    stored frame. Otherwise it is the one with the
     lexicographically smallest irrep label (for C3v the legacy keep-all-Ex
     rule, since 'Ex' < 'Ey'). The two agree on aligned C3v sets: the
     sigma_v2-odd partner has chi(sigma_v1) = +1/2 and is the Ex.
@@ -674,6 +678,14 @@ def filter_degenerate_partners(
     reduced, the indices are mapped through so they keep pointing at the
     original DFT run positions.
     """
+    if spectrum.aligned and getattr(spectrum, "frame", None) is None:
+        # The alignment mirror is sigma_v2 of the frame the alignment was made in; a frame recomputed
+        # from the structure can be another of the three mirrors (NV in a cubic cell), under which no
+        # partner is odd. Checked before classify_and_pair, which would store the recomputed frame.
+        raise ValueError(
+            "aligned phonon spectrum has no stored defect frame, so its alignment mirror is unknown; "
+            "stamp it: scripts/stamp_phonon_frames.py <folder>"
+        )
     labels, deg_groups = classify_and_pair(spectrum, tol_mev=tol_mev, symprec=symprec)
     parity = _alignment_parities(spectrum) if spectrum.aligned else None
     drop: set[int] = set()
@@ -720,7 +732,8 @@ def filter_degenerate_partners(
 
 
 def _alignment_parities(spectrum) -> np.ndarray:
-    """<e|M e> / <e|e> of every mode under the alignment mirror M (sigma_v2, ALIGN_MIRROR): +-1 when aligned."""
+    """<e|M e> / <e|e> of every mode under the alignment mirror M (sigma_v2, ALIGN_MIRROR): +-1 when aligned.
+"""
     M = [defect_frame_operations(spectrum)[ALIGN_MIRROR]]
     chars = np.real(_mode_characters(spectrum, M))[:, 0]
     eigs = np.asarray(spectrum.eigenvectors, dtype=float)

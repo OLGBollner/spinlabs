@@ -17,6 +17,10 @@ from spinlabs.logging_utils import get_logger
 
 LOGGER = get_logger(__name__)
 
+
+class DefectCentreError(ValueError):
+    """The structure has no single defect to centre the symmetry analysis on (PhononSpectrum.defect_centre)."""
+
 # PhononSpectrum.defect_centre per structure (lattice, positions, species): the centre, or the
 # ValueError raised when there is no single one.
 _DEFECT_CENTRES: dict[tuple, np.ndarray | ValueError] = {}
@@ -380,10 +384,12 @@ class PhononSpectrum:
                 # Structure too degenerate for spglib (synthetic test data): fall back to the
                 # legacy pattern-based C3v analyzer.
                 self.analyze_c3v_symmetry()
-            except (NotImplementedError, ValueError) as exc:
-                # A real structure the classifier cannot handle (no character table for its point
-                # group, no single defect centre): leave the modes unlabelled rather than guess.
-                LOGGER.warning(f"phonon modes not classified by symmetry: {exc}")
+            except Exception as exc:
+                # A real structure the classifier cannot handle (no character table for its point group,
+                # no single defect centre), or a classifier error: leave the modes unlabelled rather than
+                # guess. Parsing still works (frequencies, plots); ZFSManager reclassifies and refuses a
+                # spectrum it cannot label, so no coupling is computed from unlabelled modes.
+                LOGGER.warning(f"phonon modes not classified by symmetry ({type(exc).__name__}: {exc})")
         if self.e_pair_complete is None and self.symmetries is not None and len(self.frequencies_mev) > 0:
             self.check_e_pair_completeness()
         if self.original_indices is None:
@@ -840,8 +846,8 @@ class PhononSpectrum:
 
         For a defect with a vacancy (NV, ClV, the divacancy, V_Si) that is the vacancy: the centroid of
         the under-coordinated atoms around it, as find_defect reports it, not an atom substituted next
-        to it. Without a vacancy, the single defect find_defect finds. Raises ValueError when there is
-        no defect, or no single one to choose.
+        to it. Without a vacancy, the single defect find_defect finds. Raises DefectCentreError (a
+        ValueError) when there is no defect, or no single one to choose.
         """
         from spinlabs.vasp.structures import find_defect, spectrum_structure
 
@@ -858,12 +864,12 @@ class PhononSpectrum:
             chosen = vacancies or defects
             if len(chosen) != 1:
                 found = ", ".join(sorted(d.defect_class for d in defects)) or "none"
-                _DEFECT_CENTRES[key] = ValueError(f"no single defect centre (find_defect found: {found})")
+                _DEFECT_CENTRES[key] = DefectCentreError(f"no single defect centre (find_defect found: {found})")
             else:
                 _DEFECT_CENTRES[key] = np.asarray(chosen[0].frac_coords, dtype=float)
         centre = _DEFECT_CENTRES[key]
-        if isinstance(centre, ValueError):
-            raise ValueError(str(centre))
+        if isinstance(centre, DefectCentreError):
+            raise DefectCentreError(str(centre))
         return centre.copy()
 
     def defect_distances(self) -> np.ndarray:

@@ -13,7 +13,7 @@ import numpy as np
 import pytest
 from pymatgen.core import Lattice, Structure
 
-from spinlabs.models import PhononSpectrum
+from spinlabs.models import DefectCentreError, PhononSpectrum
 from spinlabs.parsers import parse_phonon_npz
 from spinlabs.symmetry import (
     ALIGN_MIRROR,
@@ -136,3 +136,26 @@ def test_aligned_flag_on_unaligned_pairs_raises(nv64):
     unaligned.aligned = True  # claims alignment its pairs do not have
     with pytest.raises(ValueError, match="odd under the alignment mirror"):
         filter_degenerate_partners(unaligned)
+
+
+def test_aligned_spectrum_without_a_stored_frame_is_refused(nv64):
+    # a recomputed frame can be another of the three mirrors, under which no aligned partner is odd
+    spec = replace(nv64)
+    classify_and_pair(spec)
+    aligned = align_degenerate_pairs(symmetrize_degenerate_groups(spec))
+    unstamped = replace(aligned, frame=None)
+    unstamped.aligned = True
+    with pytest.raises(ValueError, match="no stored defect frame"):
+        filter_degenerate_partners(unstamped)
+
+
+def test_stored_labels_are_kept_unverified_without_a_defect_centre(nv64, monkeypatch):
+    def no_centre(self):
+        raise DefectCentreError("no single defect centre (find_defect found: none)")
+
+    monkeypatch.setattr(PhononSpectrum, "defect_centre", no_centre)
+    spec = replace(nv64)
+    spec.sym_check = None
+    labels, groups = classify_and_pair(spec)
+    assert labels == list(nv64.symmetries) and groups
+    assert spec.sym_check is None
