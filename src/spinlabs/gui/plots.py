@@ -148,8 +148,11 @@ def build_norm_summary_figure(
         2, len(columns), figsize=figsize or (max(7.5, 7.5 * len(columns)), 9.5), squeeze=False,
         sharex="col", sharey="row", dpi=dpi,
     )
+    # Colour by the mode's place among every mode known to the packs, not by
+    # the currently visible subset: filtering modes must not recolour them.
     all_modes: set[int] = set()
     for column in columns:
+        all_modes.update(int(mode) for mode in column.modes)
         for result in (column.forward, column.central):
             if result is not None:
                 all_modes.update(int(row[0]) for row in result.rows)
@@ -329,8 +332,11 @@ def build_channel_summary_figure(
         2, len(columns), figsize=figsize or (max(7.5, 7.5 * len(columns)), 9.5), squeeze=False,
         sharex="col", sharey="row", dpi=dpi,
     )
-    all_modes = sorted({mode.mode for column in columns for mode in column.analysis.modes})
-    global_color = {mode: mode_color(i) for i, mode in enumerate(all_modes)}
+    all_modes: set[int] = set()
+    for column in columns:
+        all_modes.update(int(mode) for mode in column.modes)
+        all_modes.update(mode.mode for mode in column.analysis.modes)
+    global_color = {mode: mode_color(i) for i, mode in enumerate(sorted(all_modes))}
     for col, column in enumerate(columns):
         first_ax, second_ax = axes[:, col]
         analysis = column.analysis

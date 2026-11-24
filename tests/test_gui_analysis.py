@@ -140,6 +140,34 @@ def _legend_texts(figure):
     return texts
 
 
+def _mode_colours(figure):
+    colours = {}
+    for ax in figure.axes:
+        for legend in ax.get_children():
+            if not isinstance(legend, matplotlib.legend.Legend):
+                continue
+            for text, handle in zip(legend.get_texts(), legend.legend_handles):
+                label = text.get_text()
+                if ":" in label or label.isdigit():
+                    colours[label.split(":")[0]] = handle.get_color()
+    return colours
+
+
+def test_mode_colour_survives_filtering(tmp_path):
+    pack = _save(tmp_path / "NV_512.npz")
+    session = PackSession(pack, "AO", "normalized")
+    modes = {entry.mode: entry for entry in session.modes()}
+    everything = build_norm_summary_figure(
+        [NormColumnPlot("AO", modes, session.norm(set(modes), central=False), None)]
+    )
+    only_one = build_norm_summary_figure(
+        [NormColumnPlot("AO", modes, session.norm({7}, central=False), None)]
+    )
+    all_colours = _mode_colours(everything)
+    one_colours = _mode_colours(only_one)
+    assert one_colours["7"] == all_colours["7"]
+
+
 def test_legends_show_only_the_enabled_scheme(tmp_path):
     pack = _save(tmp_path / "NV_512.npz")
     session = PackSession(pack, "AO", "normalized")
