@@ -139,27 +139,33 @@ class FigureHost(ttk.Frame):
             self._canvas_widget.draw_idle()
 
     def set_figure(self, figure: Figure) -> None:
-        old = self.figure
-        if self._canvas_widget is not None:
-            self._canvas_widget.get_tk_widget().destroy()
-            self._canvas_widget = None
-        if self._toolbar is not None:
-            self._toolbar.destroy()
-            self._toolbar = None
-        self.figure = figure
+        old_figure = self.figure
+        old_canvas = self._canvas_widget
+        old_toolbar = self._toolbar
+
+        # Prepare the replacement before touching the visible canvas: the old
+        # plot stays on screen until the new FigureCanvas has been drawn.
         self._apply_figure_size(figure, forward=False)
         canvas = FigureCanvasTkAgg(figure, master=self.view)
         widget = canvas.get_tk_widget()
-        widget.pack(fill=tk.BOTH, expand=True)
-        self._canvas_widget = canvas
-        self._toolbar = NavigationToolbar2Tk(canvas, self.toolbar_frame, pack_toolbar=False)
-        self._toolbar.update()
-        theme.style_navigation_toolbar(self._toolbar)
-        self._toolbar.pack(side=tk.LEFT, fill=tk.X, expand=True)
         canvas.draw()
+        toolbar = NavigationToolbar2Tk(canvas, self.toolbar_frame, pack_toolbar=False)
+        toolbar.update()
+        theme.style_navigation_toolbar(toolbar)
+
+        if old_canvas is not None:
+            old_canvas.get_tk_widget().destroy()
+        if old_toolbar is not None:
+            old_toolbar.destroy()
+        widget.pack(fill=tk.BOTH, expand=True)
+        toolbar.pack(side=tk.LEFT, fill=tk.X, expand=True)
+
+        self.figure = figure
+        self._canvas_widget = canvas
+        self._toolbar = toolbar
         self._schedule_fit()
-        if old is not None and old is not figure:
-            plt.close(old)
+        if old_figure is not None and old_figure is not figure:
+            plt.close(old_figure)
 
 
 class PackTab(ttk.Frame):
@@ -360,10 +366,14 @@ class PackTab(ttk.Frame):
         view = self.nested.index("current")
         key = self._render_key()
         if key != self._last_render_keys[view]:
-            if view == 1:
-                self.render_mode()
-            else:
-                self.render_summary()
+            self.app.set_busy(True)
+            try:
+                if view == 1:
+                    self.render_mode()
+                else:
+                    self.render_summary()
+            finally:
+                self.app.set_busy(False)
             self._last_render_keys[view] = key
         report_key = (view, key)
         if report_key != self._last_report_key:
@@ -1608,6 +1618,15 @@ class ConvergenceApp:
 
     def set_status(self, text: str) -> None:
         self.status_var.set(text)
+
+    def set_busy(self, busy: bool) -> None:
+        """Show a wait cursor while a new figure is being laid out."""
+        try:
+            self.root.configure(cursor="watch" if busy else "")
+            if busy:
+                self.root.update_idletasks()
+        except tk.TclError:
+            pass
 
     def _toggle_report(self) -> None:
         if self.report_visible.get():

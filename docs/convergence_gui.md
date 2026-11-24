@@ -51,6 +51,10 @@ Each tab has nested **Summary** and **Mode detail** views.
   All / None / Invert and a text filter are provided. The active mode for Mode
   detail is independent of the checkbox state.  View settings, the mode list
   and the collapsible Advanced settings share one scrollable sidebar tab.
+- Changing a setting builds the replacement figure while the current one stays
+  on screen, then swaps canvases once the new figure has been drawn. A watch
+  cursor is shown while the rebuild runs, so the plot does not blink empty and
+  the window does not repaint an intermediate state.
 
 ## Difference schemes and norm view
 
