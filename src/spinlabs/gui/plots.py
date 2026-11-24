@@ -226,7 +226,7 @@ def build_norm_summary_figure(
         second_ax.set_xlabel("|Q| (step size)")
         _norm_legends(first_ax, second_ax, mode_ids, column.modes, col_colors, column)
 
-    fig.subplots_adjust(left=0.075, right=0.995, top=0.92, bottom=0.10, hspace=0.24, wspace=0.16)
+    fig.subplots_adjust(left=0.08, right=0.965, top=0.92, bottom=0.10, hspace=0.24, wspace=0.16)
     return fig
 
 
@@ -363,7 +363,7 @@ def build_channel_summary_figure(
         second_ax.set_ylabel(r"second order $V_{\Delta n}$ (MHz/Q$^2$)")
         second_ax.set_xlabel("|Q| (step size)")
         _channel_legends(first_ax, second_ax, mode_ids, column.modes, col_colors, schemes)
-    fig.subplots_adjust(left=0.075, right=0.995, top=0.92, bottom=0.10, hspace=0.24, wspace=0.16)
+    fig.subplots_adjust(left=0.08, right=0.965, top=0.92, bottom=0.10, hspace=0.24, wspace=0.16)
     return fig
 
 
@@ -692,7 +692,7 @@ def build_mode_figure(
     title = f"mode {mode}: $D_\\lambda$" if not deviation else f"mode {mode}: $D_\\lambda - D_0$"
     fig.suptitle(title + suffix)
     axes[0, 1].legend(fontsize=7)
-    fig.subplots_adjust(left=0.075, right=0.985, top=0.86, bottom=0.10, hspace=0.85, wspace=0.25)
+    fig.subplots_adjust(left=0.085, right=0.955, top=0.86, bottom=0.10, hspace=0.85, wspace=0.25)
     return ModeFigureResult(
         figure=fig, report=report, noise=noise, offset=offset, label=label, warnings=warnings,
         extra_lines=extra_lines, reports=reports,
