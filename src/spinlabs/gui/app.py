@@ -951,7 +951,7 @@ class ConvergenceApp:
         self._build_modes_section(content)
 
         self.advanced_toggle = ttk.Button(
-            content, text="Advanced settings  v", command=self._toggle_advanced
+            content, text="Advanced settings  >", command=self._toggle_advanced
         )
         self.advanced_toggle.pack(fill=tk.X, padx=6, pady=(12, 4))
         self._tip(self.advanced_toggle, "Open the analysis parameters, Mode-detail flags and phonon-spectrum choice.")
@@ -962,10 +962,10 @@ class ConvergenceApp:
     def _toggle_advanced(self) -> None:
         if self._advanced_visible:
             self.advanced_frame.pack_forget()
-            self.advanced_toggle.configure(text="Advanced settings  v")
+            self.advanced_toggle.configure(text="Advanced settings  >")
         else:
             self.advanced_frame.pack(fill=tk.X, pady=(0, 6))
-            self.advanced_toggle.configure(text="Advanced settings  ^")
+            self.advanced_toggle.configure(text="Advanced settings  v")
         self._advanced_visible = not self._advanced_visible
         self.view_scroll.refresh()
 
