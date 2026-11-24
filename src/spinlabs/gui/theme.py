@@ -42,7 +42,7 @@ class Palette:
     header_muted: str = "#94a3b8"
     selected: str = "#cfe4fb"
     row_alt: str = "#f8fafc"
-    danger: str = "#b42318"
+    danger: str = "#d92d20"
 
 
 PALETTE = Palette()

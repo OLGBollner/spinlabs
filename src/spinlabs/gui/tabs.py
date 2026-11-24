@@ -77,9 +77,9 @@ class TabView(ttk.Frame):
         for widget in (cell, inner, label):
             widget.bind("<Button-1>", lambda _e, f=frame: self.select(f))
         close.bind("<Button-1>", lambda e, f=frame: self._close_event(e, f))
-        for widget in (cell, inner, label, close):
-            widget.bind("<Enter>", lambda _e, tab=entry: self._set_close_colour(tab, True))
-            widget.bind("<Leave>", lambda _e, tab=entry: self._set_close_colour(tab, False))
+        # Only the close glyph itself reacts; hovering the title must not colour it.
+        close.bind("<Enter>", lambda _e, tab=entry: self._set_close_colour(tab, True))
+        close.bind("<Leave>", lambda _e, tab=entry: self._set_close_colour(tab, False))
         self._style(entry, False)
         if self.current is None:
             self.select(frame)
