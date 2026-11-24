@@ -60,6 +60,7 @@ class ColumnState:
     scheme: Scheme
     date: str
     session: PackSession
+    plot_label: str = ""
 
     @property
     def label(self) -> str:
@@ -233,7 +234,12 @@ class PackTab(ttk.Frame):
                     item.path, scheme.label, self.group.displacement, self.mode_cache,
                     phonon_preference=self.phonon_preference,
                 )
-            columns.append(ColumnState(scheme, item.date, session))
+            columns.append(
+                ColumnState(
+                    scheme, item.date, session,
+                    f"{self.group.defect}_{self.group.cell} {scheme.label}".strip(),
+                )
+            )
         self.columns = columns
         entries: dict[int, ModeEntry] = {}
         for column in columns:
@@ -383,7 +389,7 @@ class PackTab(ttk.Frame):
         if self.display == "channels":
             columns = [
                 plots.ChannelColumnPlot(
-                    col.label, self._mode_entries, self._channels(col), self._column_note(col)
+                    col.plot_label, self._mode_entries, self._channels(col), self._column_note(col)
                 )
                 for col in self.columns
             ]
@@ -394,7 +400,7 @@ class PackTab(ttk.Frame):
             )
         columns = [
             plots.NormColumnPlot(
-                col.label, self._mode_entries,
+                col.plot_label, self._mode_entries,
                 self._norm(col, False) if "forward" in schemes else None,
                 self._norm(col, True) if "central" in schemes else None,
                 self._column_note(col),
@@ -455,7 +461,7 @@ class PackTab(ttk.Frame):
         ]
         for column in self.columns:
             lines.append("")
-            lines.append(f"column: {column.label}  ({column.path})")
+            lines.append(f"column: {column.plot_label}  ({column.path})")
             phonon = column.session.phonon_path
             if phonon is not None:
                 lines.append(f"  phonon: {phonon}")
@@ -539,7 +545,7 @@ class PackTab(ttk.Frame):
                     if not report.next2_resolved:
                         flags.append("2nd upper bound")
                     rows.append({
-                        "column": column.label, "scheme": scheme, "mode": str(int(mode)),
+                        "column": column.plot_label, "scheme": scheme, "mode": str(int(mode)),
                         "sym": entry.symmetry or "", "freq": _fmt(entry.frequency, 3), "b": _fmt(report.b),
                         "c": _fmt(2 * report.c), "lo1": _fmt(report.q_lo1), "hi1": _fmt(report.q_hi1),
                         "lo2": _fmt(report.q_lo2), "hi2": _fmt(report.q_hi2), "flags": ", ".join(flags),
@@ -574,7 +580,7 @@ class PackTab(ttk.Frame):
                             if not window.upper_known:
                                 flags.append("upper bound")
                             rows.append({
-                                "column": column.label, "mode": str(mode.mode), "sym": entry.symmetry or "",
+                                "column": column.plot_label, "mode": str(mode.mode), "sym": entry.symmetry or "",
                                 "freq": _fmt(entry.frequency, 3),
                                 "order": "first" if order == 1 else "second", "channel": CHANNEL_NAMES[channel],
                                 "scheme": scheme, "q0": _fmt(series.q0), "lo": _fmt(window.q_lo),

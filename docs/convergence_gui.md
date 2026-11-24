@@ -65,6 +65,9 @@ Each tab has nested **Summary** and **Mode detail** views.
 - The **Norm** view uses exactly the current summary's values: first order
   `||D(Q) − D₀|| / Q` and second order `||D(2Q) − 2D(Q) + D₀|| / Q²`, or the
   central equivalents. The norm is over the five traceless tensor parts.
+  Column titles use the CLI's `<defect>_<cell> <scheme>` form, and the legends
+  and marker shapes match the CLI summary for a single scheme; a distinct open
+  marker is used only when Forward and Central are overlaid.
   Safe bands, the common |Q| window and the grey error curve are the current
   norm-based quantities. The GUI extends the CLI's six-colour palette so every
   selected mode can be shown, and draws central points with distinct diamond /

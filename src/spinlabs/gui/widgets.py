@@ -47,18 +47,19 @@ class ScrollableFrame(ttk.Frame):
             pass
 
     def _on_wheel(self, event) -> None:
+        # A bounds test avoids winfo_containing(): Tk's file dialogs are
+        # internal toplevels whose widget names are not in Tkinter's cache and
+        # nametowidget() raises KeyError when the wheel is used over them.
         try:
-            widget = self.winfo_containing(event.x_root, event.y_root)
-        except (tk.TclError, AttributeError):
+            left, top = self.winfo_rootx(), self.winfo_rooty()
+            right, bottom = left + self.winfo_width(), top + self.winfo_height()
+        except tk.TclError:
             return
-        if widget is None:
+        if not (left <= event.x_root < right and top <= event.y_root < bottom):
             return
-        # Only scroll when the pointer is inside this pane.
-        path = str(widget)
-        if path == str(self) or path.startswith(str(self) + "."):
-            if getattr(event, "num", None) == 4:
-                self.canvas.yview_scroll(-1, "units")
-            elif getattr(event, "num", None) == 5:
-                self.canvas.yview_scroll(1, "units")
-            elif getattr(event, "delta", 0):
-                self.canvas.yview_scroll(-1 if event.delta > 0 else 1, "units")
+        if getattr(event, "num", None) == 4:
+            self.canvas.yview_scroll(-1, "units")
+        elif getattr(event, "num", None) == 5:
+            self.canvas.yview_scroll(1, "units")
+        elif getattr(event, "delta", 0):
+            self.canvas.yview_scroll(-1 if event.delta > 0 else 1, "units")

@@ -159,6 +159,9 @@ def build_norm_summary_figure(
         forward_rows = _rows_by_mode(column.forward.rows) if column.forward is not None else {}
         central_rows = _rows_by_mode(column.central.rows) if column.central is not None else {}
         mode_ids = sorted(set(forward_rows) | set(central_rows))
+        has_forward = bool(forward_rows)
+        has_central = bool(central_rows)
+        both = has_forward and has_central
         color_of = {mode: global_color.get(mode, mode_color(0)) for mode in mode_ids}
         col_colors = [color_of[mode] for mode in mode_ids]
         steps = _steps_of([*forward_rows.values(), *central_rows.values()])
@@ -186,17 +189,25 @@ def build_norm_summary_figure(
                     first_ax.axhline(report.b, color=color, lw=1, alpha=0.7 * a1, ls="-")
                     second_ax.axhline(2 * report.c, color=color, lw=1, alpha=0.7 * a2, ls="-")
                 else:
-                    first_ax.plot(first[:, 0], first[:, 1], marker=_CENTRAL_MARKER["o"], ls="", color=color,
-                                  mfc="white", mec=color, mew=1.2, ms=6, alpha=a1)
-                    second_ax.plot(second[:, 0], second[:, 1], marker=_CENTRAL_MARKER["s"], ls="", color=color,
-                                   mfc="white", mec=color, mew=1.2, ms=6, alpha=a2)
-                    first_ax.axhline(report.b, color=color, lw=1, alpha=0.5 * a1, ls="--")
-                    second_ax.axhline(2 * report.c, color=color, lw=1, alpha=0.5 * a2, ls="--")
+                    # With only one scheme, keep the CLI's row markers and fill;
+                    # with both overlaid, use a distinct open marker.
+                    marker1 = _CENTRAL_MARKER["o"] if both else "o"
+                    marker2 = _CENTRAL_MARKER["s"] if both else "s"
+                    fill = "white" if both else color
+                    first_ax.plot(first[:, 0], first[:, 1], marker=marker1, ls="", color=color,
+                                  mfc=fill, mec=color, mew=1.2, ms=6, alpha=a1)
+                    second_ax.plot(second[:, 0], second[:, 1], marker=marker2, ls="", color=color,
+                                   mfc=fill, mec=color, mew=1.2, ms=6, alpha=a2)
+                    first_ax.axhline(report.b, color=color, lw=1, alpha=0.7 * a1,
+                                     ls="--" if both else "-")
+                    second_ax.axhline(2 * report.c, color=color, lw=1, alpha=0.7 * a2,
+                                       ls="--" if both else "-")
 
-        # The grey error curve: forward solid, central dotted.
+        # The grey error curve: forward dashed, central dotted only when both
+        # schemes share an axis; a single central scheme matches the CLI dash.
         for scheme, result, style in (
             ("forward", column.forward, "--"),
-            ("central", column.central, ":"),
+            ("central", column.central, ":" if both else "--"),
         ):
             if result is None or not np.isfinite(result.sigma):
                 continue
@@ -222,8 +233,15 @@ def build_norm_summary_figure(
         _log_axes(second_ax, q, steps)
         first_ax.set_title(f"{column.label}: σ = {_sigma_text(column)}, D0 offset {_offset_text(column)}",
                            fontsize=11)
-        first_ax.set_ylabel(r"first order $\|D(Q) - D_0\| / Q$ (MHz/Q)")
-        second_ax.set_ylabel(r"second order $\|D(2Q) - 2D(Q) + D_0\| / Q^2$ (MHz/Q$^2$)")
+        if has_central and not has_forward:
+            first_ax.set_ylabel(r"first order, central $\|D(Q) - D(-Q)\| / 2Q$ (MHz/Q)")
+            second_ax.set_ylabel(r"second order, central $\|D(Q) + D(-Q) - 2D_0\| / Q^2$ (MHz/Q$^2$)")
+        elif both:
+            first_ax.set_ylabel(r"first order finite difference (MHz/Q)")
+            second_ax.set_ylabel(r"second order finite difference (MHz/Q$^2$)")
+        else:
+            first_ax.set_ylabel(r"first order $\|D(Q) - D_0\| / Q$ (MHz/Q)")
+            second_ax.set_ylabel(r"second order $\|D(2Q) - 2D(Q) + D_0\| / Q^2$ (MHz/Q$^2$)")
         second_ax.set_xlabel("|Q| (step size)")
         _norm_legends(first_ax, second_ax, mode_ids, column.modes, col_colors, column)
 
@@ -249,23 +267,43 @@ def _norm_legends(ax, second_ax, mode_ids, modes, colors, column: NormColumnPlot
     ax.add_artist(mode_legend)
     forward = column.forward is not None and bool(column.forward.rows)
     central = column.central is not None and bool(column.central.rows)
-    handles = []
+    both = forward and central
+    first_handles: list[Line2D] = []
+    second_handles: list[Line2D] = []
     if forward:
-        handles += [
+        err_label = "forward error incl. D0 offset" if both else "error incl. D0 offset"
+        first_handles += [
             Line2D([], [], marker="o", ls="", color="0.35", mfc="0.35", label="+Q"),
             Line2D([], [], marker="o", ls="", color="0.35", mfc="white", label="−Q"),
-            Line2D([], [], ls="-", color="0.35", label="fit, Q → 0"),
-            Line2D([], [], ls="--", color="0.35", label="forward error"),
+            Line2D([], [], ls="-", color="0.35", label="b (fit, Q → 0)"),
+            Line2D([], [], ls="--", color="0.35", label=err_label),
+        ]
+        second_handles += [
+            Line2D([], [], marker="s", ls="", color="0.35", mfc="0.35", label="+Q"),
+            Line2D([], [], marker="s", ls="", color="0.35", mfc="white", label="−Q"),
+            Line2D([], [], ls="-", color="0.35", label="2c (fit, Q → 0)"),
+            Line2D([], [], ls="--", color="0.35", label=err_label),
         ]
     if central:
-        handles += [
-            Line2D([], [], marker=_CENTRAL_MARKER["o"], ls="", color="0.35", mfc="white",
-                   label="central"),
-            Line2D([], [], ls="--", color="0.35", label="central fit, Q → 0"),
-            Line2D([], [], ls=":", color="0.35", label="central error"),
+        marker1 = _CENTRAL_MARKER["o"] if both else "o"
+        marker2 = _CENTRAL_MARKER["s"] if both else "s"
+        fill = "white" if both else "0.35"
+        err_label = "central error incl. D0 offset" if both else "error incl. D0 offset"
+        first_handles += [
+            Line2D([], [], marker=marker1, ls="", color="0.35", mfc=fill, label="central (±Q)"),
+            Line2D([], [], ls="--" if both else "-", color="0.35", label="b (quartic fit, Q → 0)"),
+            Line2D([], [], ls=":" if both else "--", color="0.35", label=err_label),
         ]
-    if handles:
-        ax.legend(handles=handles, loc="lower left", fontsize=8)
+        second_handles += [
+            Line2D([], [], marker=marker2, ls="", color="0.35", mfc=fill, label="central (±Q)"),
+            Line2D([], [], ls="--" if both else "-", color="0.35", label="2c (quartic fit, Q → 0)"),
+            Line2D([], [], ls=":" if both else "--", color="0.35", label=err_label),
+        ]
+    if first_handles:
+        ax.legend(handles=first_handles, loc="lower left", fontsize=8)
+    if second_handles:
+        second_ax.legend(handles=second_handles, loc="lower left", fontsize=8)
+
 
 
 def build_channel_summary_figure(
