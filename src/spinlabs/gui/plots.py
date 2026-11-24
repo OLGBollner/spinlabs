@@ -250,7 +250,7 @@ def build_norm_summary_figure(
     if canonical:
         fig.tight_layout()
     else:
-        fig.subplots_adjust(left=0.08, right=0.965, top=0.92, bottom=0.10, hspace=0.24, wspace=0.16)
+        fig.subplots_adjust(left=0.08, right=0.985, top=0.92, bottom=0.10, hspace=0.24, wspace=0.06)
     return fig
 
 
@@ -420,7 +420,7 @@ def build_channel_summary_figure(
     if canonical:
         fig.tight_layout()
     else:
-        fig.subplots_adjust(left=0.08, right=0.965, top=0.92, bottom=0.10, hspace=0.24, wspace=0.16)
+        fig.subplots_adjust(left=0.08, right=0.985, top=0.92, bottom=0.10, hspace=0.24, wspace=0.06)
     return fig
 
 
