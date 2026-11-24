@@ -186,7 +186,9 @@ def _run(args: argparse.Namespace) -> None:
     for defect_folder in defect_folders:
         found = _scan_raw(args, defect_folder, _methods_for(defect_folder, args.method))
         scanned.extend(found)
-        phonon = _find_phonon_npz(defect_folder)
+        # data displaced along aligned modes is analysed with the aligned spectrum its job scripts name
+        aligned_only = bool(found) and all(s.phonon is not None and s.aligned for s in found)
+        phonon = _find_phonon_npz(defect_folder, needed=not aligned_only)
         if found and phonon is not None:
             phonons[(found[0].defect, found[0].cell_size)] = phonon
     try:
@@ -583,12 +585,14 @@ def _npz_reduced_reason(path: Path) -> str | None:
         return None
 
 
-def _find_phonon_npz(defect_folder: Path) -> Path | None:
-    """The full-spectrum phonon .npz of a defect, or None (with a warning).
+def _find_phonon_npz(defect_folder: Path, needed: bool = True) -> Path | None:
+    """The defect's full, unaligned phonon .npz (the phonon code's spectrum), or None.
 
     Looks in <defect>/data/ (where the VASP trees keep it) before the defect folder itself. A
-    symmetry-reduced file is never taken, whatever its name (models.reduced_reason): it would be packaged
-    as the defect's full spectrum.
+    symmetry-reduced file is never taken, whatever its name (models.reduced_reason), nor a mirror-aligned
+    one: either would be packaged as the defect's own spectrum. Without one, a warning names the files
+    passed over and why; with ``needed`` False (every dataset's job scripts name an aligned spectrum,
+    which is packaged from them) that is only a debug message.
     """
     search_dirs = [default_phonon(defect_folder).parent, defect_folder]
     reduced: list[str] = []
@@ -613,23 +617,23 @@ def _find_phonon_npz(defect_folder: Path) -> Path | None:
     full = [p for p in candidates if "sym" not in p.stem and "aligned" not in p.stem and p not in tried and is_full(p)]
     if len(full) == 1:
         return full[0]
+    report = LOGGER.warning if needed else LOGGER.debug
     if full:
-        LOGGER.warning(
+        report(
             f"{defect_folder.name}: several phonon .npz files ({', '.join(p.name for p in full)}); "
             f"rename the full spectrum to {PACKAGED_PHONON_NAME} to package it"
         )
-    elif reduced:
-        LOGGER.warning(
-            f"{defect_folder.name}: symmetry-reduced phonon .npz not packaged as the defect's spectrum: "
-            f"{', '.join(reduced)}; put the full spectrum (every mode) in data/{PACKAGED_PHONON_NAME}"
-        )
-    elif candidates:
-        LOGGER.warning(
-            f"{defect_folder.name}: only symmetry-reduced phonon .npz "
-            f"({', '.join(p.name for p in candidates)}); phonon data not packaged"
-        )
-    else:
-        LOGGER.warning(f"{defect_folder.name}: no phonon .npz found; phonon data not packaged")
+        return None
+    passed = [
+        f"{p.name} (mirror-aligned: packaged as {ALIGNED_PHONON_NAME} when the job scripts name it)"
+        for p in candidates if "aligned" in p.stem and "sym" not in p.stem
+    ] + [f"{p.name} (symmetry-reduced)" for p in candidates if "sym" in p.stem]
+    passed += [f"{r}: symmetry-reduced" for r in reduced]
+    report(
+        f"{defect_folder.name}: no unaligned full phonon spectrum (every mode, as the phonon code gave it) "
+        f"found; {PACKAGED_PHONON_NAME} not packaged"
+        + (f". Passed over: {'; '.join(passed)}" if passed else "")
+    )
     return None
 
 
@@ -969,7 +973,8 @@ def _run_conv(args: argparse.Namespace, defect_folder: Path) -> None:
     # (one of each kind per defect), else (older folders) the defect's phonon file found by name.
     phonons: dict[tuple[str, int], Path] = {}
     if scanned:
-        found = _find_phonon_npz(defect_folder)
+        aligned_only = all(s.scan.phonon_file is not None and s.scan.aligned for s in scanned)
+        found = _find_phonon_npz(defect_folder, needed=not aligned_only)
         if found is not None:
             phonons[(scanned[0].defect, scanned[0].cell)] = found
     try:

@@ -276,7 +276,25 @@ def test_package_passes_over_a_reduced_phonon_data_npz(tmp_path, monkeypatch, ca
     _reduced_defect_spectrum(tmp_path / "NV_512" / "data")
     _package(tmp_path, monkeypatch, "BINARY=/x/vasp")  # no PHONON_PATH: the defect's file is found by name
     assert not (tmp_path / "data" / "NV_512" / "phonon_data.npz").exists()
-    assert "symmetry-reduced phonon .npz not packaged" in caplog.text and "2 of 3 modes" in caplog.text
+    assert "no unaligned full phonon spectrum" in caplog.text
+    assert "phonon_data.npz (2 of 3 modes): symmetry-reduced" in caplog.text
+
+
+def test_aligned_data_needs_no_unaligned_spectrum_and_says_nothing(tmp_path, monkeypatch, caplog):
+    # V_Si_576: data/ holds only the aligned pair; the job scripts name it, so nothing is missing
+    full, reduced = _pair(tmp_path / "NV_512" / "data", stub="_aligned")
+    _package(tmp_path, monkeypatch, f"PHONON_PATH={reduced}")
+    assert (tmp_path / "data" / "NV_512" / "phonon_data_aligned.npz").read_bytes() == full.read_bytes()
+    warnings = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
+    assert not any("unaligned full phonon spectrum" in w for w in warnings)  # only a debug message
+
+
+def test_missing_unaligned_spectrum_names_the_files_passed_over(tmp_path, monkeypatch, caplog):
+    _pair(tmp_path / "NV_512" / "data", stub="_aligned")
+    _package(tmp_path, monkeypatch, "BINARY=/x/vasp")  # no PHONON_PATH: the unaligned spectrum is needed
+    assert "no unaligned full phonon spectrum" in caplog.text
+    assert "phonon_data_aligned.npz (mirror-aligned" in caplog.text
+    assert "phonon_data_sym2_aligned.npz (symmetry-reduced)" in caplog.text
 
 
 def test_package_takes_the_full_spectrum_next_to_a_reduced_one(tmp_path, monkeypatch):
@@ -293,7 +311,7 @@ def test_conv_passes_over_a_reduced_phonon_data_npz(tmp_path, monkeypatch, caplo
     assert len(packs) == 1  # the convergence data itself is packaged
     assert not (tmp_path / "data" / "NV_512" / "phonon_data.npz").exists()
     assert not any(kind == "phonon" for kind, _ in registered)
-    assert "symmetry-reduced phonon .npz not packaged" in caplog.text
+    assert "no unaligned full phonon spectrum" in caplog.text and "(2 of 3 modes): symmetry-reduced" in caplog.text
 
 
 def test_older_reduced_files_are_recognised_from_their_keys(tmp_path):
