@@ -606,6 +606,11 @@ class ConvergenceApp:
         self.palette = theme.apply_theme(self.root)
         self.family = theme.font_family(self.root)
         theme.style_matplotlib()
+        # A closed dropdown must not change its value under the mouse wheel: scrolling the sidebar over one
+        # switched options by accident. Without the class binding the wheel reaches the sidebar's own scroll
+        # (ScrollableFrame binds it for all widgets); an open dropdown's list still scrolls.
+        for event in ("<MouseWheel>", "<Button-4>", "<Button-5>"):
+            self.root.unbind_class("TCombobox", event)
 
     def _tip(self, widget, text: str) -> None:
         self._tooltips.append(Tooltip(widget, text, palette=self.palette, family=self.family))

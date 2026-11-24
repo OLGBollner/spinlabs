@@ -190,8 +190,9 @@ sizes and methods in one graph, one colour per entry.
   entry per folder). *New comparison* opens a tab with the selected packages;
   *Add to comparison* adds them to the open comparison (a new one if none is
   open). An unregistered package can be added with *Add file…* in the tab.
-- Views: **Couplings** (|V| per mode against the phonon energy, first order or
-  the diagonal second order), **Spectral functions** (one-phonon J1(ω) and the
+- Views: **Couplings** (against the phonon energy, laid out as the spectral
+  functions: one column per channel, first order |V| per mode on top and the
+  diagonal second order |V^(ll)| below), **Spectral functions** (one-phonon J1(ω) and the
   two-phonon J2(ω, ω) along the diagonal), **2D map** (the full J2(ωx, ωy) of
   one entry, chosen in a dropdown), **Rates** (the Δ1 and Δ2 rates against
   temperature, m_s S → S−1 and S → S−2) and **T1** (lowest or highest |m_s|

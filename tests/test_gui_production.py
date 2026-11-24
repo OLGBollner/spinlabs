@@ -156,8 +156,10 @@ def test_states_and_directions_for_both_spins():
 def test_figure_builders_draw_every_entry(session):
     c = session.get("couplings", SETTINGS)
     entries = [("A", "#1f77b4", c), ("B", "#d62728", c)]
-    fig = pplots.build_coupling_figure(entries, ["d1", "d2"], 1)
-    assert len(fig.axes) == 2 and len(fig.axes[0].lines) == 2
+    fig = pplots.build_coupling_figure(entries, ["d1", "d2"])  # as the spectral functions: a column per channel
+    assert len(fig.axes) == 4 and all(len(ax.lines) == 2 for ax in fig.axes)
+    top, bottom = fig.axes[0], fig.axes[2]  # first order above, the diagonal second order below
+    assert "first order" in top.get_title() and "second order" in bottom.get_title()
     spectra = session.get("spectral", SETTINGS)
     fig = pplots.build_spectral_figure([("A", "#1f77b4", spectra)], ["d1"], SETTINGS.sigma)
     assert len(fig.axes) == 2

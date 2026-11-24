@@ -57,7 +57,6 @@ class ComparisonTab(ttk.Frame):
         self.entries: list[Entry] = []
         self.settings = Settings()
         self.channels = {"d1", "d2"}
-        self.order = 1
         self.log = True
         self.processes = {"total"}
         self.t1_state = T1_STATES[0]
@@ -124,12 +123,6 @@ class ComparisonTab(ttk.Frame):
 
         box = ttk.LabelFrame(body, text="Couplings and spectra")
         box.pack(fill=tk.X, padx=6, pady=4)
-        self.order_var = tk.StringVar(value="First order")
-        order = ttk.Combobox(box, textvariable=self.order_var, state="readonly",
-                             values=("First order", "Second order (diagonal)"))
-        order.pack(fill=tk.X, padx=6, pady=2)
-        order.bind("<<ComboboxSelected>>", lambda _e: self._on_option())
-        tip(order, "Couplings view: |V| per mode, or the diagonal second-order |V^(ll)|.")
         self.log_var = tk.BooleanVar(value=self.log)
         ttk.Checkbutton(box, text="Log scale", variable=self.log_var, command=self._on_option).pack(
             anchor=tk.W, padx=6, pady=1)
@@ -243,7 +236,6 @@ class ComparisonTab(ttk.Frame):
 
     def _on_option(self) -> None:
         self.channels = {c for c, var in self.channel_vars.items() if var.get()}
-        self.order = 2 if self.order_var.get().startswith("Second") else 1
         self.log = bool(self.log_var.get())
         self.processes = {name for name, var in self.process_vars.items() if var.get()}
         self.t1_state = self.state_var.get() or T1_STATES[0]
@@ -272,7 +264,6 @@ class ComparisonTab(ttk.Frame):
         """Write the tab's state into its widgets (after a restore or an entry change)."""
         for channel, var in self.channel_vars.items():
             var.set(channel in self.channels)
-        self.order_var.set("Second order (diagonal)" if self.order == 2 else "First order")
         self.log_var.set(self.log)
         for name, var in self.process_vars.items():
             var.set(name in self.processes)
@@ -329,7 +320,7 @@ class ComparisonTab(ttk.Frame):
         self._last_keys = {i: None for i in range(len(VIEWS))}
 
     def _view_key(self, view: int) -> tuple:
-        return (view, tuple(e.package.key for e in self.entries), tuple(sorted(self.channels)), self.order,
+        return (view, tuple(e.package.key for e in self.entries), tuple(sorted(self.channels)),
                 self.log, tuple(sorted(self.processes)), self.t1_state, self.ratio, self.map_entry,
                 self.settings.rate_key())
 
@@ -341,7 +332,7 @@ class ComparisonTab(ttk.Frame):
         channels = [c for c in CHANNELS if c in self.channels]
         if view == 0:
             data = [(e.package.long_label, e.color, c) for e, c in self._fetch("couplings")]
-            return pplots.build_coupling_figure(data, channels, self.order, log=self.log, figsize=figsize)
+            return pplots.build_coupling_figure(data, channels, log=self.log, figsize=figsize)
         if view == 1:
             data = [(e.package.long_label, e.color, s) for e, s in self._fetch("spectral")]
             return pplots.build_spectral_figure(data, channels, self.settings.sigma, log=self.log, figsize=figsize)
@@ -485,7 +476,7 @@ class ComparisonTab(ttk.Frame):
     def state(self) -> dict:
         return {
             "key": self.key, "title": self.title, "entries": [str(e.package.path) for e in self.entries],
-            "settings": self.settings.to_dict(), "channels": sorted(self.channels), "order": self.order,
+            "settings": self.settings.to_dict(), "channels": sorted(self.channels),
             "log": self.log, "processes": sorted(self.processes), "t1_state": self.t1_state, "ratio": self.ratio,
             "map_entry": self.map_entry, "view": self.nested.index("current"),
         }
@@ -493,7 +484,6 @@ class ComparisonTab(ttk.Frame):
     def apply_state(self, state: dict) -> None:
         self.settings = Settings.from_dict(state.get("settings"))
         self.channels = set(state.get("channels") or self.channels) & set(CHANNELS)
-        self.order = 2 if state.get("order") == 2 else 1
         self.log = bool(state.get("log", True))
         self.processes = set(state.get("processes") or self.processes) & set(PROCESSES)
         self.t1_state = state.get("t1_state") if state.get("t1_state") in T1_STATES else T1_STATES[0]

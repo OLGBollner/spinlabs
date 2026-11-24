@@ -37,26 +37,33 @@ def _legend(fig: Figure, axes) -> None:
         axes.flat[0].legend(handles, labels, fontsize=7, loc="best", frameon=False)
 
 
-def build_coupling_figure(entries, channels, order: int, *, log: bool = True, figsize=None, dpi: int = 100) -> Figure:
-    """|V| (first order, per mode) or |V^(ll)| (second order, the diagonal) against the phonon energy, one panel
-    per channel. ``entries``: (label, colour, Couplings)."""
+def build_coupling_figure(entries, channels, *, log: bool = True, figsize=None, dpi: int = 100) -> Figure:
+    """The couplings against the phonon energy, laid out as the spectral functions: one column per channel
+    (transition), first order |V| per mode on top and the diagonal second order |V^(ll)| below.
+    ``entries``: (label, colour, Couplings)."""
     channels = [c for c in channels if c in CHANNEL_LABELS]
     if not entries or not channels:
         return message_figure("Add entries and select a channel", dpi=dpi)
-    fig, axes = _layout(len(channels), figsize, dpi=dpi)
-    for ax, channel in zip(axes[0], channels):
-        for k, (label, color, c) in enumerate(entries):
-            values = c.first[channel] if order == 1 else np.abs(np.diag(c.second[channel]))
-            ok = values > 0 if log else np.ones(len(values), bool)
-            ax.plot(c.frequencies[ok], values[ok], ls="none", marker=_MARKERS[k % len(_MARKERS)], ms=3.5,
-                    mfc=color, mec="white", mew=0.3, alpha=0.85, label=label)
-        if log:
-            ax.set_yscale("log")
-        ax.set_xlabel(r"$\hbar\omega$ (meV)")
-        ax.set_title(f"{CHANNEL_LABELS[channel]}, " + ("first order" if order == 1 else r"second order, $V^{(ll)}$"),
-                     fontsize=9)
-        ax.grid(True, ls=":", lw=0.5, alpha=0.6)
-    axes[0, 0].set_ylabel(r"$|V|$ (MHz)" if order == 1 else r"$|V^{(ll)}|$ (MHz)")
+    fig, axes = _layout(len(channels), figsize, rows=2, dpi=dpi)
+    for col, channel in enumerate(channels):
+        for row, ylabel in enumerate((r"$|V|$ (MHz)", r"$|V^{(ll)}|$ (MHz)")):
+            ax = axes[row, col]
+            for k, (label, color, c) in enumerate(entries):
+                values = c.first[channel] if row == 0 else np.abs(np.diag(c.second[channel]))
+                ok = values > 0 if log else np.ones(len(values), bool)
+                ax.plot(c.frequencies[ok], values[ok], ls="none", marker=_MARKERS[k % len(_MARKERS)], ms=3.5,
+                        mfc=color, mec="white", mew=0.3, alpha=0.85, label=label)
+            if log:
+                ax.set_yscale("log")
+            ax.set_xlim(left=0)
+            ax.grid(True, ls=":", lw=0.5, alpha=0.6)
+            if col == 0:
+                ax.set_ylabel(ylabel)
+            if row == 0:
+                ax.set_title(f"{CHANNEL_LABELS[channel]}, first order", fontsize=9)
+            else:
+                ax.set_title(r"second order, diagonal $V^{(ll)}$", fontsize=9)
+                ax.set_xlabel(r"$\hbar\omega$ (meV)")
     _legend(fig, axes)
     return fig
 
