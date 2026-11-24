@@ -31,6 +31,7 @@ from spinlabs.gui import plots, theme
 from spinlabs.gui.analysis import ModeEntry, NormResult, PackSession
 from spinlabs.gui.catalog import Catalog, Group, Scheme
 from spinlabs.gui.state import GuiState, TabState, load_state, save_state
+from spinlabs.gui.tabs import TabView
 from spinlabs.logging_utils import get_logger
 
 LOGGER = get_logger(__name__)
@@ -843,8 +844,10 @@ class ConvergenceApp:
             justify=tk.CENTER, style="CardMuted.TLabel", font=(self.family, 10),
         )
         self.welcome_label.pack(expand=True)
-        self.notebook = ttk.Notebook(self.content)
-        self.notebook.bind("<<NotebookTabChanged>>", self._on_tab_changed)
+        self.notebook = TabView(
+            self.content, palette=self.palette, family=self.family,
+            on_change=self._on_tab_changed, on_close=self.close_tab,
+        )
         self.welcome.pack(fill=tk.BOTH, expand=True)
 
     def _build_registry_tab(self) -> None:
@@ -1183,7 +1186,7 @@ class ConvergenceApp:
             self._select_tab(existing)
             return
         try:
-            tab = PackTab(self.notebook, self, group, columns_spec)
+            tab = PackTab(self.notebook.body, self, group, columns_spec)
         except Exception as exc:
             LOGGER.exception("cannot open tab %s", group.title)
             messagebox.showerror("Cannot open pack", f"{group.title}\n\n{exc}")
@@ -1225,8 +1228,8 @@ class ConvergenceApp:
             self.notebook.pack_forget()
             self.welcome.pack(fill=tk.BOTH, expand=True)
 
-    def close_tab(self) -> None:
-        tab = self.active_tab
+    def close_tab(self, tab: PackTab | None = None) -> None:
+        tab = tab or self.active_tab
         if tab is None:
             return
         self.notebook.forget(tab)
@@ -1643,7 +1646,7 @@ class ConvergenceApp:
             if not spec:
                 continue
             try:
-                tab = PackTab(self.notebook, self, group, spec)
+                tab = PackTab(self.notebook.body, self, group, spec)
             except Exception:
                 LOGGER.exception("cannot restore tab %s", group.title)
                 continue
