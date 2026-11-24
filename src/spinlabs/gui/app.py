@@ -32,6 +32,7 @@ from spinlabs.gui.analysis import ModeEntry, NormResult, PackSession
 from spinlabs.gui.catalog import Catalog, Group, Scheme
 from spinlabs.gui.state import GuiState, TabState, load_state, save_state
 from spinlabs.gui.tabs import TabView
+from spinlabs.gui.tooltips import Tooltip
 from spinlabs.logging_utils import get_logger
 
 LOGGER = get_logger(__name__)
@@ -655,6 +656,7 @@ class ConvergenceApp:
         self._syncing = False
         self._restoring = False
         self._closed = False
+        self._tooltips: list[Tooltip] = []
         self._group_by_row: dict[str, Group] = {}
 
         self._style()
@@ -678,6 +680,9 @@ class ConvergenceApp:
         self.palette = theme.apply_theme(self.root)
         self.family = theme.font_family(self.root)
         theme.style_matplotlib()
+
+    def _tip(self, widget, text: str) -> None:
+        self._tooltips.append(Tooltip(widget, text, palette=self.palette, family=self.family))
 
     def _build_header(self) -> None:
         p = self.palette
@@ -782,20 +787,22 @@ class ConvergenceApp:
     def _build_toolbar(self) -> None:
         bar = ttk.Frame(self.root, style="Toolbar.TFrame", padding=(14, 6))
         bar.pack(side=tk.TOP, fill=tk.X)
-        ttk.Button(bar, text="Open…", command=self.open_files, style="Accent.TButton").pack(
-            side=tk.LEFT, padx=(0, 6)
-        )
-        ttk.Button(bar, text="Refresh", command=self.refresh_registry).pack(
-            side=tk.LEFT, padx=(0, 2)
-        )
-        ttk.Button(bar, text="Save figure", command=self.save_figure).pack(
-            side=tk.LEFT, padx=(0, 2)
-        )
-        ttk.Button(bar, text="Export CSV", command=self.export_csv).pack(
-            side=tk.LEFT, padx=(0, 2)
-        )
+        open_button = ttk.Button(bar, text="Open…", command=self.open_files, style="Accent.TButton")
+        open_button.pack(side=tk.LEFT, padx=(0, 6))
+        self._tip(open_button, "Open an unregistered convergence file or decont folder.")
+        refresh_button = ttk.Button(bar, text="Refresh", command=self.refresh_registry)
+        refresh_button.pack(side=tk.LEFT, padx=(0, 2))
+        self._tip(refresh_button, "Re-read the registry and refresh the defect groups.")
+        save_button = ttk.Button(bar, text="Save figure", command=self.save_figure)
+        save_button.pack(side=tk.LEFT, padx=(0, 2))
+        self._tip(save_button, "Save the visible Summary or Mode-detail figure under figures/convergence/.")
+        csv_button = ttk.Button(bar, text="Export CSV", command=self.export_csv)
+        csv_button.pack(side=tk.LEFT, padx=(0, 2))
+        self._tip(csv_button, "Export the current report table as a CSV file.")
         ttk.Separator(bar, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y, padx=8, pady=2)
-        ttk.Button(bar, text="Close tab", command=self.close_tab).pack(side=tk.LEFT)
+        close_button = ttk.Button(bar, text="Close tab", command=self.close_tab)
+        close_button.pack(side=tk.LEFT)
+        self._tip(close_button, "Close the active pack tab (Ctrl+W).")
         ttk.Label(
             bar, text="Convergence data, fits and spin–phonon channels", style="CardMuted.TLabel",
         ).pack(side=tk.RIGHT, padx=(8, 0))
@@ -858,11 +865,13 @@ class ConvergenceApp:
         self._filter_row(box, "Cell", self.filter_cell, 1)
         self._filter_row(box, "Method", self.filter_method, 2)
         self._filter_row(box, "Displacement", self.filter_displacement, 3)
-        ttk.Checkbutton(box, text="Latest only", variable=self.latest_only,
-                        command=self.refresh_registry).grid(row=4, column=0, columnspan=2, sticky="w", **pad)
-        ttk.Button(box, text="Refresh", command=self.refresh_registry).grid(
-            row=5, column=0, columnspan=2, sticky="ew", **pad
-        )
+        latest = ttk.Checkbutton(box, text="Latest only", variable=self.latest_only,
+                                 command=self.refresh_registry)
+        latest.grid(row=4, column=0, columnspan=2, sticky="w", **pad)
+        self._tip(latest, "Show only the newest registered file of each convergence scheme.")
+        refresh = ttk.Button(box, text="Refresh", command=self.refresh_registry)
+        refresh.grid(row=5, column=0, columnspan=2, sticky="ew", **pad)
+        self._tip(refresh, "Re-read the registry database and refresh the defect groups.")
         self.group_tree = ttk.Treeview(
             self.registry_tab, columns=("defect", "cell", "displacement", "schemes"), show="headings", height=6,
             selectmode="browse",
@@ -872,41 +881,57 @@ class ConvergenceApp:
             self.group_tree.heading(key, text=title)
             self.group_tree.column(key, width=width, anchor=tk.W)
         self.group_tree.pack(fill=tk.BOTH, expand=True, padx=6, pady=4)
+        self._tip(self.group_tree, "Select a defect group; its available ZFS schemes appear below.")
         self.group_tree.bind("<<TreeviewSelect>>", lambda _e: self._show_group_schemes())
         self.group_tree.bind("<Double-1>", lambda _e: self.open_selected_group())
         self.schemes_frame = ttk.LabelFrame(self.registry_tab, text="Schemes")
         self.schemes_frame.pack(fill=tk.BOTH, expand=True, padx=6, pady=4)
-        ttk.Button(
+        open_update = ttk.Button(
             self.registry_tab, text="Open / update tab", command=self.open_selected_group,
             style="Accent.TButton",
-        ).pack(fill=tk.X, padx=0, pady=(6, 6))
+        )
+        open_update.pack(fill=tk.X, padx=0, pady=(6, 6))
+        self._tip(open_update, "Open the checked schemes as a new defect tab, or update its existing columns.")
         buttons = ttk.Frame(self.registry_tab)
         buttons.pack(fill=tk.X, padx=6, pady=(0, 6))
-        ttk.Button(buttons, text="Open file…", command=self.open_files).pack(
-            side=tk.LEFT, expand=True, fill=tk.X
-        )
-        ttk.Button(buttons, text="Open folder…", command=self.open_folder).pack(
-            side=tk.LEFT, expand=True, fill=tk.X, padx=(4, 0)
-        )
+        open_file = ttk.Button(buttons, text="Open file…", command=self.open_files)
+        open_file.pack(side=tk.LEFT, expand=True, fill=tk.X)
+        self._tip(open_file, "Open a convergence .npz that is not in the registry (session only).")
+        open_folder = ttk.Button(buttons, text="Open folder…", command=self.open_folder)
+        open_folder.pack(side=tk.LEFT, expand=True, fill=tk.X, padx=(4, 0))
+        self._tip(open_folder, "Open a full-decontamination convergence folder (session only).")
 
     def _filter_row(self, parent, label: str, var: tk.StringVar, row: int) -> None:
         ttk.Label(parent, text=label, style="Card.TLabel").grid(row=row, column=0, sticky="w", padx=4, pady=2)
         combo = ttk.Combobox(parent, textvariable=var, state="readonly", width=16)
         combo.grid(row=row, column=1, sticky="ew", padx=4, pady=2)
         combo.bind("<<ComboboxSelected>>", lambda _e: self.refresh_registry())
+        filter_tips = {
+            "Defect": "Filter registered defect groups by defect name.",
+            "Cell": "Filter registered defect groups by supercell size.",
+            "Method": "Filter by ZFS calculation method (AO, UO or full decont).",
+            "Displacement": "Filter by the perturbation displacement convention.",
+        }
+        self._tip(combo, filter_tips.get(label, f"Filter by {label.lower()}."))
         setattr(self, f"_combo_{label.lower()}", combo)
         parent.columnconfigure(1, weight=1)
 
     def _build_view_tab(self) -> None:
         box = ttk.LabelFrame(self.view_tab, text="Difference scheme")
         box.pack(fill=tk.X, padx=6, pady=4)
-        ttk.Checkbutton(box, text="Forward", variable=self.forward_var).pack(anchor=tk.W, padx=6, pady=2)
+        forward = ttk.Checkbutton(box, text="Forward", variable=self.forward_var)
+        forward.pack(anchor=tk.W, padx=6, pady=2)
+        self._tip(forward, "Forward differences: (D(Q) − D0)/Q and (D(2Q) − 2D(Q) + D0)/Q². This is the production scheme.")
         self.central_check = ttk.Checkbutton(box, text="Central (−Q runs)", variable=self.central_var)
         self.central_check.pack(anchor=tk.W, padx=6, pady=2)
+        self._tip(self.central_check, "Central differences from +Q and −Q runs. Needs −Q data; disabled when none is selected.")
         quality = ttk.LabelFrame(self.view_tab, text="Summary quantity")
         quality.pack(fill=tk.X, padx=6, pady=4)
-        ttk.Combobox(quality, textvariable=self.display_var, values=("Norm", "Coupling channels"),
-                     state="readonly").pack(fill=tk.X, padx=6, pady=4)
+        self.display_combo = ttk.Combobox(
+            quality, textvariable=self.display_var, values=("Norm", "Coupling channels"), state="readonly"
+        )
+        self.display_combo.pack(fill=tk.X, padx=6, pady=4)
+        self._tip(self.display_combo, "Norm shows the usual norm summary. Coupling channels shows V_Δ0, V_Δ±1 and V_Δ±2 separately for every mode.")
         columns = ttk.LabelFrame(self.view_tab, text="Columns and dates")
         columns.pack(fill=tk.BOTH, expand=True, padx=6, pady=4)
         self.columns_frame = ttk.Frame(columns, style="Card.TFrame")
@@ -916,6 +941,7 @@ class ConvergenceApp:
         )
         self._column_combo = ttk.Combobox(columns, textvariable=self.active_column_var, state="readonly")
         self._column_combo.pack(fill=tk.X, padx=6, pady=4)
+        self._tip(self._column_combo, "Choose which scheme column Mode detail and the Details report use.")
         ttk.Label(
             columns, text="Change columns in the Registry tab: select the group, then Open / update.",
             wraplength=320, style="CardMuted.TLabel",
@@ -942,7 +968,9 @@ class ConvergenceApp:
         filter_box = ttk.Frame(self.modes_tab, style="Card.TFrame")
         filter_box.pack(fill=tk.X, pady=(0, 6))
         ttk.Label(filter_box, text="Filter", style="CardMuted.TLabel").pack(side=tk.LEFT)
-        ttk.Entry(filter_box, textvariable=self.mode_filter).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=4)
+        mode_filter = ttk.Entry(filter_box, textvariable=self.mode_filter)
+        mode_filter.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=4)
+        self._tip(mode_filter, "Filter the mode list by mode number, symmetry or frequency.")
         self._mode_icons = (self._checkbox_image(False), self._checkbox_image(True))
         self.mode_tree = ttk.Treeview(
             self.modes_tab, columns=("mode", "sym", "freq"), show=("tree", "headings"), height=14,
@@ -954,18 +982,19 @@ class ConvergenceApp:
             self.mode_tree.heading(key, text=title)
             self.mode_tree.column(key, width=width, anchor=tk.W)
         self.mode_tree.pack(fill=tk.BOTH, expand=True, pady=4)
+        self._tip(self.mode_tree, "Click the checkbox to include a mode in Summary; click another cell to open that mode in Mode detail.")
         self.mode_tree.bind("<ButtonRelease-1>", self._on_mode_click)
         buttons = ttk.Frame(self.modes_tab, style="Card.TFrame")
         buttons.pack(fill=tk.X, pady=(0, 4))
-        ttk.Button(buttons, text="All", command=lambda: self._mode_bulk(True)).pack(
-            side=tk.LEFT, expand=True, fill=tk.X
-        )
-        ttk.Button(buttons, text="None", command=lambda: self._mode_bulk(False)).pack(
-            side=tk.LEFT, expand=True, fill=tk.X, padx=4
-        )
-        ttk.Button(buttons, text="Invert", command=self._mode_invert).pack(
-            side=tk.LEFT, expand=True, fill=tk.X
-        )
+        all_button = ttk.Button(buttons, text="All", command=lambda: self._mode_bulk(True))
+        all_button.pack(side=tk.LEFT, expand=True, fill=tk.X)
+        self._tip(all_button, "Include every mode currently shown by the filter in Summary.")
+        none_button = ttk.Button(buttons, text="None", command=lambda: self._mode_bulk(False))
+        none_button.pack(side=tk.LEFT, expand=True, fill=tk.X, padx=4)
+        self._tip(none_button, "Exclude every mode currently shown by the filter from Summary.")
+        invert_button = ttk.Button(buttons, text="Invert", command=self._mode_invert)
+        invert_button.pack(side=tk.LEFT, expand=True, fill=tk.X)
+        self._tip(invert_button, "Reverse the Summary visibility of the filtered modes.")
         ttk.Label(
             self.modes_tab, text="Click a row for Mode detail; click Show to toggle Summary visibility.",
             wraplength=320, style="CardMuted.TLabel",
@@ -980,37 +1009,50 @@ class ConvergenceApp:
             ("Truncation tol.", self.tol_var, None),
             ("Weak fraction", self.weak_var, None),
         ]
+        tips = {
+            "Noise σ / MHz": "Tensor-element noise used for the finite-difference error bars and safe windows.",
+            "SNR target": "Required signal-to-noise ratio at the lower end of the safe |Q| window.",
+            "Truncation tol.": "Largest allowed relative truncation error at the upper end of the safe |Q| window.",
+            "Weak fraction": "Channels or modes below this fraction of the strongest coefficient do not narrow the common safe |Q|.",
+        }
         for row, (label, var, tag) in enumerate(rows):
             ttk.Label(box, text=label, style="Card.TLabel").grid(row=row, column=0, sticky="w", padx=4, pady=2)
             entry = ttk.Entry(box, textvariable=var, width=10)
             entry.grid(row=row, column=1, sticky="ew", padx=4, pady=2)
+            self._tip(entry, tips[label])
             if tag == "auto":
-                ttk.Checkbutton(box, text="auto", variable=self.noise_auto).grid(
-                    row=row, column=2, sticky="w", padx=4, pady=2
-                )
+                auto = ttk.Checkbutton(box, text="auto", variable=self.noise_auto)
+                auto.grid(row=row, column=2, sticky="w", padx=4, pady=2)
+                self._tip(auto, "Estimate σ from the pooled convergence residuals; untick to enter a fixed value.")
                 self.noise_entry = entry
         box.columnconfigure(1, weight=1)
         flags = ttk.LabelFrame(self.advanced_tab, text="Mode detail")
         flags.pack(fill=tk.X, padx=6, pady=4)
-        ttk.Checkbutton(flags, text="Drop Q=0 anchor from fits", variable=self.drop_anchor_var).pack(
-            anchor=tk.W, padx=6, pady=2
-        )
-        ttk.Checkbutton(flags, text="Plot D(Q) − D(0)", variable=self.deviation_var).pack(
-            anchor=tk.W, padx=6, pady=2
-        )
-        ttk.Checkbutton(flags, text="Quadratic fit", variable=self.quad_var).pack(anchor=tk.W, padx=6, pady=2)
+        drop = ttk.Checkbutton(flags, text="Drop Q=0 anchor from fits", variable=self.drop_anchor_var)
+        drop.pack(anchor=tk.W, padx=6, pady=2)
+        self._tip(drop, "Leave the Q=0 point out of the Mode-detail fits; the fitted curves still extrapolate to Q=0.")
+        deviation = ttk.Checkbutton(flags, text="Plot D(Q) − D(0)", variable=self.deviation_var)
+        deviation.pack(anchor=tk.W, padx=6, pady=2)
+        self._tip(deviation, "Plot the change from the relaxed tensor so the response fills the y-range.")
+        quad = ttk.Checkbutton(flags, text="Quadratic fit", variable=self.quad_var)
+        quad.pack(anchor=tk.W, padx=6, pady=2)
+        self._tip(quad, "Add the second-order fit values and central d²D/dQ² estimates to Details.")
         phonon = ttk.LabelFrame(self.advanced_tab, text="Phonon symmetry")
         phonon.pack(fill=tk.X, padx=0, pady=(8, 0))
         ttk.Label(
             phonon, text="Full spectrum for labels and frequencies", style="CardMuted.TLabel",
         ).pack(anchor=tk.W, padx=4)
-        ttk.Combobox(
+        phonon_combo = ttk.Combobox(
             phonon, textvariable=self.phonon_var, state="readonly",
             values=("Auto", "Aligned full", "Unaligned full"),
-        ).pack(fill=tk.X, padx=4, pady=(4, 4))
-        ttk.Button(self.advanced_tab, text="Apply", command=self.apply_advanced, style="Accent.TButton").pack(
-            fill=tk.X, pady=(10, 6)
         )
+        phonon_combo.pack(fill=tk.X, padx=4, pady=(4, 4))
+        self._tip(phonon_combo, "Choose the full phonon spectrum used for symmetry labels and frequencies. Auto follows the pack's aligned tag and packaged phonon files.")
+        apply_button = ttk.Button(
+            self.advanced_tab, text="Apply", command=self.apply_advanced, style="Accent.TButton"
+        )
+        apply_button.pack(fill=tk.X, pady=(10, 6))
+        self._tip(apply_button, "Apply the advanced settings and the selected phonon spectrum.")
         ttk.Label(
             self.advanced_tab, text="Defaults match `spinlabs plot convergence`.",
             wraplength=320, style="CardMuted.TLabel",
@@ -1127,14 +1169,17 @@ class ConvergenceApp:
             check = tk.BooleanVar(value=(scheme.id in open_columns) if open_columns else True)
             date = tk.StringVar(value=open_columns.get(scheme.id, scheme.latest.date))
             label = scheme.label + ("  ⚠ no Q=0" if scheme.has_q0 is False else "")
-            ttk.Checkbutton(self.schemes_frame, text=label, variable=check, command=lambda g=group: self._scheme_changed(g)).grid(
-                row=row, column=0, sticky="w", padx=4, pady=2
+            scheme_check = ttk.Checkbutton(
+                self.schemes_frame, text=label, variable=check, command=lambda g=group: self._scheme_changed(g)
             )
+            scheme_check.grid(row=row, column=0, sticky="w", padx=4, pady=2)
+            self._tip(scheme_check, "Include this convergence scheme as a Summary column in the tab.")
             combo = ttk.Combobox(
                 self.schemes_frame, textvariable=date, state="readonly", width=12,
                 values=[item.date for item in scheme.dates],
             )
             combo.grid(row=row, column=1, sticky="ew", padx=4, pady=2)
+            self._tip(combo, "Choose which registered file/date of this scheme the column uses.")
             combo.bind("<<ComboboxSelected>>", lambda _e, g=group: self._scheme_changed(g))
             self.schemes_frame.columnconfigure(1, weight=1)
             self._scheme_vars[scheme.id] = (check, date)
@@ -1373,6 +1418,7 @@ class ConvergenceApp:
                 values=[item.date for item in column.scheme.dates],
             )
             combo.grid(row=row, column=1, sticky="ew", padx=2, pady=1)
+            self._tip(combo, "Switch this Summary column to another registered file/date of the same scheme.")
             combo.bind("<<ComboboxSelected>>", lambda _e, c=column, v=var: self._change_date(c, v.get()))
         self.columns_frame.columnconfigure(1, weight=1)
 

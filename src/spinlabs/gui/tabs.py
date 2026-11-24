@@ -13,6 +13,7 @@ import tkinter as tk
 from tkinter import ttk
 
 from spinlabs.gui.theme import Palette
+from spinlabs.gui.tooltips import Tooltip
 
 
 @dataclass
@@ -45,6 +46,7 @@ class TabView(ttk.Frame):
         self.on_close = on_close
         self.tabs_list: list[_Tab] = []
         self.current: ttk.Frame | None = None
+        self._tooltips: list[Tooltip] = []
 
         self.tabbar = tk.Frame(self, background=palette.card)
         self.tabbar.pack(side=tk.TOP, fill=tk.X, padx=(8, 8), pady=(6, 0))
@@ -77,6 +79,7 @@ class TabView(ttk.Frame):
         for widget in (cell, inner, label):
             widget.bind("<Button-1>", lambda _e, f=frame: self.select(f))
         close.bind("<Button-1>", lambda e, f=frame: self._close_event(e, f))
+        self._tooltips.append(Tooltip(close, "Close this tab", palette=self.palette, family=self.family))
         # Only the close glyph itself reacts; hovering the title must not colour it.
         close.bind("<Enter>", lambda _e, tab=entry: self._set_close_colour(tab, True))
         close.bind("<Leave>", lambda _e, tab=entry: self._set_close_colour(tab, False))
