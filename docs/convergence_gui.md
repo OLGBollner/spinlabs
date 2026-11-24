@@ -70,8 +70,10 @@ Each tab has nested **Summary** and **Mode detail** views.
   marker is used only when Forward and Central are overlaid.
   Safe bands, the common |Q| window and the grey error curve are the current
   norm-based quantities. The GUI extends the CLI's six-colour palette so every
-  selected mode can be shown, and draws central points with distinct diamond /
-  inverted-triangle markers.
+  selected mode can be shown. On screen, central points use distinct open
+  markers when both schemes are overlaid; with a single scheme the CLI's row
+  marker and fill are kept. The common safe-|Q| region uses one shared green in
+  Norm and Coupling-channel views.
 - If both schemes are unticked, the difference rows show a placeholder and the
   principal components remain available in Mode detail.
 
@@ -137,8 +139,10 @@ Each tab has nested **Summary** and **Mode detail** views.
   - **Details**: the CLI-style `format_snr` text for the active mode/column plus
     warnings (missing Q=0, unfinished runs, unknown symmetries, modes skipped).
 - Save figure rebuilds the current view at the CLI's canonical figure size and
-  layout (not the stretched on-screen copy) and writes PNG, SVG or PDF through
-  the Save figure menu, with CLI-like names under `figures/convergence/`.
+  layout under Matplotlib's default style, not the GUI's muted on-screen theme,
+  and writes PNG, SVG or PDF through the Save figure menu, with CLI-like names
+  under `figures/convergence/`.  This keeps exported axes, ticks, borders,
+  legend frames and font sizes identical to `spinlabs plot convergence`.
   Export CSV writes the current table. The status bar shows the written path.
 - Advanced parameters live in a collapsed sidebar section: noise override
   (automatic pooled sigma by default), SNR target, truncation tolerance,

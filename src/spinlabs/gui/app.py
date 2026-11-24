@@ -436,12 +436,18 @@ class PackTab(ttk.Frame):
         self.mode_view.set_figure(figure)
 
     def canonical_figure(self) -> Figure:
-        """The figure as the CLI would write it, independent of the window size."""
-        if self.nested.index("current") == 1:
-            figure, _result = self._mode_figure(canonical=True)
-        else:
-            figure = self._summary_figure(canonical=True)
-        return figure
+        """The figure as the CLI would write it, independent of the window size.
+
+        The GUI applies its own muted Matplotlib style for the screen.  Exports
+        are rebuilt under Matplotlib's default style so they match the figures
+        written by ``spinlabs plot convergence``.
+        """
+        with matplotlib.rc_context(matplotlib.rcParamsDefault):
+            if self.nested.index("current") == 1:
+                figure, _result = self._mode_figure(canonical=True)
+            else:
+                figure = self._summary_figure(canonical=True)
+            return figure
 
     # -- report ------------------------------------------------------------
 

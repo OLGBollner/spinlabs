@@ -52,7 +52,7 @@ LOGGER = get_logger(__name__)
 
 _CHANNEL_LS = {"d0": "-", "d1": "--", "d2": ":"}
 _CENTRAL_MARKER = {"o": "D", "s": "v"}
-_COMMON_ALPHA = 0.55
+_COMMON_ALPHA = 1.0
 
 
 @dataclass
@@ -232,7 +232,7 @@ def build_norm_summary_figure(
         _log_axes(first_ax, q, steps)
         _log_axes(second_ax, q, steps)
         first_ax.set_title(f"{column.label}: σ = {_sigma_text(column)}, D0 offset {_offset_text(column)}",
-                           fontsize=11)
+                           fontsize=12 if canonical else 11)
         if has_central and not has_forward:
             first_ax.set_ylabel(r"first order, central $\|D(Q) - D(-Q)\| / 2Q$ (MHz/Q)")
             second_ax.set_ylabel(r"second order, central $\|D(Q) + D(-Q) - 2D_0\| / Q^2$ (MHz/Q$^2$)")
@@ -243,7 +243,7 @@ def build_norm_summary_figure(
             first_ax.set_ylabel(r"first order $\|D(Q) - D_0\| / Q$ (MHz/Q)")
             second_ax.set_ylabel(r"second order $\|D(2Q) - 2D(Q) + D_0\| / Q^2$ (MHz/Q$^2$)")
         second_ax.set_xlabel("|Q| (step size)")
-        _norm_legends(first_ax, second_ax, mode_ids, column.modes, col_colors, column)
+        _norm_legends(first_ax, second_ax, mode_ids, column.modes, col_colors, column, canonical=canonical)
 
     if canonical:
         fig.tight_layout()
@@ -262,8 +262,9 @@ def _offset_text(column: NormColumnPlot) -> str:
     return f"{result.offset:.2g} MHz" if result is not None and np.isfinite(result.offset) else "n/a"
 
 
-def _norm_legends(ax, second_ax, mode_ids, modes, colors, column: NormColumnPlot) -> None:
-    mode_legend = ax.legend(handles=_mode_handles(mode_ids, modes, colors), loc="lower right", fontsize=9)
+def _norm_legends(ax, second_ax, mode_ids, modes, colors, column: NormColumnPlot, *, canonical: bool = False) -> None:
+    mode_legend = ax.legend(handles=_mode_handles(mode_ids, modes, colors), loc="lower right",
+                            fontsize=10 if canonical else 9)
     ax.add_artist(mode_legend)
     forward = column.forward is not None and bool(column.forward.rows)
     central = column.central is not None and bool(column.central.rows)
@@ -299,10 +300,11 @@ def _norm_legends(ax, second_ax, mode_ids, modes, colors, column: NormColumnPlot
             Line2D([], [], ls="--" if both else "-", color="0.35", label="2c (quartic fit, Q → 0)"),
             Line2D([], [], ls=":" if both else "--", color="0.35", label=err_label),
         ]
+    legend_size = 10 if canonical else 8
     if first_handles:
-        ax.legend(handles=first_handles, loc="lower left", fontsize=8)
+        ax.legend(handles=first_handles, loc="lower left", fontsize=legend_size)
     if second_handles:
-        second_ax.legend(handles=second_handles, loc="lower left", fontsize=8)
+        second_ax.legend(handles=second_handles, loc="lower left", fontsize=legend_size)
 
 
 
@@ -406,11 +408,12 @@ def build_channel_summary_figure(
             for color, channel in zero_marks[order]:
                 ax.axhline(floor, color=color, ls=_CHANNEL_LS[channel], lw=0.7, alpha=0.35)
         first_ax.set_title(f"{column.label}: σ = {analysis.sigma:.2g} MHz, D0 offset {analysis.offset:.2g} MHz",
-                           fontsize=11)
+                           fontsize=12 if canonical else 11)
         first_ax.set_ylabel(r"first order $V_{\Delta n}$ (MHz/Q)")
         second_ax.set_ylabel(r"second order $V_{\Delta n}$ (MHz/Q$^2$)")
         second_ax.set_xlabel("|Q| (step size)")
-        _channel_legends(first_ax, second_ax, mode_ids, column.modes, col_colors, schemes)
+        _channel_legends(first_ax, second_ax, mode_ids, column.modes, col_colors, schemes,
+                         canonical=canonical)
     if canonical:
         fig.tight_layout()
     else:
@@ -418,8 +421,9 @@ def build_channel_summary_figure(
     return fig
 
 
-def _channel_legends(ax, second_ax, mode_ids, modes, colors, schemes) -> None:
-    mode_legend = ax.legend(handles=_mode_handles(mode_ids, modes, colors), loc="lower right", fontsize=9)
+def _channel_legends(ax, second_ax, mode_ids, modes, colors, schemes, *, canonical: bool = False) -> None:
+    mode_legend = ax.legend(handles=_mode_handles(mode_ids, modes, colors), loc="lower right",
+                            fontsize=10 if canonical else 9)
     ax.add_artist(mode_legend)
     handles = [
         Line2D([], [], marker=CHANNEL_MARKERS[c], ls=_CHANNEL_LS[c], color="0.35", label=CHANNEL_LABELS[c])
@@ -431,7 +435,7 @@ def _channel_legends(ax, second_ax, mode_ids, modes, colors, schemes) -> None:
             Line2D([], [], marker="o", ls="", color="0.35", mfc="white", label="central (open)"),
         ]
     handles.append(Line2D([], [], ls="--", color="0.35", label="conservative error"))
-    ax.legend(handles=handles, loc="lower left", fontsize=8)
+    ax.legend(handles=handles, loc="lower left", fontsize=10 if canonical else 8)
 
 
 def _q0_label(value: float | None) -> str:
