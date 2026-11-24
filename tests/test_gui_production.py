@@ -141,6 +141,38 @@ def test_production_packages_list_files_and_decont_sets(tmp_path, monkeypatch):
     assert set(every) == {single, folder, first_only} and not every[first_only].complete
 
 
+def test_packages_are_grouped_by_setup_latest_first(tmp_path, monkeypatch):
+    from spinlabs.gui.production import production_setups, version_labels
+
+    monkeypatch.setattr(registry, "REGISTRY_PATH", tmp_path / "registry.db")
+    conn = registry.ensure_db()
+
+    def register(rel, method="AO", step=0.1, cell=64):
+        path = tmp_path / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(rel.encode())
+        registry.register_file(conn, path, "packaged_zfs", defect="NV", cell_size=cell, calc_method=method,
+                               pert_scale=step, pert_order=[1, 2])
+        return path
+
+    older = register("NV_64/pert_0.1/AO/20261101/a.npz")
+    legacy = register("NV_64/pert_0.1/all_bands/20261020/b.npz", method="all_bands")  # same setup: AO
+    newest = register("NV_64/pert_0.1/AO/20261015/c.npz")  # registered last: the latest, as --latest picks it
+    other = register("NV_64/pert_0.05/AO/20261101/d.npz", step=0.05)
+    setups = production_setups(production_packages(conn))
+    assert len(setups) == 2
+    versions = next(v for v in setups.values() if v[0].step == 0.1)
+    assert [p.path for p in versions] == [newest, legacy, older]
+    assert registry.find_packaged(conn, defect="NV", cell_size=64, calc_method="AO", pert_scale=0.1,
+                                  latest=True) == [versions[0].path]
+    assert version_labels(versions) == ["20261015 (latest)", "20261020", "20261101"]
+    assert [p.path for v in setups.values() if v[0].step == 0.05 for p in v] == [other]
+    same_day = register("NV_64/pert_0.1/AO/20261015/e.npz")
+    versions = next(v for v in production_setups(production_packages(conn)).values() if v[0].step == 0.1)
+    assert version_labels(versions)[:2] == ["20261015 · e.npz (latest)", "20261015 · c.npz"]
+    assert versions[0].path == same_day
+
+
 def test_a_package_without_second_order_is_refused(tmp_path, monkeypatch):
     from spinlabs.gui.production import package_for_path
 

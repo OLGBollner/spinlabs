@@ -68,10 +68,31 @@ class ProductionPackage:
     # Whether it holds second-order data (pairs, or central -Q runs): without it there is no two-phonon spectral
     # function, rate or T1. Older first-order-only packages (*_1d.npz) and empty ones are not complete.
     complete: bool = True
+    # Registry id (a full-decontamination set: its newest file). Within a setup the highest id is the latest
+    # data, as registry.find_packaged(latest=True) picks it.
+    registered: int = 0
 
     @property
     def key(self) -> str:
         return str(self.path)
+
+    @property
+    def setup(self) -> tuple:
+        """What the registry groups versions by: defect, cell, canonical method and step."""
+        return (self.defect, self.cell or 0, str(registry._canonical(self.method) or ""),
+                self.step if self.step is not None else float("nan"))
+
+    @property
+    def setup_key(self) -> str:
+        defect, cell, method, step = self.setup
+        return f"{defect}|{cell}|{method}|{step:g}"
+
+    @property
+    def setup_label(self) -> str:
+        defect, cell, method, step = self.setup
+        cell_text = f" ({cell})" if cell else ""
+        step_text = f" {step:g}" if self.step is not None else ""
+        return f"{defect}{cell_text} {method or '?'}{step_text}"
 
     @property
     def label(self) -> str:
@@ -108,11 +129,11 @@ def production_packages(conn=None, *, complete_only: bool = True) -> list[Produc
     """
     conn = conn or registry.ensure_db()
     rows = conn.execute(
-        "SELECT kind, path, defect, cell_size, calc_method, pert_scale, pert_order FROM files "
+        "SELECT id, kind, path, defect, cell_size, calc_method, pert_scale, pert_order FROM files "
         "WHERE kind IN ('packaged_zfs', 'packaged_zfs_sublevel')"
     ).fetchall()
     out: dict[str, ProductionPackage] = {}
-    for kind, path, defect, cell, method, step, pert_order in rows:
+    for row_id, kind, path, defect, cell, method, step, pert_order in rows:
         complete = _has_second_order(pert_order)
         if complete_only and not complete:
             continue
@@ -126,11 +147,35 @@ def production_packages(conn=None, *, complete_only: bool = True) -> list[Produc
             step = float(step) if step is not None else None
         except (TypeError, ValueError):
             step = None
+        previous = out.get(str(path))
         out[str(path)] = ProductionPackage(
             path=path, defect=str(defect or "?"), cell=int(cell) if cell else None, method=method, step=step,
-            date=_date_of(path), complete=complete,
+            date=_date_of(path), complete=complete and (previous is None or previous.complete),
+            registered=max(int(row_id), previous.registered if previous else 0),
         )
-    return sorted(out.values(), key=lambda p: (p.defect, p.cell or 0, p.method or "", p.date), reverse=False)
+    packages = sorted(out.values(), key=lambda p: -p.registered)  # newest first within each setup
+    return sorted(packages, key=lambda p: (p.defect, p.cell or 0, p.setup[2], p.step if p.step is not None else -1))
+
+
+def production_setups(packages: list[ProductionPackage]) -> dict[str, list[ProductionPackage]]:
+    """The packages grouped by setup (defect, cell, method, step) as the registry groups them, each group
+    newest first: its first package is the latest data for that setup (registry ``--latest``)."""
+    groups: dict[str, list[ProductionPackage]] = {}
+    for package in packages:
+        groups.setdefault(package.setup_key, []).append(package)
+    for versions in groups.values():
+        versions.sort(key=lambda p: -p.registered)
+    return groups
+
+
+def version_labels(versions: list[ProductionPackage]) -> list[str]:
+    """Dropdown labels of a setup's versions (newest first): the date, the file name when dates repeat."""
+    dates = [p.date for p in versions]
+    labels = []
+    for index, package in enumerate(versions):
+        label = package.date if dates.count(package.date) == 1 else f"{package.date} · {package.path.name}"
+        labels.append(f"{label} (latest)" if index == 0 else label)
+    return labels
 
 
 def package_for_path(path: Path) -> ProductionPackage:

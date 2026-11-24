@@ -187,7 +187,15 @@ sizes and methods in one graph, one colour per entry.
 
 - The **Production** sidebar tab lists the registered production packages
   (`spinlabs package`: `packaged_zfs` files, full-decontamination sets as one
-  entry per folder). *New comparison* opens a tab with the selected packages;
+  entry per folder) grouped as the registry groups them: one row per setup
+  (defect, cell, canonical method, step), showing its latest data, the package
+  `find_packaged --latest` picks (the newest registration; a legacy
+  `all_bands` package counts as AO). The row's date column says how many
+  versions exist; with one setup selected, the *Date* dropdown picks an
+  earlier one, newest first, as the convergence date dropdowns do. Inside a
+  comparison the *Date* dropdown under the entries switches the selected entry
+  to another version of its setup in place (same colour and position).
+  *New comparison* opens a tab with the selected packages;
   *Add to comparison* adds them to the open comparison (a new one if none is
   open). An unregistered package can be added with *Add file…* in the tab.
   Packages without second-order data (registry `pert_order` [1]: the older

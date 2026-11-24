@@ -30,6 +30,7 @@ from spinlabs.gui.production import (
     Settings,
     package_for_path,
     rate_direction,
+    version_labels,
 )
 from spinlabs.gui.widgets import FigureHost, ReportData, ScrollableFrame, _fmt, _safe_name
 
@@ -109,6 +110,16 @@ class ComparisonTab(ttk.Frame):
         add_file = ttk.Button(row, text="Add file…", command=self.add_file)
         add_file.pack(side=tk.LEFT, expand=True, fill=tk.X, padx=(4, 0))
         tip(add_file, "Add a packaged ZFS file that is not in the registry.")
+        self.entry_tree.bind("<<TreeviewSelect>>", lambda _e: self._sync_entry_date())
+        row = ttk.Frame(box, style="Card.TFrame")
+        row.pack(fill=tk.X, padx=4, pady=(0, 4))
+        ttk.Label(row, text="Date", style="CardMuted.TLabel").pack(side=tk.LEFT)
+        self.entry_date = tk.StringVar(value="")
+        self.entry_date_box = ttk.Combobox(row, textvariable=self.entry_date, state="disabled")
+        self.entry_date_box.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=4)
+        self.entry_date_box.bind("<<ComboboxSelected>>", lambda _e: self._choose_entry_date())
+        tip(self.entry_date_box, "Switch the selected entry to another package of the same setup (defect, cell, "
+                                 "method, step), newest first; it keeps its colour and place.")
 
         box = ttk.LabelFrame(body, text="Channels")
         box.pack(fill=tk.X, padx=6, pady=4)
@@ -228,6 +239,51 @@ class ComparisonTab(ttk.Frame):
         self.invalidate()
         self.render_current()
 
+    def _selected_entry(self) -> Entry | None:
+        selection = self.entry_tree.selection()
+        if len(selection) != 1:
+            return None
+        return next((e for e in self.entries if e.package.key == selection[0]), None)
+
+    def _sync_entry_date(self) -> None:
+        entry = self._selected_entry()
+        if entry is None:
+            self.entry_date_box.configure(values=[], state="disabled")
+            self.entry_date.set("")
+            return
+        versions = self.app.production_versions(entry.package)
+        labels = version_labels(versions)
+        self.entry_date_box.configure(values=labels, state="readonly" if len(versions) > 1 else "disabled")
+        index = next(i for i, p in enumerate(versions) if p.key == entry.package.key)
+        self.entry_date.set(labels[index])
+
+    def _choose_entry_date(self) -> None:
+        entry = self._selected_entry()
+        if entry is None:
+            return
+        versions = self.app.production_versions(entry.package)
+        labels = version_labels(versions)
+        if self.entry_date.get() not in labels:
+            return
+        package = versions[labels.index(self.entry_date.get())]
+        if package.key == entry.package.key:
+            return
+        if any(e.package.key == package.key for e in self.entries):
+            messagebox.showinfo("Already compared", f"{package.long_label} is already an entry of this comparison.")
+            self._sync_entry_date()
+            return
+        self.switch_entry(entry, package)
+
+    def switch_entry(self, entry: Entry, package: ProductionPackage) -> None:
+        """Replace an entry's package by another version in place (same colour and position)."""
+        entry.package = package
+        entry.session = self.app.production_session(package)
+        self.sync_controls()
+        self.entry_tree.selection_set([package.key])
+        self.invalidate()
+        self.render_current()
+        self.app._save_state()
+
     def _recolor(self) -> None:
         for index, entry in enumerate(self.entries):
             entry.color = pplots.entry_color(index)
@@ -283,6 +339,7 @@ class ComparisonTab(ttk.Frame):
         self.update_entry_tree()
 
     def update_entry_tree(self) -> None:
+        selected = set(self.entry_tree.selection())  # kept across the rebuilds while entries compute
         self.entry_tree.delete(*self.entry_tree.get_children())
         for entry in self.entries:
             tag = f"c{entry.color}"
@@ -295,6 +352,9 @@ class ComparisonTab(ttk.Frame):
                 status = "ready"
             self.entry_tree.insert("", tk.END, iid=entry.package.key, values=(entry.package.long_label, status),
                                    tags=(tag,))
+        keep = [iid for iid in selected if self.entry_tree.exists(iid)]
+        if keep and set(keep) != set(self.entry_tree.selection()):
+            self.entry_tree.selection_set(keep)
 
     # -- data -------------------------------------------------------------------------------------------
 

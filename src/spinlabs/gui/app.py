@@ -31,7 +31,13 @@ from spinlabs.gui import plots, theme
 from spinlabs.gui.analysis import ModeEntry, NormResult, PackSession
 from spinlabs.gui.catalog import Catalog, Group, Scheme
 from spinlabs.gui.comparison import ComparisonTab
-from spinlabs.gui.production import ProductionPackage, ProductionSession, production_packages
+from spinlabs.gui.production import (
+    ProductionPackage,
+    ProductionSession,
+    production_packages,
+    production_setups,
+    version_labels,
+)
 from spinlabs.gui.state import GuiState, TabState, load_state, save_state
 from spinlabs.gui.tabs import TabView
 from spinlabs.gui.tooltips import Tooltip
@@ -578,7 +584,10 @@ class ConvergenceApp:
         # Production couplings and rates are computed off the UI thread, one job at a time (each is numpy-heavy)
         self.executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="spinlabs-gui")
         self._sessions: dict[str, ProductionSession] = {}
-        self._production_by_row: dict[str, ProductionPackage] = {}
+        # Production sidebar: one row per setup (defect, cell, method, step), its versions newest first, and
+        # the version chosen in the date dropdown (the latest unless changed)
+        self._production_setups: dict[str, list[ProductionPackage]] = {}
+        self._production_choice: dict[str, str] = {}
         self._comparison_count = 0
         self._scheme_vars: dict[str, tuple[tk.BooleanVar, tk.StringVar]] = {}
         self._syncing = False
@@ -858,13 +867,24 @@ class ConvergenceApp:
             self.production_tab, columns=("defect", "cell", "method", "step", "date"), show="headings",
             height=14, selectmode="extended",
         )
-        for key, title, width in (("defect", "Defect", 70), ("cell", "Cell", 45), ("method", "Method", 80),
-                                  ("step", "Step", 45), ("date", "Date", 75)):
+        for key, title, width in (("defect", "Defect", 60), ("cell", "Cell", 40), ("method", "Method", 70),
+                                  ("step", "Step", 40), ("date", "Date", 125)):
             self.production_tree.heading(key, text=title)
             self.production_tree.column(key, width=width, anchor=tk.W)
         self.production_tree.pack(fill=tk.BOTH, expand=True, padx=6, pady=4)
-        self._tip(self.production_tree, "Select one or more packages (Ctrl/Shift-click), then add them to a comparison.")
+        self._tip(self.production_tree, "One row per setup (defect, cell, method, step) with its latest data, as "
+                  "the registry picks it. Select one or more (Ctrl/Shift-click), then add them to a comparison.")
         self.production_tree.bind("<Double-1>", lambda _e: self.add_to_comparison())
+        self.production_tree.bind("<<TreeviewSelect>>", lambda _e: self._sync_production_date())
+        row = ttk.Frame(self.production_tab, style="Card.TFrame")
+        row.pack(fill=tk.X, padx=6, pady=2)
+        ttk.Label(row, text="Date", style="CardMuted.TLabel").pack(side=tk.LEFT)
+        self.production_date = tk.StringVar(value="")
+        self.production_date_box = ttk.Combobox(row, textvariable=self.production_date, state="disabled")
+        self.production_date_box.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=4)
+        self.production_date_box.bind("<<ComboboxSelected>>", lambda _e: self._choose_production_date())
+        self._tip(self.production_date_box, "The data of the selected setup to use: the latest by default; "
+                  "earlier packages of the same setup, newest first.")
         self.production_hidden = ttk.Label(self.production_tab, text="", wraplength=320, style="CardMuted.TLabel")
         self.production_hidden.pack(anchor=tk.W, padx=6)
         new = ttk.Button(self.production_tab, text="New comparison", command=self.new_comparison_from_selection,
@@ -880,8 +900,8 @@ class ConvergenceApp:
         if not hasattr(self, "production_tree"):
             return
         needle = self.production_filter.get().strip().lower()
+        selected = set(self.production_tree.selection())
         self.production_tree.delete(*self.production_tree.get_children())
-        self._production_by_row = {}
         try:
             every = production_packages(complete_only=False)
         except Exception:  # noqa: BLE001 -- an unreadable registry leaves the list empty
@@ -892,13 +912,59 @@ class ConvergenceApp:
         self.production_hidden.configure(
             text=f"{hidden} package(s) without second-order data hidden (first-order-only *_1d files or empty "
                  "ones: no two-phonon spectra, rates or T1)." if hidden else "")
-        for package in packages:
-            values = (package.defect, package.cell or "", package.method or "",
-                      f"{package.step:g}" if package.step is not None else "", package.date)
-            if needle and needle not in " ".join(map(str, values)).lower():
+        self._production_setups = production_setups(packages)
+        for iid, versions in self._production_setups.items():
+            dates = " ".join(p.date for p in versions)
+            if needle and needle not in f"{self._production_values(iid)} {dates}".lower():
                 continue
-            self._production_by_row[package.key] = package
-            self.production_tree.insert("", tk.END, iid=package.key, values=values)
+            self.production_tree.insert("", tk.END, iid=iid, values=self._production_values(iid))
+        keep = [iid for iid in selected if self.production_tree.exists(iid)]
+        if keep:
+            self.production_tree.selection_set(keep)
+        self._sync_production_date()
+
+    def _production_chosen(self, iid: str) -> ProductionPackage:
+        """The version of a setup row in use: the one chosen in the date dropdown, else the latest."""
+        versions = self._production_setups[iid]
+        chosen = self._production_choice.get(iid)
+        return next((p for p in versions if p.key == chosen), versions[0])
+
+    def _production_values(self, iid: str) -> tuple:
+        versions = self._production_setups[iid]
+        package = self._production_chosen(iid)
+        defect, cell, method, step = package.setup
+        date = version_labels(versions)[versions.index(package)]
+        if len(versions) > 1:
+            date += f"  [{len(versions)}]"
+        return (defect, cell or "", method, f"{step:g}" if package.step is not None else "", date)
+
+    def _sync_production_date(self) -> None:
+        """The date dropdown follows the selection: one setup selected lists its versions, newest first."""
+        selection = [iid for iid in self.production_tree.selection() if iid in self._production_setups]
+        if len(selection) != 1:
+            self.production_date_box.configure(values=[], state="disabled")
+            self.production_date.set("" if not selection else "(several setups selected)")
+            return
+        versions = self._production_setups[selection[0]]
+        labels = version_labels(versions)
+        self.production_date_box.configure(values=labels, state="readonly" if len(versions) > 1 else "disabled")
+        self.production_date.set(labels[versions.index(self._production_chosen(selection[0]))])
+
+    def _choose_production_date(self) -> None:
+        selection = [iid for iid in self.production_tree.selection() if iid in self._production_setups]
+        if len(selection) != 1:
+            return
+        iid = selection[0]
+        versions = self._production_setups[iid]
+        labels = version_labels(versions)
+        if self.production_date.get() in labels:
+            self._production_choice[iid] = versions[labels.index(self.production_date.get())].key
+            self.production_tree.item(iid, values=self._production_values(iid))
+
+    def production_versions(self, package: ProductionPackage) -> list[ProductionPackage]:
+        """Every registered version of a package's setup, newest first (just the package if unregistered)."""
+        versions = self._production_setups.get(package.setup_key, [])
+        return versions if any(p.key == package.key for p in versions) else [package]
 
     def production_session(self, package: ProductionPackage) -> ProductionSession:
         """One session per package, shared by every comparison tab (its results and caches)."""
@@ -907,8 +973,8 @@ class ConvergenceApp:
         return self._sessions[package.key]
 
     def _selected_production(self) -> list[ProductionPackage]:
-        return [self._production_by_row[iid] for iid in self.production_tree.selection()
-                if iid in self._production_by_row]
+        return [self._production_chosen(iid) for iid in self.production_tree.selection()
+                if iid in self._production_setups]
 
     def new_comparison(self, packages: list[ProductionPackage] | None = None, state: dict | None = None,
                        *, select: bool = True) -> ComparisonTab:
