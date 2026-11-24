@@ -137,6 +137,7 @@ def build_norm_summary_figure(
     colors: list[str] | None = None,
     dpi: int = 100,
     figsize: tuple[float, float] | None = None,
+    canonical: bool = False,
 ) -> Figure:
     """The CLI summary figure for GUI columns, with optional forward/central overlay."""
     if not columns:
@@ -144,7 +145,7 @@ def build_norm_summary_figure(
         _empty(ax, "Open a convergence pack to see the summary")
         return fig
     fig, axes = plt.subplots(
-        2, len(columns), figsize=figsize or (max(7.5, 8.0 * len(columns)), 9.5), squeeze=False,
+        2, len(columns), figsize=figsize or (max(7.5, 7.5 * len(columns)), 9.5), squeeze=False,
         sharex="col", sharey="row", dpi=dpi,
     )
     all_modes: set[int] = set()
@@ -226,7 +227,10 @@ def build_norm_summary_figure(
         second_ax.set_xlabel("|Q| (step size)")
         _norm_legends(first_ax, second_ax, mode_ids, column.modes, col_colors, column)
 
-    fig.subplots_adjust(left=0.08, right=0.965, top=0.92, bottom=0.10, hspace=0.24, wspace=0.16)
+    if canonical:
+        fig.tight_layout()
+    else:
+        fig.subplots_adjust(left=0.08, right=0.965, top=0.92, bottom=0.10, hspace=0.24, wspace=0.16)
     return fig
 
 
@@ -243,20 +247,25 @@ def _offset_text(column: NormColumnPlot) -> str:
 def _norm_legends(ax, second_ax, mode_ids, modes, colors, column: NormColumnPlot) -> None:
     mode_legend = ax.legend(handles=_mode_handles(mode_ids, modes, colors), loc="lower right", fontsize=9)
     ax.add_artist(mode_legend)
-    handles = [
-        Line2D([], [], marker="o", ls="", color="0.35", mfc="0.35", label="+Q"),
-        Line2D([], [], marker="o", ls="", color="0.35", mfc="white", label="−Q"),
-        Line2D([], [], ls="-", color="0.35", label="fit, Q → 0"),
-    ]
-    if column.forward is not None:
-        handles.append(Line2D([], [], ls="--", color="0.35", label="forward error"))
-    if column.central is not None:
+    forward = column.forward is not None and bool(column.forward.rows)
+    central = column.central is not None and bool(column.central.rows)
+    handles = []
+    if forward:
+        handles += [
+            Line2D([], [], marker="o", ls="", color="0.35", mfc="0.35", label="+Q"),
+            Line2D([], [], marker="o", ls="", color="0.35", mfc="white", label="−Q"),
+            Line2D([], [], ls="-", color="0.35", label="fit, Q → 0"),
+            Line2D([], [], ls="--", color="0.35", label="forward error"),
+        ]
+    if central:
         handles += [
             Line2D([], [], marker=_CENTRAL_MARKER["o"], ls="", color="0.35", mfc="white",
-                   label="central (diamonds)"),
+                   label="central"),
+            Line2D([], [], ls="--", color="0.35", label="central fit, Q → 0"),
             Line2D([], [], ls=":", color="0.35", label="central error"),
         ]
-    ax.legend(handles=handles, loc="lower left", fontsize=8)
+    if handles:
+        ax.legend(handles=handles, loc="lower left", fontsize=8)
 
 
 def build_channel_summary_figure(
@@ -267,6 +276,7 @@ def build_channel_summary_figure(
     tol: float = TRUNC_TOL,
     dpi: int = 100,
     figsize: tuple[float, float] | None = None,
+    canonical: bool = False,
 ) -> Figure:
     """The V_{Delta n} channel summary for GUI columns."""
     if not columns:
@@ -274,7 +284,7 @@ def build_channel_summary_figure(
         _empty(ax, "Open a convergence pack to see the coupling channels")
         return fig
     fig, axes = plt.subplots(
-        2, len(columns), figsize=figsize or (max(7.5, 8.0 * len(columns)), 9.5), squeeze=False,
+        2, len(columns), figsize=figsize or (max(7.5, 7.5 * len(columns)), 9.5), squeeze=False,
         sharex="col", sharey="row", dpi=dpi,
     )
     all_modes = sorted({mode.mode for column in columns for mode in column.analysis.modes})
@@ -363,7 +373,10 @@ def build_channel_summary_figure(
         second_ax.set_ylabel(r"second order $V_{\Delta n}$ (MHz/Q$^2$)")
         second_ax.set_xlabel("|Q| (step size)")
         _channel_legends(first_ax, second_ax, mode_ids, column.modes, col_colors, schemes)
-    fig.subplots_adjust(left=0.08, right=0.965, top=0.92, bottom=0.10, hspace=0.24, wspace=0.16)
+    if canonical:
+        fig.tight_layout()
+    else:
+        fig.subplots_adjust(left=0.08, right=0.965, top=0.92, bottom=0.10, hspace=0.24, wspace=0.16)
     return fig
 
 
@@ -374,10 +387,11 @@ def _channel_legends(ax, second_ax, mode_ids, modes, colors, schemes) -> None:
         Line2D([], [], marker=CHANNEL_MARKERS[c], ls=_CHANNEL_LS[c], color="0.35", label=CHANNEL_LABELS[c])
         for c in CHANNELS
     ]
-    if "forward" in schemes:
-        handles.append(Line2D([], [], marker="o", ls="", color="0.35", mfc="0.35", label="forward"))
-    if "central" in schemes:
-        handles.append(Line2D([], [], marker="o", ls="", color="0.35", mfc="white", label="central"))
+    if "forward" in schemes and "central" in schemes:
+        handles += [
+            Line2D([], [], marker="o", ls="", color="0.35", mfc="0.35", label="forward (filled)"),
+            Line2D([], [], marker="o", ls="", color="0.35", mfc="white", label="central (open)"),
+        ]
     handles.append(Line2D([], [], ls="--", color="0.35", label="conservative error"))
     ax.legend(handles=handles, loc="lower left", fontsize=8)
 
@@ -538,6 +552,7 @@ def build_mode_figure(
     schemes: tuple[str, ...] = ("forward", "central"),
     dpi: int = 100,
     figsize: tuple[float, float] | None = None,
+    canonical: bool = False,
 ) -> ModeFigureResult:
     """The CLI's per-mode 3x2 figure, returned instead of saved."""
     conv = session.conv
@@ -692,7 +707,10 @@ def build_mode_figure(
     title = f"mode {mode}: $D_\\lambda$" if not deviation else f"mode {mode}: $D_\\lambda - D_0$"
     fig.suptitle(title + suffix)
     axes[0, 1].legend(fontsize=7)
-    fig.subplots_adjust(left=0.085, right=0.955, top=0.86, bottom=0.10, hspace=0.85, wspace=0.25)
+    if canonical:
+        fig.tight_layout()
+    else:
+        fig.subplots_adjust(left=0.085, right=0.955, top=0.86, bottom=0.10, hspace=0.85, wspace=0.25)
     return ModeFigureResult(
         figure=fig, report=report, noise=noise, offset=offset, label=label, warnings=warnings,
         extra_lines=extra_lines, reports=reports,

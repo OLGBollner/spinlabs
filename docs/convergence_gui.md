@@ -133,9 +133,10 @@ Each tab has nested **Summary** and **Mode detail** views.
     Channels).
   - **Details**: the CLI-style `format_snr` text for the active mode/column plus
     warnings (missing Q=0, unfinished runs, unknown symmetries, modes skipped).
-- Save figure exports the visible Summary tab or the active Mode detail with
-  CLI-like names under `figures/convergence/`, with Save As. Export CSV writes
-  the current table. The status bar shows the written path.
+- Save figure rebuilds the current view at the CLI's canonical figure size and
+  layout (not the stretched on-screen copy) and writes PNG, SVG or PDF through
+  the Save figure menu, with CLI-like names under `figures/convergence/`.
+  Export CSV writes the current table. The status bar shows the written path.
 - Advanced parameters live in a collapsed sidebar section: noise override
   (automatic pooled sigma by default), SNR target, truncation tolerance,
   weak-mode fraction, drop the Q=0 anchor (Mode detail), deviation plot and

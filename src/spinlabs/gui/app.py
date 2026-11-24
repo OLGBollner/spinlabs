@@ -374,16 +374,12 @@ class PackTab(ttk.Frame):
             bits.append(f"{len(col.session.warnings())} warning(s)")
         return "  |  ".join(bits)
 
-    def render_summary(self) -> None:
+    def _summary_figure(self, *, canonical: bool = False) -> Figure:
         schemes = self.enabled_schemes()
         if not schemes:
-            self._summary_columns = None
-            self.summary_view.set_figure(plots.message_figure("Select Forward and/or Central to draw differences"))
-            return
+            return plots.message_figure("Select Forward and/or Central to draw differences")
         if not self.visible_modes:
-            self._summary_columns = None
-            self.summary_view.set_figure(plots.message_figure("No modes selected for the Summary"))
-            return
+            return plots.message_figure("No modes selected for the Summary")
         if self.display == "channels":
             columns = [
                 plots.ChannelColumnPlot(
@@ -392,42 +388,54 @@ class PackTab(ttk.Frame):
                 for col in self.columns
             ]
             self._summary_columns = columns
-            fig = plots.build_channel_summary_figure(
-                columns, schemes=schemes, figsize=self.summary_view.target_figsize()
+            return plots.build_channel_summary_figure(
+                columns, schemes=schemes, figsize=None if canonical else self.summary_view.target_figsize(),
+                canonical=canonical,
             )
-        else:
-            columns = [
-                plots.NormColumnPlot(
-                    col.label, self._mode_entries,
-                    self._norm(col, False) if "forward" in schemes else None,
-                    self._norm(col, True) if "central" in schemes else None,
-                    self._column_note(col),
-                )
-                for col in self.columns
-            ]
-            self._summary_columns = columns
-            fig = plots.build_norm_summary_figure(columns, figsize=self.summary_view.target_figsize())
-        self.summary_view.set_figure(fig)
+        columns = [
+            plots.NormColumnPlot(
+                col.label, self._mode_entries,
+                self._norm(col, False) if "forward" in schemes else None,
+                self._norm(col, True) if "central" in schemes else None,
+                self._column_note(col),
+            )
+            for col in self.columns
+        ]
+        self._summary_columns = columns
+        return plots.build_norm_summary_figure(
+            columns, figsize=None if canonical else self.summary_view.target_figsize(), canonical=canonical
+        )
 
-    def render_mode(self) -> None:
+    def render_summary(self) -> None:
+        self.summary_view.set_figure(self._summary_figure())
+
+    def _mode_figure(self, *, canonical: bool = False):
         session = self.active_session
         mode = self.active_mode
         if session is None or mode is None:
-            self._mode_result = None
-            self.mode_view.set_figure(plots.message_figure("Select a pack column and a mode"))
-            return
+            return plots.message_figure("Select a pack column and a mode"), None
         try:
             result = plots.build_mode_figure(
                 session, mode, quad=self.quad, deviation=self.deviation, drop_anchor=self.drop_anchor,
                 noise=self.noise, snr_target=self.target, trunc_tol=self.tol, schemes=self.enabled_schemes(),
-                figsize=self.mode_view.target_figsize(),
+                figsize=None if canonical else self.mode_view.target_figsize(), canonical=canonical,
             )
         except Exception as exc:
-            self._mode_result = None
-            self.mode_view.set_figure(plots.message_figure(str(exc)))
-            return
+            return plots.message_figure(str(exc)), None
+        return result.figure, result
+
+    def render_mode(self) -> None:
+        figure, result = self._mode_figure()
         self._mode_result = result
-        self.mode_view.set_figure(result.figure)
+        self.mode_view.set_figure(figure)
+
+    def canonical_figure(self) -> Figure:
+        """The figure as the CLI would write it, independent of the window size."""
+        if self.nested.index("current") == 1:
+            figure, _result = self._mode_figure(canonical=True)
+        else:
+            figure = self._summary_figure(canonical=True)
+        return figure
 
     # -- report ------------------------------------------------------------
 
@@ -746,8 +754,10 @@ class ConvergenceApp:
         file_menu.add_separator()
         file_menu.add_command(label="Refresh registry", command=self.refresh_registry)
         file_menu.add_separator()
-        file_menu.add_command(label="Save figure", command=self.save_figure)
-        file_menu.add_command(label="Save figure as…", command=lambda: self.save_figure(as_=True))
+        save_menu = tk.Menu(file_menu, tearoff=False)
+        for fmt, label in (("png", "PNG"), ("svg", "SVG"), ("pdf", "PDF")):
+            save_menu.add_command(label=f"{label}…", command=lambda f=fmt: self.save_figure(f))
+        file_menu.add_cascade(label="Save figure", menu=save_menu)
         file_menu.add_command(label="Export table CSV…", command=self.export_csv)
         file_menu.add_separator()
         file_menu.add_command(label="Close tab", command=self.close_tab, accelerator="Ctrl+W")
@@ -792,9 +802,14 @@ class ConvergenceApp:
         refresh_button = ttk.Button(bar, text="Refresh", command=self.refresh_registry)
         refresh_button.pack(side=tk.LEFT, padx=(0, 2))
         self._tip(refresh_button, "Re-read the registry and refresh the defect groups.")
-        save_button = ttk.Button(bar, text="Save figure", command=self.save_figure)
+        save_button = ttk.Menubutton(bar, text="Save figure")
+        save_menu = tk.Menu(save_button, tearoff=False)
+        for fmt, label in (("png", "PNG"), ("svg", "SVG"), ("pdf", "PDF")):
+            save_menu.add_command(label=f"{label}…", command=lambda f=fmt: self.save_figure(f))
+        save_button.configure(menu=save_menu)
+        self._save_menu = save_menu
         save_button.pack(side=tk.LEFT, padx=(0, 2))
-        self._tip(save_button, "Save the visible Summary or Mode-detail figure under figures/convergence/.")
+        self._tip(save_button, "Save the current view as a CLI-style PNG, SVG or PDF figure.")
         csv_button = ttk.Button(bar, text="Export CSV", command=self.export_csv)
         csv_button.pack(side=tk.LEFT, padx=(0, 2))
         self._tip(csv_button, "Export the current report table as a CSV file.")
@@ -1599,30 +1614,33 @@ class ConvergenceApp:
     def _default_output(self, tab: PackTab, suffix: str) -> Path:
         return Path("figures") / "convergence" / f"{tab.save_stem()}{suffix}"
 
-    def save_figure(self, *, as_: bool = False) -> None:
+    def save_figure(self, fmt: str = "png") -> None:
+        """Write the CLI-style figure (not the stretched on-screen one) in the chosen format."""
         tab = self.active_tab
         if tab is None:
             return
-        fig = tab.visible_figure()
-        if fig is None:
-            messagebox.showinfo("No figure", "There is no figure to save yet.")
-            return
-        default = self._default_output(tab, ".png")
+        fmt = fmt.lower() if fmt.lower() in ("png", "svg", "pdf") else "png"
+        figure = tab.canonical_figure()
+        default = self._default_output(tab, f".{fmt}")
         default.parent.mkdir(parents=True, exist_ok=True)
-        if as_:
-            path = filedialog.asksaveasfilename(
-                title="Save figure", initialdir=str(default.parent), initialfile=default.name,
-                defaultextension=".png", filetypes=[("PNG", "*.png"), ("PDF", "*.pdf"), ("All files", "*.*")],
-            )
-            if not path:
-                return
-        else:
-            path = default
+        path = filedialog.asksaveasfilename(
+            title=f"Save figure ({fmt.upper()})", initialdir=str(default.parent), initialfile=default.name,
+            defaultextension=f".{fmt}",
+            filetypes=[("PNG", "*.png"), ("SVG", "*.svg"), ("PDF", "*.pdf"), ("All files", "*.*")],
+        )
+        if not path:
+            plt.close(figure)
+            return
+        path = Path(path)
+        if path.suffix.lower() not in (".png", ".svg", ".pdf"):
+            path = path.with_suffix(f".{fmt}")
         try:
-            fig.savefig(path, dpi=200)
+            figure.savefig(path, dpi=300)
         except Exception as exc:
             messagebox.showerror("Save failed", str(exc))
             return
+        finally:
+            plt.close(figure)
         self.set_status(f"Saved figure: {path}")
 
     def export_csv(self) -> None:

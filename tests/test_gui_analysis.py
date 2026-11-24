@@ -131,6 +131,37 @@ def test_plot_builders_make_figures(tmp_path):
     assert message_figure("empty").axes
 
 
+def _legend_texts(figure):
+    texts = []
+    for ax in figure.axes:
+        legend = ax.get_legend()
+        if legend is not None:
+            texts.extend(item.get_text() for item in legend.get_texts())
+    return texts
+
+
+def test_legends_show_only_the_enabled_scheme(tmp_path):
+    pack = _save(tmp_path / "NV_512.npz")
+    session = PackSession(pack, "AO", "normalized")
+    modes = {entry.mode: entry for entry in session.modes()}
+    channels = session.channels(set(modes))
+    forward_channel = build_channel_summary_figure(
+        [ChannelColumnPlot("AO", modes, channels)], schemes=("forward",)
+    )
+    texts = _legend_texts(forward_channel)
+    assert not any("forward" in text.lower() or "central" in text.lower() for text in texts)
+    forward = session.norm(set(modes), central=False)
+    norm = build_norm_summary_figure([NormColumnPlot("AO", modes, forward, None)])
+    texts = _legend_texts(norm)
+    assert "+Q" in texts
+    assert not any("central" in text.lower() for text in texts)
+    central = session.norm(set(modes), central=True)
+    norm = build_norm_summary_figure([NormColumnPlot("AO", modes, None, central)])
+    texts = _legend_texts(norm)
+    assert "+Q" not in texts
+    assert any("central" in text.lower() for text in texts)
+
+
 def test_empty_mode_selection_is_empty_not_all(tmp_path):
     pack = _save(tmp_path / "NV_512.npz")
     session = PackSession(pack, "AO", "normalized")
