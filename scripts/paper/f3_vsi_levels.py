@@ -19,6 +19,7 @@ from common import Record, rates
 from spinlabs.spin import spin_factor
 
 MHZ_PER_MEV = 241798.9242
+SYSTEM = "V_Si_576"  # the cell of M5, whose computed ground-state D orders the doublets
 COL = {"dm1": C.COLORS["V0pm"], "dm2": C.COLORS["Vpm"], "A1": C.COLORS["V00"], "forbidden": "#9a9893"}
 
 
@@ -133,7 +134,8 @@ def draw(plt, d_sign):
     ax.text(xb - 0.02, (y_hi + y_lo) / 2, r"$2|D|$", ha="right", va="center", fontsize=C.FONT - 1)
     # optically pumped doublet
     yp = y_hi if 0.5 in upper else y_lo
-    ax.text(0.5 * (xl + xr), yp + (0.19 if yp == y_hi else -0.21), r"optically pumped ($\pm\frac{1}{2}$)",
+    # above the upper doublet's note, or (D > 0: the pumped doublet lower) between the lower note and the legend
+    ax.text(0.5 * (xl + xr), yp + (0.19 if yp == y_hi else -0.145), r"optically pumped ($\pm\frac{1}{2}$)",
             ha="center", va="center", fontsize=C.FONT - 2.5, style="italic", color=C.COLORS["ref"])
     # legend
     from matplotlib.lines import Line2D
@@ -152,8 +154,8 @@ def main():
     plt = C.style()
     rec = Record("F3", "V_Si- (S = 3/2) level diagram with the transition operators", "scripts/paper/f3_vsi_levels.py",
                  "main")
-    d_ao = float(rates("V_Si_128", "AO")["zfs_mev"])
-    d_uo = float(rates("V_Si_128", "UO")["zfs_mev"])
+    d_ao = float(rates(SYSTEM, "AO")["zfs_mev"])
+    d_uo = float(rates(SYSTEM, "UO")["zfs_mev"])
     rows, forbidden = check()
     for label, dm, op, e3, e1, ratio, sf in rows:
         if op != "Fz" and not np.isclose(ratio, sf):
@@ -169,7 +171,8 @@ def main():
          "## Sign of D", "",
          f"AO (used): D = {d_ao * MHZ_PER_MEV:.1f} MHz ({'negative' if d_ao < 0 else 'positive'}): E(+-3/2) = D, "
          f"E(+-1/2) = -D, so the {'+-1/2' if d_ao < 0 else '+-3/2'} doublet is on top. "
-         f"UO: D = {d_uo * MHZ_PER_MEV:.2f} MHz, the opposite sign.", "",
+         f"UO: D = {d_uo * MHZ_PER_MEV:.2f} MHz, {'the same' if np.sign(d_uo) == np.sign(d_ao) else 'the opposite'} "
+         "sign.", "",
          "## Matrix elements", "",
          "Explicit spin matrices (basis m = S..-S, hbar = 1), F_x' = sqrt2 {Sx,Sz}, F_y' = sqrt2 {Sy,Sz}, "
          "F_x = Sx^2 - Sy^2, F_y = {Sx,Sy}, F_z = 3 Sz^2 - S(S+1). Spin-1 reference: <+1|F|0> (dm = 1), <+1|F|-1> "
@@ -184,7 +187,7 @@ def main():
     path = C.MAIN / "numbers_vsi_levels.md"
     path.write_text("\n".join(L) + "\n")
     print("\n".join(L))
-    rec.data["settings"] = {"schematic": "not to scale", "D sign from": "AO package " + C.SYSTEMS["V_Si_128"]["packages"]["AO"],
+    rec.data["settings"] = {"schematic": "not to scale", "D sign from": "AO package " + C.SYSTEMS[SYSTEM]["packages"]["AO"],
                             "D_MHz": {"AO": d_ao * MHZ_PER_MEV, "UO": d_uo * MHZ_PER_MEV},
                             "numbers file": "main/numbers_vsi_levels.md"}
     rec.data["numbers"] = {"matrix elements": [dict(zip(("transition", "dm", "operator", "S=3/2", "S=1", "ratio",

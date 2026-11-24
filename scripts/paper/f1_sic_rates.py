@@ -3,7 +3,7 @@
 One row per defect, in the layout of the NV- figure sq_dq_rates_cambria_measured
 (figures/cambria_comparison/sq_dq_rates.py), without experiment:
   VV0 (128), ClV+ (576), S = 1: (a) Omega (0 <-> +-1), (b) gamma (+1 <-> -1);
-  V_Si- (128), S = 3/2: (a) dm = 1 (+3/2 <-> +1/2, equal to -3/2 <-> -1/2), (b) dm = 2 (+3/2 <-> -1/2, equal to
+  V_Si- (576), S = 3/2: (a) dm = 1 (+3/2 <-> +1/2, equal to -3/2 <-> -1/2), (b) dm = 2 (+3/2 <-> -1/2, equal to
   -3/2 <-> +1/2). The within-doublet rates (+1/2 <-> -1/2, +3/2 <-> -3/2) are zero by symmetry; checked here.
 Direction convention, as the NV- figure (Omega = 0 -> +1 there, upward since D > 0): each plotted rate is the
 upward rate (lower to upper level) of the scheme's own ZFS D; gamma connects degenerate levels at zero field, so
@@ -23,10 +23,10 @@ from phonon_limited import SIMIN, onset, simin_dep
 T = C.TEMPERATURES
 QUOTE = (100.0, 300.0, 500.0)
 T_MIN = 50.0  # K, first temperature drawn (as the NV- figure)
-T_START = {"V_Si_128": 25.0}  # V_Si-: earlier, so its curves start left of the phonon-limited line (42.5 K)
+T_START = {"V_Si_576": 25.0}  # V_Si-: earlier, so its curves start left of the phonon-limited line (42.5 K)
 MHZ_PER_MEV = 241798.9242
-ROWS = ("DiV_128", "ClV_576", "V_Si_128")
-NAMES = {"DiV_128": "VV0 (128)", "ClV_576": "ClV+ (576)", "V_Si_128": "V_Si- (128)"}
+ROWS = ("DiV_128", "ClV_576", "V_Si_576")
+NAMES = {"DiV_128": "VV0 (128)", "ClV_576": "ClV+ (576)", "V_Si_576": "V_Si- (576)"}
 
 
 def channels(spin, d_mev):
@@ -94,7 +94,7 @@ def main():
             ax.set_xlim(0, 620)
             ax.set_ylim(10 ** np.floor(np.log10(lo)), 10 ** np.ceil(np.log10(hi)))
             ax.set_title(title, pad=3)
-            if system == "V_Si_128":
+            if system == "V_Si_576":
                 C.phonon_limited_line(ax, t_c, "phonon-limited\n(upper limit)")
             C.panel_letter(ax, 2 * row + col)
             if row == len(ROWS) - 1:
@@ -125,9 +125,12 @@ def main():
         for ch in c["channels"]:
             L.append(f"| {NAMES[system]} {scheme} | {c['spin']:g} | {c['D_MHz']:.1f} | {ch['name']} | {ch['upward key']} "
                      f"| {ch['downward key']} | {ch['max |up - down| / up (T >= 50 K)']:.1e} |")
+    vsi_d = {s: conv[("V_Si_576", s)]["D_MHz"] for s in C.SCHEMES}
+    lower = {s: "+-3/2" if d < 0 else "+-1/2" for s, d in vsi_d.items()}
     L += ["", "V_Si- channel names: dm1 = +3/2 <-> +1/2 (equal to -3/2 <-> -1/2), dm2 = +3/2 <-> -1/2 (equal to "
-          "-3/2 <-> +1/2). The two V_Si- schemes have opposite signs of D (AO < 0: +-3/2 doublet lower; UO > 0: "
-          "+-1/2 lower), so their upward keys differ.", "", "## Rates (1/s)", "",
+          "-3/2 <-> +1/2). V_Si- D: " + ", ".join(f"{s} {d:.1f} MHz ({lower[s]} doublet lower)" for s, d in vsi_d.items())
+          + (": the same sign, so the same upward keys." if len(set(lower.values())) == 1
+             else ": opposite signs, so their upward keys differ."), "", "## Rates (1/s)", "",
           f"| defect | scheme | channel | {hdr} | without projection ({hdr}) |", "|---|---|---|" + "---|" * (len(QUOTE) + 1)]
     nums = {}
     for (system, scheme), d in data.items():
@@ -153,7 +156,7 @@ def main():
     rec.data["settings"] = {
         "systems": {s: {sc: C.SYSTEMS[s]["packages"][sc] for sc in C.SCHEMES} for s in ROWS},
         "sigma_meV": C.SIGMA, "direct": C.DIRECT, "pairs": C.PAIRS, "processes": list(C.PROCESSES),
-        "zero-gap pairs": "excluded by symmetry", "temperatures drawn": f"{T_MIN:g}-{T[-1]:g} K (V_Si-: {T_START['V_Si_128']:g}-{T[-1]:g} K)",
+        "zero-gap pairs": "excluded by symmetry", "temperatures drawn": f"{T_MIN:g}-{T[-1]:g} K (V_Si-: {T_START['V_Si_576']:g}-{T[-1]:g} K)",
         "direction convention": "upward rate (lower -> upper level by the scheme's computed D), as the NV- figure; "
                                 "gamma: degenerate levels, both directions equal",
         "conventions": {f"{s} {sc}": v for (s, sc), v in conv.items()},

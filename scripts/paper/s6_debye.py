@@ -20,7 +20,7 @@ MHZ_PER_MEV = Cn.e * 1e-3 / Cn.h / 1e6
 
 
 def fit(system, scheme, key):
-    spec = parse_phonon_data(str(C.DATA / system / "phonon_data.npz"))
+    spec = parse_phonon_data(str(C.phonon_file(system)))
     c = couplings(system, scheme)
     return debye_coefficient(spec, c["frequencies"], np.abs(c[key]) / MHZ_PER_MEV), c
 

@@ -9,6 +9,7 @@ import subprocess
 from pathlib import Path
 
 
+from spinlabs.models import reduced_spectrum_reason
 from spinlabs.parsers import parse_phonon_data, save_phonon_npz
 from spinlabs.vasp.modes import mode_numbers
 from spinlabs.symmetry import (
@@ -424,6 +425,14 @@ def resolve_sym_phonon(out: Path, phonon: Path, align: bool = True) -> Path:
     """
     data = out / "data"
     spectrum = parse_phonon_data(phonon)
+    reduced = reduced_spectrum_reason(spectrum)
+    if reduced is not None:
+        # Filtering and aligning a reduced spectrum find no partners: it would pass through as its own
+        # "full" spectrum (phonon_data[_aligned].npz) and its unaligned E modes be tagged aligned.
+        raise ValueError(
+            f"{phonon} is a symmetry-reduced phonon spectrum ({reduced}); pass the full spectrum "
+            "(the phonon code's, e.g. phonons.yaml or phonon_data.npz with every mode)"
+        )
     classify_and_pair(spectrum)
     symmetrized = symmetrize_degenerate_groups(spectrum)
     symmetrized.aligned = False  # classified only, unless aligned below
@@ -482,7 +491,11 @@ def full_spectrum_of(phonon: Path) -> Path:
     reduced = parse_phonon_data(phonon)
     idx = None if reduced.original_indices is None else np.asarray(reduced.original_indices, dtype=int)
     if idx is None or np.array_equal(idx, np.arange(reduced.n_modes)):
-        return phonon  # every mode in its own place: a full spectrum
+        # every mode in its own place: a full spectrum, unless modes are missing (a reduced file without indices)
+        reason = reduced_spectrum_reason(reduced)
+        if reason is not None:
+            raise ValueError(f"{phonon} is symmetry-reduced ({reason}) and does not say which full spectrum it is from")
+        return phonon
     full_path = phonon.with_name(_SYM_PART.sub("", phonon.stem, count=1) + phonon.suffix)
     if full_path == phonon or not full_path.is_file():
         raise ValueError(f"no full spectrum {full_path.name} next to the symmetry-reduced {phonon}")

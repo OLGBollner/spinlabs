@@ -49,6 +49,7 @@ def build_symmetrize_parser(parser: argparse.ArgumentParser) -> None:
 
 
 def _run(args: argparse.Namespace) -> None:
+    from spinlabs.models import reduced_spectrum_reason
     from spinlabs.parsers import parse_phonon_npz, prepare_phonopy_yaml, save_phonon_npz
     from spinlabs.symmetry import (
         align_degenerate_pairs,
@@ -75,6 +76,10 @@ def _run(args: argparse.Namespace) -> None:
             spectrum, _ = prepare_phonopy_yaml(path, poscar_path=args.poscar)
     except Exception as error:  # a clean message, not a traceback
         raise SystemExit(f"error: failed to parse {path}: {error}")
+    reduced = reduced_spectrum_reason(spectrum)
+    if reduced is not None:
+        # nothing left to filter or align: it would be written back as its own "full" spectrum
+        raise SystemExit(f"error: {path} is already symmetry-reduced ({reduced}); pass the full spectrum")
 
     try:
         classify_and_pair(spectrum)
