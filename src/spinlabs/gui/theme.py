@@ -203,7 +203,7 @@ def apply_theme(root: tk.Misc) -> Palette:
     if modern:
         _apply_modern(style, family, palette)
     else:
-        LOGGER.warning("sv-ttk is not available; using the fallback Tk theme (pip install 'sv-ttk')")
+        LOGGER.warning("sv-ttk is not available; using the fallback Tk theme (pip install -e '.[gui]')")
         _apply_fallback(style, family, palette)
     return palette
 

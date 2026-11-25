@@ -13,10 +13,14 @@ dependencies = [
     "pymatgen",
     "matplotlib",
     "pyyaml",
-    "sv-ttk>=2.6",
 ]
 
 [project.optional-dependencies]
+# The GUI (spinlabs gui) needs Tkinter from the Python build or the system (e.g. apt install python3-tk); this
+# extra only adds its theme. The CLI and everything else run without Tk or a display.
+gui = [
+    "sv-ttk>=2.6",
+]
 dev = [
     "pytest",
     "ruff",

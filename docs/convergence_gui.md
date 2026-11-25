@@ -7,9 +7,11 @@ second view.
 
 ## Scope
 
-- One window, Tkinter + embedded Matplotlib (`python3-tk` is the only extra
-  system requirement; one new pip dependency, `sv-ttk`, for the theme, see
-  Appearance).
+- One window, Tkinter + embedded Matplotlib. Tkinter comes with the Python
+  build or the system (`python3-tk`); the theme, `sv-ttk`, is the optional
+  `gui` extra: `pip install -e ".[gui]"` (see Appearance). Plain
+  `pip install -e .` installs the CLI without any GUI dependency, for
+  machines without Tk or a display; only `spinlabs gui` imports Tk.
 - Convergence data only in this version. The shell is structured so another
   viewer can become another top-level tab later.
 - The registry is read-only. `spinlabs package --conv` remains the only way to
@@ -271,6 +273,7 @@ The window uses the Sun Valley ttk theme (the Windows 11-style `sv-ttk`), with a
 dark header, white cards on a soft grey surface, one blue accent and a
 consistent type scale.  `src/spinlabs/gui/theme.py` owns the small custom layer
 and falls back to the previous dependency-free clam theme if `sv-ttk` is not
-installed.  `sv-ttk` is a declared dependency; reinstall with
-`pip install -e .` after pulling this change.  Matplotlib's on-screen figures
+installed.  `sv-ttk` is the optional `gui` extra: install it with
+`pip install -e ".[gui]"` (plain `pip install -e .` leaves it out, for
+headless machines).  Matplotlib's on-screen figures
 use matching surface colours, muted axes and typography.
