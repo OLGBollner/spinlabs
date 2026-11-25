@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import csv
 from dataclasses import dataclass
-import gc
 from pathlib import Path
 import sys
 import tkinter as tk
@@ -29,6 +28,7 @@ from spinlabs.convergence_summary import WEAK_FRACTION
 from spinlabs.gui import plots, theme
 from spinlabs.gui.analysis import ModeEntry, NormResult, PackSession
 from spinlabs.gui.catalog import Catalog, Group, Scheme
+from spinlabs.gui.collector import MainThreadCollector
 from spinlabs.gui.comparison import ComparisonTab
 from spinlabs.gui.production import (
     ProductionPackage,
@@ -1926,56 +1926,6 @@ class ConvergenceApp:
             self.root.destroy()
         except tk.TclError:
             pass
-
-
-class MainThreadCollector:
-    """Run Python's cyclic garbage collector on the Tk thread only.
-
-    Tk objects (variables, images, widgets of rebuilt figures) end up in
-    reference cycles.  If the automatic collector fires on the background
-    worker thread (a large production cell allocates a lot there), their
-    ``__del__`` calls Tcl from the wrong thread and Tcl aborts the process
-    ("Tcl_AsyncDelete: async handler deleted by the wrong thread").  Automatic
-    collection is therefore switched off and replaced by a poll on the Tk event
-    loop that collects with the same generation thresholds.
-    """
-
-    INTERVAL_MS = 200
-
-    def __init__(self, root) -> None:
-        self.root = root
-        gc.disable()
-        self._job = self.root.after(self.INTERVAL_MS, self._tick)
-        if hasattr(root, "bind"):
-            root.bind("<Destroy>", self._stop, add="+")
-
-    @staticmethod
-    def collect() -> int | None:
-        """Collect the generation automatic collection would; ``None`` if below the threshold."""
-        t0, t1, t2 = gc.get_threshold()
-        c0, c1, c2 = gc.get_count()
-        if c0 < t0:
-            return None
-        generation = 2 if c1 >= t1 and c2 >= t2 else 1 if c1 >= t1 else 0
-        gc.collect(generation)
-        return generation
-
-    def _tick(self) -> None:
-        self.collect()
-        try:
-            self._job = self.root.after(self.INTERVAL_MS, self._tick)
-        except tk.TclError:  # the window is gone
-            self._job = None
-
-    def _stop(self, event=None) -> None:
-        if event is not None and event.widget is not self.root:
-            return  # a child widget was destroyed
-        if self._job is not None:
-            try:
-                self.root.after_cancel(self._job)
-            except tk.TclError:
-                pass
-            self._job = None
 
 
 def main(paths: list[Path] | None = None) -> int:

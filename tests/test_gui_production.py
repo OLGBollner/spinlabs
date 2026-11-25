@@ -273,7 +273,7 @@ def test_figure_builders_draw_every_entry(session):
 def test_garbage_is_collected_on_the_tk_thread_only():
     import gc
 
-    from spinlabs.gui.app import MainThreadCollector
+    from spinlabs.gui.collector import MainThreadCollector
 
     class Root:
         def __init__(self):
@@ -302,7 +302,6 @@ def test_garbage_is_collected_on_the_tk_thread_only():
     finally:
         if was_enabled:
             gc.enable()
-        matplotlib.use("Agg")  # importing the app switched to TkAgg; later figure tests draw headless
 
 
 def test_experimental_data_for_the_rates_and_t1_views(tmp_path, monkeypatch):
