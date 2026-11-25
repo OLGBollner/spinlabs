@@ -334,3 +334,75 @@ def test_experimental_data_for_the_rates_and_t1_views(tmp_path, monkeypatch):
     fig = pplots.build_t1_figure([("A", "#1f77b4", (np.array([50.0, 100.0]), np.array([1.0, 0.1]), "ms_0"))],
                                  experiment=[(s.legend, "o", None, x, y) for s, x, y in lowest])
     assert sum(1 for line in fig.axes[0].lines if line.get_label().startswith("exp.:")) == 2
+
+
+def test_a_dead_worker_process_is_restarted(session):
+    import os
+    from concurrent.futures import BrokenExecutor
+
+    from spinlabs.gui.production import stop_worker, worker_executor
+
+    worker = worker_executor()
+    try:
+        with pytest.raises(BrokenExecutor):
+            worker.submit(os._exit, 1).result(timeout=120)  # the process dies, as when the OOM killer takes it
+        assert worker.submit(int, "7").result(timeout=120) == 7 and worker.restarts == 1  # a fresh process
+    finally:
+        stop_worker(worker)
+
+
+def test_a_job_that_kills_the_worker_is_retried_once_then_reported(session):
+    from concurrent.futures import Future
+    from concurrent.futures.process import BrokenProcessPool
+
+    class Dying:
+        def submit(self, *args, **kwargs):
+            future = Future()
+            future.set_exception(BrokenProcessPool("killed"))
+            return future
+
+    assert session.get("rates", SETTINGS, executor=Dying()) is None
+    assert session.status("rates", SETTINGS) == "missing"  # not failed: the next draw queues it again
+    session.get("rates", SETTINGS, executor=Dying())
+    assert session.status("rates", SETTINGS) == "failed" and "died twice" in session.errors(SETTINGS)[0]
+
+
+def test_the_cache_follows_the_code_and_the_phonon_spectrum(session, monkeypatch):
+    import spinlabs.gui.production as production
+
+    folder = session._folder("couplings", SETTINGS.coupling_key())
+    assert production.code_fingerprint() == production.code_fingerprint()  # stable
+    monkeypatch.setattr(production, "_CODE_FINGERPRINT", "changed code")
+    assert session._folder("couplings", SETTINGS.coupling_key()) != folder
+    monkeypatch.undo()
+    other = ProductionSession(session.package, cache_dir=session.cache_dir, phonon_file=session.phonon_file.parent / "x.npz")
+    assert other._folder("couplings", SETTINGS.coupling_key()) != folder
+
+
+def test_errors_and_memory_follow_the_current_settings(session):
+    import spinlabs.gui.production as production
+
+    good, bad = SETTINGS, Settings(direct="gaussian", t_min=50.0, t_max=300.0, t_step=50.0, sigma=2.0)
+    key = ("rates", session._settings_key("rates", bad), ())
+    session._errors[key] = "ValueError: no rate"
+    assert session.errors(bad) == ["ValueError: no rate"] and session.errors(good) == []
+    assert session.errors() == ["ValueError: no rate"]
+    for sigma in (1.0, 2.0, 3.0, 4.0, 5.0):
+        session.get("spectral_map", Settings(direct="gaussian", sigma=sigma))
+    kept = [k for k in session._results if k[0] == "spectral_map"]
+    assert len(kept) == production.KEEP_RESULTS and kept[-1][1][-1] == 5.0  # the latest ones
+
+
+def test_a_decont_set_with_a_first_order_only_file_is_incomplete(tmp_path, monkeypatch):
+    monkeypatch.setattr(registry, "REGISTRY_PATH", tmp_path / "registry.db")
+    folder = tmp_path / "NV_64" / "pert_0.2" / "full_decont" / "20261119"
+    folder.mkdir(parents=True)
+    conn = registry.ensure_db()
+    for level, orders in (("ms_1", [1, 2]), ("ms_0_127", [1, 2]), ("ms_-1", [1])):
+        f = folder / f"{level}.npz"
+        f.write_bytes(level.encode())
+        registry.register_file(conn, f, "packaged_zfs_sublevel", defect="NV", cell_size=64,
+                               calc_method="full_decont", pert_scale=0.2, spin_sublevel=level, pert_order=orders)
+    assert production_packages(conn) == []
+    (package,) = production_packages(conn, complete_only=False)
+    assert package.path == folder and not package.complete

@@ -318,3 +318,23 @@ def test_corrupt_state_is_a_clean_default(tmp_path):
     state = load_state(path)
     assert state.tabs == []
     assert state.geometry == "1500x950"
+
+
+def test_channel_noise_lines_are_on_the_scale_of_the_points(tmp_path):
+    """The second-order channel points are c = V(d2D)/(2Q^2); err2 is the error of the 2c differences, so the
+    noise line is err2/(2Q^2) (and err1/Q in first order): SNR 1 as the safe window's 2c Q^2 vs err2 test counts it."""
+    pack = _save(tmp_path / "NV_512.npz")
+    session = PackSession(pack, "AO", "normalized")
+    modes = {entry.mode: entry for entry in session.modes()}
+    channels = session.channels(set(modes))
+    fig = build_channel_summary_figure([ChannelColumnPlot("AO", modes, channels)], schemes=("forward",))
+    err1, err2 = channels.errors["forward"]
+    first_ax, second_ax = fig.axes[0], fig.axes[1]
+
+    def noise_line(ax):
+        return next(line for line in ax.lines if line.get_color() == "0.35" and line.get_linestyle() == "--")
+
+    q, y = noise_line(second_ax).get_data()
+    assert np.allclose(y, err2 / (2 * np.asarray(q) ** 2))
+    q, y = noise_line(first_ax).get_data()
+    assert np.allclose(y, err1 / np.asarray(q))

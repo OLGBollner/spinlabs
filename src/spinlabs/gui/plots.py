@@ -393,7 +393,9 @@ def build_channel_summary_figure(
                 continue
             err1, err2 = analysis.errors[scheme]
             first_ax.plot(q, err1 / q, style, color="0.35", lw=1)
-            second_ax.plot(q, err2 / q**2, style, color="0.35", lw=1)
+            # err2 is the error of the 2c differences; the channel points are c = V(d2D)/(2Q^2), so the noise
+            # on them is err2/(2Q^2): SNR 1 on this curve, as the safe window's 2c Q^2 vs err2 test counts it
+            second_ax.plot(q, err2 / (2 * q**2), style, color="0.35", lw=1)
         # One common window: Forward when it is enabled, else Central.
         shade_scheme = "forward" if "forward" in schemes else "central"
         for order, ax in ((1, first_ax), (2, second_ax)):

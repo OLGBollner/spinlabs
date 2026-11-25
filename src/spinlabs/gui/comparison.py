@@ -66,7 +66,7 @@ class ComparisonTab(ttk.Frame):
         self.processes = {"total"}
         self.t1_state = T1_STATES[0]
         self.ratio = False
-        self.map_entry = 0
+        self.map_key: str | None = None  # the package the 2D map shows (by key: removals and moves keep it)
         self.show_experiment = True
         self.experiment_off: set[str] = set(EXPERIMENT_OFF_BY_DEFAULT)  # series (ExperimentSeries.key) left out
         self._experiment_cache: dict[str, list] = {}  # defect -> its experimental series
@@ -311,6 +311,8 @@ class ComparisonTab(ttk.Frame):
 
     def switch_entry(self, entry: Entry, package: ProductionPackage) -> None:
         """Replace an entry's package by another version in place (same colour and position)."""
+        if self.map_key == entry.package.key:
+            self.map_key = package.key
         entry.package = package
         entry.session = self.app.production_session(package)
         self.sync_controls()
@@ -349,17 +351,20 @@ class ComparisonTab(ttk.Frame):
             self.render_current()
             self.app._save_state()
 
+    @property
+    def map_entry(self) -> int:
+        """Index of the entry the 2D map shows: the chosen package, else the first entry."""
+        keys = [e.package.key for e in self.entries]
+        return keys.index(self.map_key) if self.map_key in keys else 0
+
     def move_entry(self, key: str, index: int, *, redraw: bool = True) -> None:
         """Move an entry to ``index`` (its colour stays; the 2D-map choice follows its entry)."""
         position = next((i for i, e in enumerate(self.entries) if e.package.key == key), None)
         if position is None:
             return
         index = max(0, min(index, len(self.entries) - 1))
-        mapped = self.entries[min(self.map_entry, len(self.entries) - 1)] if self.entries else None
         entry = self.entries.pop(position)
         self.entries.insert(index, entry)
-        if mapped is not None:
-            self.map_entry = self.entries.index(mapped)
         self.entry_tree.move(key, "", index)
         labels = [e.package.long_label for e in self.entries]
         self.map_combo["values"] = labels
@@ -376,9 +381,9 @@ class ComparisonTab(ttk.Frame):
         self.processes = {name for name, var in self.process_vars.items() if var.get()}
         self.t1_state = self.state_var.get() or T1_STATES[0]
         self.ratio = bool(self.ratio_var.get())
-        labels = [e.package.long_label for e in self.entries]
-        if self.map_var.get() in labels:
-            self.map_entry = labels.index(self.map_var.get())
+        chosen = self.map_combo.current()  # by position: identical labels stay distinct
+        if 0 <= chosen < len(self.entries):
+            self.map_key = self.entries[chosen].package.key
         self.render_current()
 
     # -- experiment -------------------------------------------------------------------------------------
@@ -495,7 +500,6 @@ class ComparisonTab(ttk.Frame):
         self.mirror_var.set(s.mirror_projection)
         labels = [e.package.long_label for e in self.entries]
         self.map_combo["values"] = labels
-        self.map_entry = min(self.map_entry, max(0, len(labels) - 1))
         self.map_var.set(labels[self.map_entry] if labels else "")
         self.show_experiment_var.set(self.show_experiment)
         self._rebuild_experiment_list()
@@ -511,7 +515,7 @@ class ComparisonTab(ttk.Frame):
         for index, entry in enumerate(self.entries):
             tag = f"c{entry.color}"
             tree.tag_configure(tag, foreground=entry.color)
-            if entry.session.errors():
+            if entry.session.errors(self.settings):
                 status = "failed"
             elif entry.session.busy():
                 status = "computing…"
@@ -603,7 +607,7 @@ class ComparisonTab(ttk.Frame):
     def _report_signature(self) -> tuple:
         needs = [(e.session, k, a) for e in self.entries
                  for k, a in (("couplings", ()), ("rates", ()), ("t1", (self.t1_state,)))]
-        return (self._signature(needs), tuple(len(e.session.errors()) for e in self.entries),
+        return (self._signature(needs), tuple(len(e.session.errors(self.settings)) for e in self.entries),
                 tuple(e.package.key for e in self.entries), self.settings.rate_key(), self.t1_state)
 
     def render_current(self) -> None:
@@ -654,7 +658,7 @@ class ComparisonTab(ttk.Frame):
 
     def status_text(self) -> str:
         busy = [e.package.label for e in self.entries if e.session.busy()]
-        failed = [e.package.label for e in self.entries if e.session.errors()]
+        failed = [e.package.label for e in self.entries if e.session.errors(self.settings)]
         bits = [self.title, f"{len(self.entries)} entr{'y' if len(self.entries) == 1 else 'ies'}",
                 VIEWS[self.nested.index("current")]]
         if busy:
@@ -727,7 +731,7 @@ class ComparisonTab(ttk.Frame):
                 lines.extend(f"  warning: {w}" for w in r.warnings)
             if entry.session.busy():
                 lines.append("  computing…")
-            lines.extend(f"  error: {e}" for e in entry.session.errors())
+            lines.extend(f"  error: {e}" for e in entry.session.errors(self.settings))
         series = self.experiment_series()
         if series:
             shown = {s.key for s in self._shown_experiment()}
@@ -752,7 +756,7 @@ class ComparisonTab(ttk.Frame):
             "colors": [e.color for e in self.entries],
             "settings": self.settings.to_dict(), "channels": sorted(self.channels),
             "log": self.log, "processes": sorted(self.processes), "t1_state": self.t1_state, "ratio": self.ratio,
-            "map_entry": self.map_entry, "show_experiment": self.show_experiment,
+            "map_entry": self.map_entry, "map_key": self.map_key, "show_experiment": self.show_experiment,
             "experiment_off": sorted(self.experiment_off), "view": self.nested.index("current"),
         }
 
@@ -763,7 +767,8 @@ class ComparisonTab(ttk.Frame):
         self.processes = set(state.get("processes") or self.processes) & set(PROCESSES)
         self.t1_state = state.get("t1_state") if state.get("t1_state") in T1_STATES else T1_STATES[0]
         self.ratio = bool(state.get("ratio", False))
-        self.map_entry = int(state.get("map_entry") or 0)
+        self.map_key = state.get("map_key")  # older sessions saved an index: resolved below
+        saved_index = int(state.get("map_entry") or 0)
         self.show_experiment = bool(state.get("show_experiment", True))
         if "experiment_off" in state:
             self.experiment_off = {str(k) for k in state.get("experiment_off") or []}
@@ -781,6 +786,8 @@ class ComparisonTab(ttk.Frame):
                 color = color if isinstance(color, str) and color not in used else self._free_color()
                 self.entries.append(Entry(package, self.app.production_session(package), color))
                 known.add(package.key)
+        if self.map_key not in known and self.entries:
+            self.map_key = self.entries[min(saved_index, len(self.entries) - 1)].package.key
         view = int(state.get("view") or 0)
         if 0 <= view < len(VIEWS):
             self.nested.select(view)

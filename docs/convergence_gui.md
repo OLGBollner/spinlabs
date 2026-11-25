@@ -105,6 +105,10 @@ Each tab has nested **Summary** and **Mode detail** views.
 - Second order at each step: production's diagonal difference
   `d2D = (D(2Q) − 2D(Q) + D₀)/Q²` where `2Q` was run, or
   `(D(Q) + D(−Q) − 2D₀)/Q²`; the channel value is `V(d2D)/2`.
+- The grey noise curves are on the points' scale: `err1/Q` in first order and
+  `err2/(2Q²)` in second order (`err2` is the error of the 2c differences,
+  the points are c): a point on the curve has SNR 1, and a channel's safe
+  window starts where its value is the SNR target (3) times the curve.
 - The horizontal Q → 0 lines come from the same polynomial fits the norm view
   uses: `V(b)` for first order; `V(c)` for second order (equivalent to
   `V(2c)/2`), with the fitted `c` from the pair cubic (forward) or quartic
@@ -240,9 +244,16 @@ sizes and methods in one graph, one colour per entry.
   densities the rates integrate (zero-gap pairs left out). Everything is
   computed in a separate worker process (spawned, one job at a time), so the
   window never waits on numpy and no Tk object is touched off the Tk thread;
-  closing the window ends the worker. Couplings and rates are cached on disk
+  closing the window ends the worker. If the worker process dies (killed, out
+  of memory) the next job starts a fresh one; the job it died on is retried
+  once and then reported as failed. Couplings and rates are cached on disk
   under `~/.spinlabs/gui_cache/` (written atomically), keyed on the package's
-  registered sha256 and the settings (B is part of the rates key). The tab
+  registered sha256, the settings (B is part of the rates key), the phonon
+  spectrum override and a fingerprint of the spinlabs code that computes them
+  (everything but the GUI, the CLI and plotting), so a code change recomputes
+  instead of showing stale numbers. Only the latest few results per kind are
+  kept in memory; older ones come back from the disk cache. An entry reads
+  "failed" only for errors under the current settings. The tab
   polls and redraws a view only when one of its results arrives or fails, or
   its inputs change, so a view stays still while the rest is computed.
 - Tk objects must only be freed on the Tk thread, so `spinlabs gui` turns off

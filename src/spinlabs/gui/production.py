@@ -16,7 +16,7 @@ direct model and the temperatures in the key.
 
 from __future__ import annotations
 
-from concurrent.futures import CancelledError, ProcessPoolExecutor
+from concurrent.futures import BrokenExecutor, CancelledError, ProcessPoolExecutor
 from dataclasses import asdict, dataclass, field
 import hashlib
 import json
@@ -53,6 +53,28 @@ PROCESSES = {
 # for S = 3/2 the T1 states are the +-m doublets, so +S and -S are the same doublet)
 T1_STATES = ("lowest |m_s|", "highest |m_s|", "m_s = -S")
 _DATE = re.compile(r"(?<!\d)(\d{8})(?!\d)")
+
+
+CACHE_FORMAT = 2  # bump when the layout of the cached files changes
+KEEP_RESULTS = 3  # results kept in memory per kind (and T1 state); older ones come back from the disk cache
+_CODE_FINGERPRINT: str | None = None
+
+
+def code_fingerprint() -> str:
+    """A hash of the spinlabs code that computes couplings and rates (everything but the GUI, the CLI and the
+    plotting), in the cache key: a change to that code recomputes instead of showing stale numbers."""
+    global _CODE_FINGERPRINT
+    if _CODE_FINGERPRINT is None:
+        root = Path(pipeline.__file__).resolve().parent
+        h = hashlib.sha1(f"format {CACHE_FORMAT}".encode())
+        for path in sorted(root.rglob("*.py")):
+            rel = path.relative_to(root)
+            if rel.parts[0] in ("gui", "cli") or rel.name.startswith("plot"):
+                continue
+            h.update(str(rel).encode())
+            h.update(path.read_bytes())
+        _CODE_FINGERPRINT = h.hexdigest()[:16]
+    return _CODE_FINGERPRINT
 
 
 def default_cache_dir() -> Path:
@@ -142,8 +164,6 @@ def production_packages(conn=None, *, complete_only: bool = True) -> list[Produc
     out: dict[str, ProductionPackage] = {}
     for row_id, kind, path, defect, cell, method, step, pert_order in rows:
         complete = _has_second_order(pert_order)
-        if complete_only and not complete:
-            continue
         path = Path(path)
         if kind == "packaged_zfs_sublevel":
             path = path.parent  # the set is the folder of its sublevel files
@@ -160,7 +180,10 @@ def production_packages(conn=None, *, complete_only: bool = True) -> list[Produc
             date=_date_of(path), complete=complete and (previous is None or previous.complete),
             registered=max(int(row_id), previous.registered if previous else 0),
         )
-    packages = sorted(out.values(), key=lambda p: -p.registered)  # newest first within each setup
+    # Filtered after a decontamination set's sublevel files are merged: one first-order-only file makes the set
+    # incomplete
+    packages = [p for p in out.values() if p.complete or not complete_only]
+    packages.sort(key=lambda p: -p.registered)  # newest first within each setup
     return sorted(packages, key=lambda p: (p.defect, p.cell or 0, p.setup[2], p.step if p.step is not None else -1))
 
 
@@ -464,6 +487,7 @@ class ProductionSession:
         self._results: dict[tuple, object] = {}
         self._errors: dict[tuple, str] = {}
         self._pending: set[tuple] = set()
+        self._died: dict[tuple, int] = {}  # times the worker process died on a computation
         self._lock = threading.Lock()
         self._digest: str | None = None
 
@@ -478,6 +502,7 @@ class ProductionSession:
         key = (kind, self._settings_key(kind, settings), args)
         with self._lock:
             if key in self._results:
+                self._results[key] = self._results.pop(key)  # most recently used last
                 return self._results[key]
             if key in self._errors:
                 raise RuntimeError(self._errors[key])
@@ -506,14 +531,31 @@ class ProductionSession:
             with self._lock:
                 self._pending.discard(key)
             return
-        except Exception as exc:  # noqa: BLE001 -- e.g. the worker process died
+        except BrokenExecutor as exc:  # the worker process died (killed, out of memory): the Worker restarts it
+            with self._lock:
+                self._pending.discard(key)
+                self._died[key] = self._died.get(key, 0) + 1
+                if self._died[key] > 1:  # this job killed it twice: report instead of retrying forever
+                    self._errors[key] = (f"the worker process died twice on this computation ({exc or 'killed'}); "
+                                         "out of memory?")
+            return  # else 'missing' again: the next draw queues it on the restarted worker
+        except Exception as exc:  # noqa: BLE001
             status, value = "error", f"{type(exc).__name__}: {exc}"
         with self._lock:
             if status == "ok":
-                self._results[key] = value
+                self._store(key, value)
             else:
                 self._errors[key] = value
             self._pending.discard(key)
+
+    def _store(self, key, value) -> None:
+        """Keep a result (call with the lock held): at most KEEP_RESULTS per kind and arguments, the least
+        recently used dropped (couplings and rates come back from the disk cache)."""
+        self._results.pop(key, None)
+        self._results[key] = value
+        same = [k for k in self._results if k[0] == key[0] and k[2] == key[2]]
+        for old in same[:-KEEP_RESULTS]:
+            del self._results[old]
 
     def status(self, kind: str, settings: Settings, *args) -> str:
         """'ready', 'failed', 'pending' or 'missing' (never queued); never starts any work."""
@@ -539,7 +581,7 @@ class ProductionSession:
                 return None
             raise RuntimeError(message) from exc
         with self._lock:
-            self._results[key] = result
+            self._store(key, result)
             self._pending.discard(key)
         return result
 
@@ -553,9 +595,14 @@ class ProductionSession:
         with self._lock:
             return bool(self._pending)
 
-    def errors(self) -> list[str]:
+    def errors(self, settings: Settings | None = None) -> list[str]:
+        """The errors of failed computations; with ``settings`` only those of these settings (an entry that
+        failed under other settings is not failed now)."""
         with self._lock:
-            return list(dict.fromkeys(self._errors.values()))
+            items = list(self._errors.items())
+        if settings is not None:
+            items = [(k, v) for k, v in items if k[1] == self._settings_key(k[0], settings)]
+        return list(dict.fromkeys(v for _k, v in items))
 
     @staticmethod
     def _settings_key(kind: str, settings: Settings) -> tuple:
@@ -573,7 +620,10 @@ class ProductionSession:
         return self._digest
 
     def _folder(self, kind: str, key: tuple) -> Path:
-        text = json.dumps([self.digest(), kind, list(key)], default=str)
+        """The cache folder of a result: the package's content, the settings, the phonon spectrum override and
+        the code that computes it (code_fingerprint)."""
+        phonon = str(Path(self.phonon_file).expanduser().resolve()) if self.phonon_file is not None else None
+        text = json.dumps([self.digest(), kind, list(key), phonon, code_fingerprint()], default=str)
         return self.cache_dir / f"{kind}_{hashlib.sha1(text.encode()).hexdigest()[:16]}"
 
     def compute_couplings(self, settings: Settings) -> Couplings:
@@ -732,18 +782,57 @@ def _init_worker() -> None:
     matplotlib.use("Agg")  # the worker never draws on screen
 
 
-def worker_executor() -> ProcessPoolExecutor:
-    """The GUI's computation worker: one separate process (spawned, so it shares no Tk or thread state with
-    the window), jobs in the order queued."""
+def _process_pool() -> ProcessPoolExecutor:
     return ProcessPoolExecutor(max_workers=1, mp_context=multiprocessing.get_context("spawn"),
                                initializer=_init_worker)
 
 
-def stop_worker(executor) -> None:
-    """Drop the queue and end the worker now, also mid-job (cache files are written atomically)."""
-    executor.shutdown(wait=False, cancel_futures=True)
-    for process in list((getattr(executor, "_processes", None) or {}).values()):
+class Worker:
+    """The GUI's computation worker: one separate process (spawned, so it shares no Tk or thread state with
+    the window), jobs in the order queued. If the process dies (killed, out of memory) the pool is broken; the
+    next submit starts a fresh one, so one lost job does not fail every later computation."""
+
+    def __init__(self, factory=_process_pool):
+        self._factory = factory
+        self._pool = None
+        self._lock = threading.Lock()
+        self.restarts = 0
+
+    def submit(self, fn, *args, **kwargs):
+        with self._lock:
+            if self._pool is None:
+                self._pool = self._factory()
+            try:
+                return self._pool.submit(fn, *args, **kwargs)
+            except BrokenExecutor:
+                _stop_pool(self._pool)
+                self._pool = self._factory()
+                self.restarts += 1
+                return self._pool.submit(fn, *args, **kwargs)
+
+    def stop(self) -> None:
+        with self._lock:
+            if self._pool is not None:
+                _stop_pool(self._pool)
+                self._pool = None
+
+
+def worker_executor() -> Worker:
+    return Worker()
+
+
+def _stop_pool(pool) -> None:
+    pool.shutdown(wait=False, cancel_futures=True)
+    for process in list((getattr(pool, "_processes", None) or {}).values()):
         try:
             process.terminate()
         except Exception:  # noqa: BLE001 -- already gone
             pass
+
+
+def stop_worker(executor) -> None:
+    """Drop the queue and end the worker now, also mid-job (cache files are written atomically)."""
+    if isinstance(executor, Worker):
+        executor.stop()
+    else:
+        _stop_pool(executor)
