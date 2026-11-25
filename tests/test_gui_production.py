@@ -84,12 +84,51 @@ def test_rates_and_t1_are_rate_series_and_t1_details(session):
     for process, by_direction in series.rates.items():
         for direction, values in by_direction.items():
             assert np.array_equal(rates.rates[process][direction], values)
-    for which, expected in zip(T1_STATES, ("ms_0", "ms_1")):
+    for which, expected in zip(T1_STATES, ("ms_0", "ms_1", "ms_-1")):
         temps, t1, state = session.get("t1", SETTINGS, which)
         assert state == expected
         ref = pipeline.t1_details(temps, rates.total(pipeline.PRODUCTION_PROCESSES), expected, 1.0)[0]
         assert np.array_equal(t1, ref, equal_nan=True)
     assert rates.total(PROCESSES["total"])[rate_direction(1.0, "d1")][-1] > 0
+
+
+def test_a_magnetic_field_reaches_the_rates_and_splits_the_mirror_transitions(session):
+    field = Settings(direct="gaussian", t_min=50.0, t_max=300.0, t_step=50.0, b_field_mt=60.0)
+    assert field.rate_key() != SETTINGS.rate_key() and field.coupling_key() == SETTINGS.coupling_key()
+    c = session.get("couplings", field)
+    rates = session.get("rates", field)
+    series = pipeline.rate_series(c.coupling_path, field.temperatures, sigma=field.sigma, has_second_order=True,
+                                  degenerate_groups=c.deg_groups, direct="gaussian", b_field_mt=60.0)
+    for process, by_direction in series.rates.items():
+        for direction, values in by_direction.items():
+            assert np.array_equal(rates.rates[process][direction], values)
+    total = rates.total(PROCESSES["total"])
+    assert not np.allclose(total[rate_direction(1.0, "d1")], total[rate_direction(1.0, "d1", -1)])
+    plain = session.get("rates", SETTINGS).total(PROCESSES["total"])
+    assert np.allclose(plain[rate_direction(1.0, "d1")], plain[rate_direction(1.0, "d1", -1)])
+    fig = pplots.build_rates_figure([("A", "#1f77b4", rates)], ["d1", "d2"], {"total": PROCESSES["total"]},
+                                    mirror=True)
+    assert len(fig.axes) == 4 and "-1→0" in fig.axes[2].get_title()  # the -S row
+
+
+def test_the_worker_process_computes_what_the_session_computes(session):
+    from spinlabs.gui.production import stop_worker, worker_executor
+
+    executor = worker_executor()
+    try:
+        remote = ProductionSession(session.package, cache_dir=session.cache_dir.parent / "remote_cache",
+                                   phonon_file=session.phonon_file)
+        assert remote.get("t1", SETTINGS, T1_STATES[0], executor=executor) is None  # queued in the process
+        assert remote.status("t1", SETTINGS, T1_STATES[0]) == "pending" and remote.busy()
+        executor.submit(int).result(timeout=300)  # jobs run in order: the T1 job has finished
+        assert remote.status("t1", SETTINGS, T1_STATES[0]) == "ready" and not remote.busy()
+        temps, t1, state = remote.peek("t1", SETTINGS, T1_STATES[0])
+        ref = session.get("t1", SETTINGS, T1_STATES[0])
+        assert state == ref[2] and np.array_equal(t1, ref[1], equal_nan=True)
+        assert remote.status("rates", SETTINGS) == "missing"  # the GUI side only holds what it asked for
+        assert (session.cache_dir.parent / "remote_cache").is_dir()  # the process wrote the disk cache
+    finally:
+        stop_worker(executor)
 
 
 def test_the_debye_direct_rate_falls_back_with_a_warning(session, monkeypatch):
@@ -106,12 +145,13 @@ def test_queued_work_finishes_and_a_failure_is_reported(session, tmp_path):
         assert session.get("rates", SETTINGS, executor=executor) is None  # queued
         executor.submit(lambda: None).result()  # the queue is processed in order
     assert session.peek("rates", SETTINGS) is not None and not session.busy()
+    assert session.status("rates", SETTINGS) == "ready" and session.status("t1", SETTINGS, "x") == "missing"
     broken = ProductionSession(ProductionPackage(path=tmp_path / "missing.npz", defect="X"), cache_dir=tmp_path / "c")
     with ThreadPoolExecutor(max_workers=1) as executor:
         broken.get("couplings", SETTINGS, executor=executor)
+    assert broken.status("couplings", SETTINGS) == "failed" and broken.errors()
     with pytest.raises(RuntimeError):
         broken.get("couplings", SETTINGS)
-    assert broken.errors()
 
 
 def test_production_packages_list_files_and_decont_sets(tmp_path, monkeypatch):
@@ -201,8 +241,10 @@ def test_settings_validation_and_state_round_trip(tmp_path):
 
 
 def test_states_and_directions_for_both_spins():
-    assert [initial_state(1.5, w) for w in T1_STATES] == ["ms_pm1_2", "ms_pm3_2"]
+    assert [initial_state(1.5, w) for w in T1_STATES] == ["ms_pm1_2", "ms_pm3_2", "ms_pm3_2"]  # doublets
+    assert [initial_state(1.0, w) for w in T1_STATES] == ["ms_0", "ms_1", "ms_-1"]
     assert rate_direction(1.0, "d1") == "1_to_0" and rate_direction(1.0, "d2") == "1_to_-1"
+    assert rate_direction(1.0, "d1", -1) == "-1_to_0" and rate_direction(1.0, "d2", -1) == "-1_to_1"
     assert rate_direction(1.5, "d1") == "1.5_to_0.5" and rate_direction(1.5, "d2") == "1.5_to_-0.5"
 
 

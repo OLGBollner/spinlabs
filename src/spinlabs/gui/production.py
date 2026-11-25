@@ -4,7 +4,9 @@ Every number comes from the production code in :mod:`spinlabs.pipeline`: ``coupl
 couplings exactly as ``spinlabs run`` does (production options, the method read from the data),
 ``rate_series`` gives the rates and ``t1_details`` T1. The spectral functions are those the rates integrate:
 the one-phonon density of |V|^2 and the two-phonon density of TransitionRate.pair_weights with the zero-gap
-pairs left out. Nothing here imports Tk, so it runs headless (tests, worker threads).
+pairs left out. Nothing here imports Tk, so it runs headless (tests, and the GUI's worker process: the GUI
+queues every computation on a separate process, ``worker_executor``, so the window never waits for numpy and
+no Tk object is ever touched outside the Tk thread).
 
 Building the couplings of a large cell takes on the order of a minute, so they are cached on disk under
 ``~/.spinlabs/gui_cache/``, keyed on the package's registered sha256 (registry.package_digest; a file
@@ -14,9 +16,12 @@ direct model and the temperatures in the key.
 
 from __future__ import annotations
 
+from concurrent.futures import CancelledError, ProcessPoolExecutor
 from dataclasses import asdict, dataclass, field
 import hashlib
 import json
+import multiprocessing
+import os
 from pathlib import Path
 import re
 import threading
@@ -44,7 +49,9 @@ PROCESSES = {
     "two-phonon": ("two_phonon",),
     "Raman (1st order)": ("second_order",),
 }
-T1_STATES = ("lowest |m_s|", "highest |m_s|")
+# T1 initial states: the lowest |m_s| (optically pumped), m_s = +S, and m_s = -S (differs from +S in a B field;
+# for S = 3/2 the T1 states are the +-m doublets, so +S and -S are the same doublet)
+T1_STATES = ("lowest |m_s|", "highest |m_s|", "m_s = -S")
 _DATE = re.compile(r"(?<!\d)(\d{8})(?!\d)")
 
 
@@ -229,6 +236,7 @@ class Settings:
     t_min: float = 5.0
     t_max: float = pipeline.PRODUCTION_T_END
     t_step: float = pipeline.PRODUCTION_T_STEP
+    b_field_mt: float = 0.0  # axial magnetic field (mT): Zeeman-splits +m and -m, moves every gap
 
     def __post_init__(self):
         if self.pairs not in PAIR_TREATMENTS:
@@ -239,6 +247,8 @@ class Settings:
             raise ValueError(f"sigma must be positive, got {self.sigma}")
         if not (0 < self.t_min < self.t_max and self.t_step > 0):
             raise ValueError("temperatures: need 0 < T min < T max and a positive step")
+        if not np.isfinite(self.b_field_mt):
+            raise ValueError(f"B must be a number of mT, got {self.b_field_mt}")
 
     @property
     def temperatures(self) -> np.ndarray:
@@ -248,8 +258,9 @@ class Settings:
         return (self.pairs, bool(self.mirror_projection))
 
     def rate_key(self) -> tuple:
-        return (*self.coupling_key(), self.direct, float(self.sigma), float(self.t_min), float(self.t_max),
-                float(self.t_step))
+        key = (*self.coupling_key(), self.direct, float(self.sigma), float(self.t_min), float(self.t_max),
+               float(self.t_step))
+        return key + (float(self.b_field_mt),) if self.b_field_mt else key  # B = 0 keeps the earlier cache keys
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -290,32 +301,42 @@ class Rates:
     zfs_mev: float
     direct: str  # the direct model used (gaussian when Debye could not be fitted)
     warnings: list[str] = field(default_factory=list)
+    b_field_mt: float = 0.0
 
     def total(self, processes) -> dict[str, np.ndarray]:
         directions = next(iter(self.rates.values())).keys()
         return {d: sum(np.asarray(self.rates[p][d], dtype=float) for p in processes) for d in directions}
 
 
-def rate_direction(spin: float, channel: str) -> str:
-    """The transition a channel's rate is shown for: from m = S down by 1 (d1) or 2 (d2).
+def rate_direction(spin: float, channel: str, sign: int = 1) -> str:
+    """The transition a channel's rate is shown for: from m = S down by 1 (d1) or 2 (d2), or with ``sign`` -1
+    its mirror from m = -S up by 1 or 2.
 
-    S = 1: 1 -> 0 (Omega) and 1 -> -1 (gamma); S = 3/2: +3/2 -> +1/2 and +3/2 -> -1/2. At the temperatures
-    shown each rate equals its reverse and its time-reversed partner (the levels are split by ~ D << kT).
+    S = 1: 1 -> 0 (Omega) and 1 -> -1 (gamma), mirrors -1 -> 0 and -1 -> 1; S = 3/2: +3/2 -> +1/2 and
+    +3/2 -> -1/2. Without a field the mirror rates are equal; at the temperatures shown each rate also equals
+    its reverse (the levels are split by ~ D << kT).
     """
     top = max(spin_projections(spin))
     step = {"d1": 1, "d2": 2}[channel]
     if top - step < -top:
         raise ValueError(f"no {channel} transition for spin {spin:g}")
-    return direction_key(top, top - step)
+    return direction_key(sign * top, sign * (top - step))
 
 
 def initial_state(spin: float, which: str) -> str:
-    """The T1 initial state of the lowest or highest |m_s| (relaxation_dynamics.init_populations names):
-    S = 1: ms_0 or ms_1; S = 3/2: ms_pm1_2 or ms_pm3_2. Lowest is the optically pumped state of NV- and V2."""
+    """The T1 initial state (relaxation_dynamics.init_populations names) of the lowest |m_s|, m_s = +S or
+    m_s = -S: S = 1: ms_0, ms_1, ms_-1; S = 3/2: ms_pm1_2, ms_pm3_2, ms_pm3_2 (doublets). Lowest is the
+    optically pumped state of NV- and V2."""
     states = list(init_populations(spin))
-    pick = min if which == T1_STATES[0] else max
-    target = pick(_abs_m(s) for s in states)
-    return next(s for s in states if _abs_m(s) == target)
+    if which == T1_STATES[0]:
+        target = min(_abs_m(s) for s in states)
+        return next(s for s in states if _abs_m(s) == target)
+    target = max(_abs_m(s) for s in states)
+    top = [s for s in states if _abs_m(s) == target]
+    negative = [s for s in top if s.startswith("ms_-")]
+    if which == T1_STATES[2] and negative:
+        return negative[0]
+    return next((s for s in top if not s.startswith("ms_-")), top[0])
 
 
 def _abs_m(state: str) -> float:
@@ -368,8 +389,43 @@ class ProductionSession:
                 self._pending.add(key)
         if executor is None:
             return self._run(key, kind, settings, args, swallow=False)
-        executor.submit(self._run, key, kind, settings, args, swallow=True)
+        try:
+            future = executor.submit(compute_remote, self.package, self.cache_dir, self.phonon_file, kind,
+                                     settings, args)
+        except Exception as exc:  # noqa: BLE001 -- a shut-down or broken pool
+            with self._lock:
+                self._pending.discard(key)
+                self._errors[key] = f"{type(exc).__name__}: {exc}"
+            return None
+        future.add_done_callback(lambda f, key=key: self._finish(key, f))
         return None
+
+    def _finish(self, key, future) -> None:
+        """Keep a queued job's outcome (runs on the executor's thread, never touches Tk)."""
+        try:
+            status, value = future.result()
+        except CancelledError:
+            with self._lock:
+                self._pending.discard(key)
+            return
+        except Exception as exc:  # noqa: BLE001 -- e.g. the worker process died
+            status, value = "error", f"{type(exc).__name__}: {exc}"
+        with self._lock:
+            if status == "ok":
+                self._results[key] = value
+            else:
+                self._errors[key] = value
+            self._pending.discard(key)
+
+    def status(self, kind: str, settings: Settings, *args) -> str:
+        """'ready', 'failed', 'pending' or 'missing' (never queued); never starts any work."""
+        key = (kind, self._settings_key(kind, settings), args)
+        with self._lock:
+            if key in self._results:
+                return "ready"
+            if key in self._errors:
+                return "failed"
+            return "pending" if key in self._pending else "missing"
 
     def _run(self, key, kind, settings, args, *, swallow: bool):
         """Compute and keep one result; a failure is recorded (shown by the tab) and raised unless ``swallow``
@@ -440,7 +496,7 @@ class ProductionSession:
                 "convention": f"{raw.defect}_{raw.cell_size} step {raw.pert_scale:g}: {manager.displacement}",
                 "phonon_file": str(phonon) if phonon is not None else None,
             }
-            meta_path.write_text(json.dumps(meta))
+            _write_atomic(meta_path, lambda tmp: tmp.write_text(json.dumps(meta)))
         meta = json.loads(meta_path.read_text())
         data = SpinPhononCouplingData.load(str(coupling_path)).to_unit("MHz").frequencies_to_unit("meV")
         symmetries = [str(s) for s in (PhononSpectrum.load(spectrum_path).symmetries or [])]
@@ -494,10 +550,11 @@ class ProductionSession:
             warnings: list[str] = []
             direct = settings.direct
             spectrum = PhononSpectrum.load(c.spectrum_path) if direct == "debye" else None
+            b_field = float(settings.b_field_mt)
             try:
                 series = pipeline.rate_series(
                     c.coupling_path, temps, sigma=settings.sigma, has_second_order=True,
-                    degenerate_groups=c.deg_groups, direct=direct, spectrum=spectrum,
+                    degenerate_groups=c.deg_groups, direct=direct, spectrum=spectrum, b_field_mt=b_field,
                 )
             except Exception as exc:  # noqa: BLE001 -- a spectrum the Debye fit cannot use
                 if direct != "debye":
@@ -506,14 +563,17 @@ class ProductionSession:
                 direct = "gaussian"
                 series = pipeline.rate_series(
                     c.coupling_path, temps, sigma=settings.sigma, has_second_order=True,
-                    degenerate_groups=c.deg_groups, direct=direct,
+                    degenerate_groups=c.deg_groups, direct=direct, b_field_mt=b_field,
                 )
             path.parent.mkdir(parents=True, exist_ok=True)
-            np.savez(
-                path, temperatures=series.temperatures, spin=series.spin, zfs_mev=series.zfs_mev, direct=direct,
-                warnings=np.array(json.dumps(warnings)),
-                **{f"{p}:{d}": np.asarray(v, dtype=float) for p, by_d in series.rates.items() for d, v in by_d.items()},
-            )
+            arrays = {f"{p}:{d}": np.asarray(v, dtype=float) for p, by_d in series.rates.items() for d, v in by_d.items()}
+
+            def write(tmp: Path) -> None:
+                with open(tmp, "wb") as handle:
+                    np.savez(handle, temperatures=series.temperatures, spin=series.spin, zfs_mev=series.zfs_mev,
+                             direct=direct, warnings=np.array(json.dumps(warnings)), **arrays)
+
+            _write_atomic(path, write)
         with np.load(path, allow_pickle=True) as d:
             rates: dict[str, dict[str, np.ndarray]] = {}
             for key in d.files:
@@ -523,6 +583,7 @@ class ProductionSession:
             return Rates(
                 temperatures=np.asarray(d["temperatures"], dtype=float), rates=rates, spin=float(d["spin"]),
                 zfs_mev=float(d["zfs_mev"]), direct=str(d["direct"]), warnings=json.loads(str(d["warnings"])),
+                b_field_mt=float(settings.b_field_mt),
             )
 
     def compute_t1(self, settings: Settings, which: str) -> tuple[np.ndarray, np.ndarray, str]:
@@ -531,3 +592,60 @@ class ProductionSession:
         state = initial_state(r.spin, which)
         t1, _eig, _source = pipeline.t1_details(r.temperatures, r.total(pipeline.PRODUCTION_PROCESSES), state, r.spin)
         return r.temperatures, t1, state
+
+
+def _write_atomic(path: Path, write) -> None:
+    """Write a cache file through a temporary name, so a job killed mid-write (the GUI closed) leaves no
+    truncated file behind."""
+    tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    try:
+        write(tmp)
+        os.replace(tmp, path)
+    finally:
+        tmp.unlink(missing_ok=True)
+
+
+# ---------------------------------------------------------------------------------------------------- worker
+
+_WORKER_SESSIONS: dict[tuple, ProductionSession] = {}
+_WORKER_LOCK = threading.Lock()
+
+
+def compute_remote(package: ProductionPackage, cache_dir: Path, phonon_file: Path | None, kind: str,
+                   settings: Settings, args: tuple) -> tuple[str, object]:
+    """One queued computation, run in the worker (a process, or a thread in tests): ("ok", result) or
+    ("error", message). The worker keeps a session per package, so a spectral function or T1 reuses the
+    couplings and rates it already holds."""
+    key = (package.key, str(cache_dir), str(phonon_file))
+    with _WORKER_LOCK:
+        session = _WORKER_SESSIONS.get(key)
+        if session is None:
+            session = _WORKER_SESSIONS[key] = ProductionSession(package, cache_dir=cache_dir,
+                                                                phonon_file=phonon_file)
+    try:
+        return "ok", session.get(kind, settings, *args)
+    except RuntimeError as exc:
+        return "error", str(exc)
+
+
+def _init_worker() -> None:
+    import matplotlib
+
+    matplotlib.use("Agg")  # the worker never draws on screen
+
+
+def worker_executor() -> ProcessPoolExecutor:
+    """The GUI's computation worker: one separate process (spawned, so it shares no Tk or thread state with
+    the window), jobs in the order queued."""
+    return ProcessPoolExecutor(max_workers=1, mp_context=multiprocessing.get_context("spawn"),
+                               initializer=_init_worker)
+
+
+def stop_worker(executor) -> None:
+    """Drop the queue and end the worker now, also mid-job (cache files are written atomically)."""
+    executor.shutdown(wait=False, cancel_futures=True)
+    for process in list((getattr(executor, "_processes", None) or {}).values()):
+        try:
+            process.terminate()
+        except Exception:  # noqa: BLE001 -- already gone
+            pass

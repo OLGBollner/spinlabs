@@ -127,28 +127,42 @@ def build_map_figure(label: str, maps, channels, sigma: float, *, figsize=None, 
     return fig
 
 
-def build_rates_figure(entries, channels, processes, *, figsize=None, dpi: int = 100) -> Figure:
+def _direction_text(key: str) -> str:
+    return key.replace("_to_", "→").replace("0.5", "½").replace("1.5", "3⁄2")
+
+
+def build_rates_figure(entries, channels, processes, *, mirror: bool = False, figsize=None, dpi: int = 100) -> Figure:
     """Rates against temperature, one panel per spin-flip channel (the transition of rate_direction), line style
-    per process. ``entries``: (label, colour, Rates); ``processes``: {name: tuple of rate processes}."""
+    per process. ``entries``: (label, colour, Rates); ``processes``: {name: tuple of rate processes}. With
+    ``mirror`` (a magnetic field: +m and -m differ) a second row shows the transitions from m = -S."""
     channels = [c for c in channels if c in SPIN_FLIP]
     if not entries or not channels or not processes:
         return message_figure("Add entries, and select a spin-flip channel (Δ1, Δ2) and a process", dpi=dpi)
-    fig, axes = _layout(len(channels), figsize, dpi=dpi)
-    for ax, channel in zip(axes[0], channels):
-        directions = set()
-        for label, color, r in entries:
-            key = rate_direction(r.spin, channel)
-            directions.add(key.replace("_to_", "→").replace("0.5", "½").replace("1.5", "3⁄2"))
-            for name, members in processes.items():
-                y = r.total(members)[key]
-                ok = np.isfinite(y) & (y > 0)
-                ax.plot(r.temperatures[ok], y[ok], color=color, ls=PROCESS_STYLES.get(name, "-"), lw=1.2,
-                        label=f"{label}, {name}" if len(processes) > 1 else label)
-        ax.set_yscale("log")
-        ax.set_xlabel("Temperature (K)")
-        ax.set_title(f"{CHANNEL_LABELS[channel]} rate (m$_s$ {', '.join(sorted(directions))})", fontsize=9)
-        ax.grid(True, ls=":", lw=0.5, alpha=0.6)
-    axes[0, 0].set_ylabel(r"rate (s$^{-1}$)")
+    signs = (1, -1) if mirror else (1,)
+    fig, axes = _layout(len(channels), figsize, rows=len(signs), dpi=dpi)
+    for row, sign in enumerate(signs):
+        for ax, channel in zip(axes[row], channels):
+            directions = set()
+            for label, color, r in entries:
+                key = rate_direction(r.spin, channel, sign)
+                total_by_direction = {name: r.total(members) for name, members in processes.items()}
+                if any(key not in by_direction for by_direction in total_by_direction.values()):
+                    continue
+                directions.add(_direction_text(key))
+                for name, by_direction in total_by_direction.items():
+                    y = by_direction[key]
+                    ok = np.isfinite(y) & (y > 0)
+                    ax.plot(r.temperatures[ok], y[ok], color=color, ls=PROCESS_STYLES.get(name, "-"), lw=1.2,
+                            label=f"{label}, {name}" if len(processes) > 1 else label)
+            ax.set_yscale("log")
+            ax.set_xlabel("Temperature (K)")
+            field = ""
+            if mirror:
+                fields = sorted({r.b_field_mt for _l, _c, r in entries})
+                field = f", B = {', '.join(f'{b:g}' for b in fields)} mT"
+            ax.set_title(f"{CHANNEL_LABELS[channel]} rate (m$_s$ {', '.join(sorted(directions))}{field})", fontsize=9)
+            ax.grid(True, ls=":", lw=0.5, alpha=0.6)
+        axes[row, 0].set_ylabel(r"rate (s$^{-1}$)")
     _legend(fig, axes)
     return fig
 

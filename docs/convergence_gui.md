@@ -195,6 +195,9 @@ sizes and methods in one graph, one colour per entry.
   earlier one, newest first, as the convergence date dropdowns do. Inside a
   comparison the *Date* dropdown under the entries switches the selected entry
   to another version of its setup in place (same colour and position).
+  Entries can be dragged to reorder them: legends follow the order and the
+  first entry is the T1-ratio reference; each entry keeps its colour (saved
+  with the session).
   *New comparison* opens a tab with the selected packages;
   *Add to comparison* adds them to the open comparison (a new one if none is
   open). An unregistered package can be added with *Add file…* in the tab.
@@ -208,19 +211,27 @@ sizes and methods in one graph, one colour per entry.
   two-phonon J2(ω, ω) along the diagonal), **2D map** (the full J2(ωx, ωy) of
   one entry, chosen in a dropdown), **Rates** (the Δ1 and Δ2 rates against
   temperature, m_s S → S−1 and S → S−2) and **T1** (lowest or highest |m_s|
-  initial state, optionally relative to the first entry).
+  initial state, m_s = +S or m_s = −S, optionally relative to the first
+  entry).
 - Options in the tab: channels (Δ0, Δ1, Δ2), log scale, σ for the spectral
   functions and the rates, processes for the rates (total, direct,
-  two-phonon, first-order Raman), temperatures, and the production settings
+  two-phonon, first-order Raman), temperatures, an axial magnetic field B
+  (mT; `rate_series(b_field_mt=…)`: Zeeman-splits +m and −m, moves every gap
+  and opens the +m ↔ −m direct rate; with B ≠ 0 the Rates view adds a row of
+  the −S transitions), and the production settings
   (second-order pair treatment, direct model, mirror projection). The
   defaults are those of `spinlabs run`.
 - All numbers come from the production code (`spinlabs.gui.production` over
   `spinlabs.pipeline`): `coupling_manager` for the couplings, `rate_series`
   for the rates, `t1_details` for T1; the spectral functions are the
-  densities the rates integrate (zero-gap pairs left out). Couplings and rates
-  are computed on a background thread and cached on disk under
-  `~/.spinlabs/gui_cache/`, keyed on the package's registered sha256 and the
-  settings; the tab draws the entries that are ready and polls for the rest.
+  densities the rates integrate (zero-gap pairs left out). Everything is
+  computed in a separate worker process (spawned, one job at a time), so the
+  window never waits on numpy and no Tk object is touched off the Tk thread;
+  closing the window ends the worker. Couplings and rates are cached on disk
+  under `~/.spinlabs/gui_cache/` (written atomically), keyed on the package's
+  registered sha256 and the settings (B is part of the rates key). The tab
+  polls and redraws a view only when one of its results arrives or fails, or
+  its inputs change, so a view stays still while the rest is computed.
 - Tk objects must only be freed on the Tk thread, so `spinlabs gui` turns off
   Python's automatic garbage collection and collects from the Tk event loop
   instead (same generation thresholds, polled every 200 ms). Otherwise a

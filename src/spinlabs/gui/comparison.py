@@ -101,7 +101,14 @@ class ComparisonTab(ttk.Frame):
         self.entry_tree.column("entry", width=170, anchor=tk.W)
         self.entry_tree.column("status", width=80, anchor=tk.W)
         self.entry_tree.pack(fill=tk.X, padx=4, pady=4)
-        tip(self.entry_tree, "The packages compared in this tab, one colour each. Add them from the Production tab.")
+        tip(self.entry_tree, "The packages compared in this tab, one colour each. Add them from the Production tab; "
+                             "drag an entry to reorder (legends follow the order; the first entry is the T1 "
+                             "ratio reference).")
+        self._drag: str | None = None
+        self._dragged = False
+        self.entry_tree.bind("<ButtonPress-1>", self._drag_start, add="+")
+        self.entry_tree.bind("<B1-Motion>", self._drag_motion, add="+")
+        self.entry_tree.bind("<ButtonRelease-1>", self._drag_end, add="+")
         row = ttk.Frame(box, style="Card.TFrame")
         row.pack(fill=tk.X, padx=4, pady=(0, 4))
         remove = ttk.Button(row, text="Remove", command=self.remove_selected)
@@ -169,6 +176,14 @@ class ComparisonTab(ttk.Frame):
         ratio = ttk.Checkbutton(box, text="T1 relative to the first entry", variable=self.ratio_var,
                                 command=self._on_option)
         ratio.pack(anchor=tk.W, padx=6, pady=1)
+        ttk.Label(box, text="B (mT, axial)", style="Card.TLabel").pack(anchor=tk.W, padx=6, pady=(4, 0))
+        self.b_var = tk.StringVar(value=f"{self.settings.b_field_mt:g}")
+        b_field = ttk.Entry(box, textvariable=self.b_var, width=8)
+        b_field.pack(anchor=tk.W, padx=6, pady=2)
+        b_field.bind("<Return>", lambda _e: self.apply_settings())
+        tip(b_field, "Axial magnetic field along the defect axis (mT): Zeeman-splits +m_s and −m_s, moves every "
+                     "gap and opens the +m ↔ −m direct rate (spinlabs.pipeline.rate_series b_field_mt). With B ≠ 0 "
+                     "the Rates view adds the −S transitions. Enter applies; the couplings are reused.")
 
         box = ttk.LabelFrame(body, text="Temperatures (K)")
         box.pack(fill=tk.X, padx=6, pady=4)
@@ -210,9 +225,8 @@ class ComparisonTab(ttk.Frame):
             if package.key in known:
                 continue
             session = self.app.production_session(package)
-            self.entries.append(Entry(package, session, pplots.entry_color(len(self.entries))))
+            self.entries.append(Entry(package, session, self._free_color()))
             known.add(package.key)
-        self._recolor()
         self.sync_controls()
         self.invalidate()
         self.render_current()
@@ -234,7 +248,6 @@ class ComparisonTab(ttk.Frame):
     def remove_selected(self) -> None:
         selected = set(self.entry_tree.selection())
         self.entries = [e for e in self.entries if e.package.key not in selected]
-        self._recolor()
         self.sync_controls()
         self.invalidate()
         self.render_current()
@@ -284,9 +297,54 @@ class ComparisonTab(ttk.Frame):
         self.render_current()
         self.app._save_state()
 
-    def _recolor(self) -> None:
-        for index, entry in enumerate(self.entries):
-            entry.color = pplots.entry_color(index)
+    def _free_color(self) -> str:
+        """The first palette colour no entry uses: an entry keeps its colour when others are removed or moved."""
+        used = {e.color for e in self.entries}
+        index = 0
+        while pplots.entry_color(index) in used and index < len(pplots.ENTRY_COLORS):
+            index += 1
+        return pplots.entry_color(index if index < len(pplots.ENTRY_COLORS) else len(self.entries))
+
+    # -- drag to reorder --------------------------------------------------------------------------------
+
+    def _drag_start(self, event) -> None:
+        self._drag = self.entry_tree.identify_row(event.y) or None
+        self._dragged = False
+
+    def _drag_motion(self, event) -> None:
+        if self._drag is None:
+            return
+        target = self.entry_tree.identify_row(event.y)
+        if not target or target == self._drag:
+            return
+        self.move_entry(self._drag, self.entry_tree.index(target), redraw=False)
+        self._dragged = True
+
+    def _drag_end(self, _event) -> None:
+        dragged, self._drag, self._dragged = self._dragged, None, False
+        if dragged:
+            self.invalidate()
+            self.render_current()
+            self.app._save_state()
+
+    def move_entry(self, key: str, index: int, *, redraw: bool = True) -> None:
+        """Move an entry to ``index`` (its colour stays; the 2D-map choice follows its entry)."""
+        position = next((i for i, e in enumerate(self.entries) if e.package.key == key), None)
+        if position is None:
+            return
+        index = max(0, min(index, len(self.entries) - 1))
+        mapped = self.entries[min(self.map_entry, len(self.entries) - 1)] if self.entries else None
+        entry = self.entries.pop(position)
+        self.entries.insert(index, entry)
+        if mapped is not None:
+            self.map_entry = self.entries.index(mapped)
+        self.entry_tree.move(key, "", index)
+        labels = [e.package.long_label for e in self.entries]
+        self.map_combo["values"] = labels
+        self.map_var.set(labels[self.map_entry] if labels else "")
+        if redraw:
+            self.invalidate()
+            self.render_current()
 
     # -- options and settings ---------------------------------------------------------------------------
 
@@ -307,10 +365,10 @@ class ComparisonTab(ttk.Frame):
                 pairs=self.pairs_var.get(), mirror_projection=bool(self.mirror_var.get()),
                 direct=self.direct_var.get(), sigma=float(self.sigma_var.get()),
                 t_min=float(self.t_vars["min"].get()), t_max=float(self.t_vars["max"].get()),
-                t_step=float(self.t_vars["step"].get()),
+                t_step=float(self.t_vars["step"].get()), b_field_mt=float(self.b_var.get() or 0),
             )
         except ValueError as exc:
-            messagebox.showerror("Invalid settings", str(exc) or "σ and the temperatures must be numbers.")
+            messagebox.showerror("Invalid settings", str(exc) or "σ, B and the temperatures must be numbers.")
             return
         self.settings = settings
         self.invalidate()
@@ -327,6 +385,7 @@ class ComparisonTab(ttk.Frame):
         self.ratio_var.set(self.ratio)
         s = self.settings
         self.sigma_var.set(f"{s.sigma:g}")
+        self.b_var.set(f"{s.b_field_mt:g}")
         for name, value in (("min", s.t_min), ("max", s.t_max), ("step", s.t_step)):
             self.t_vars[name].set(f"{value:g}")
         self.pairs_var.set(s.pairs)
@@ -339,22 +398,29 @@ class ComparisonTab(ttk.Frame):
         self.update_entry_tree()
 
     def update_entry_tree(self) -> None:
-        selected = set(self.entry_tree.selection())  # kept across the rebuilds while entries compute
-        self.entry_tree.delete(*self.entry_tree.get_children())
-        for entry in self.entries:
+        """Rows in entry order, updated in place (no rebuild: the selection and a drag survive the polls)."""
+        tree = self.entry_tree
+        keys = [e.package.key for e in self.entries]
+        for iid in tree.get_children():
+            if iid not in keys:
+                tree.delete(iid)
+        for index, entry in enumerate(self.entries):
             tag = f"c{entry.color}"
-            self.entry_tree.tag_configure(tag, foreground=entry.color)
+            tree.tag_configure(tag, foreground=entry.color)
             if entry.session.errors():
                 status = "failed"
             elif entry.session.busy():
                 status = "computing…"
             else:
                 status = "ready"
-            self.entry_tree.insert("", tk.END, iid=entry.package.key, values=(entry.package.long_label, status),
-                                   tags=(tag,))
-        keep = [iid for iid in selected if self.entry_tree.exists(iid)]
-        if keep and set(keep) != set(self.entry_tree.selection()):
-            self.entry_tree.selection_set(keep)
+            values = (entry.package.long_label, status)
+            if tree.exists(entry.package.key):
+                if tuple(tree.item(entry.package.key, "values")) != values:
+                    tree.item(entry.package.key, values=values, tags=(tag,))
+                if tree.index(entry.package.key) != index:
+                    tree.move(entry.package.key, "", index)
+            else:
+                tree.insert("", index, iid=entry.package.key, values=values, tags=(tag,))
 
     # -- data -------------------------------------------------------------------------------------------
 
@@ -378,6 +444,7 @@ class ComparisonTab(ttk.Frame):
 
     def invalidate(self) -> None:
         self._last_keys = {i: None for i in range(len(VIEWS))}
+        self._last_report = None
 
     def _view_key(self, view: int) -> tuple:
         return (view, tuple(e.package.key for e in self.entries), tuple(sorted(self.channels)),
@@ -410,25 +477,54 @@ class ComparisonTab(ttk.Frame):
         if view == 3:
             processes = {name: PROCESSES[name] for name in PROCESSES if name in self.processes}
             data = [(e.package.long_label, e.color, r) for e, r in self._fetch("rates")]
-            return pplots.build_rates_figure(data, channels, processes, figsize=figsize)
+            return pplots.build_rates_figure(data, channels, processes, figsize=figsize,
+                                             mirror=bool(self.settings.b_field_mt))
         data = [(e.package.long_label, e.color, t) for e, t in self._fetch("t1", self.t1_state)]
         return pplots.build_t1_figure(data, ratio=self.ratio, figsize=figsize)
 
+    def _needs(self, view: int) -> list[tuple]:
+        """(session, kind, args) of the results a view draws."""
+        if not self.entries:
+            return []
+        if view == 2:
+            entry = self.entries[min(self.map_entry, len(self.entries) - 1)]
+            return [(entry.session, "spectral_map", ())]
+        kind, args = {0: ("couplings", ()), 1: ("spectral", ()), 3: ("rates", ()), 4: ("t1", (self.t1_state,))}[view]
+        return [(e.session, kind, args) for e in self.entries]
+
+    def _signature(self, needs) -> tuple:
+        return tuple(session.status(kind, self.settings, *args) for session, kind, args in needs)
+
+    def _report_signature(self) -> tuple:
+        needs = [(e.session, k, a) for e in self.entries
+                 for k, a in (("couplings", ()), ("rates", ()), ("t1", (self.t1_state,)))]
+        return (self._signature(needs), tuple(len(e.session.errors()) for e in self.entries),
+                tuple(e.package.key for e in self.entries), self.settings.rate_key(), self.t1_state)
+
     def render_current(self) -> None:
+        """Draw the current view when what it shows changed: new inputs, or one of its results became ready
+        or failed. Polls while results are computed redraw nothing until one arrives (no flicker)."""
         view = self.nested.index("current")
-        key = self._view_key(view)
-        pending_before = self._pending()
-        if key != self._last_keys[view] or pending_before:
+        needs = self._needs(view)
+        for session, kind, args in needs:  # queue what is missing (the worker process computes it)
+            if session.status(kind, self.settings, *args) == "missing":
+                try:
+                    session.get(kind, self.settings, *args, executor=self.app.executor)
+                except RuntimeError:
+                    pass
+        key = (self._view_key(view), self._signature(needs))
+        if key != self._last_keys[view]:
             self.app.set_busy(True)
             try:
                 self.hosts[view].set_figure(self._figure(view))
             finally:
                 self.app.set_busy(False)
-            # Final only if nothing was pending before the draw (a job finishing during it was not drawn) and
-            # the draw queued nothing new; otherwise the poll draws it again.
-            self._last_keys[view] = None if pending_before or self._pending() else key
+            self._last_keys[view] = key
         self.update_entry_tree()
-        self.update_report()
+        report_key = self._report_signature()
+        if report_key != getattr(self, "_last_report", None):
+            self._last_report = report_key
+            self.update_report()
         self.app.set_status(self.status_text())
         self._schedule_poll()
 
@@ -509,9 +605,10 @@ class ComparisonTab(ttk.Frame):
         s = self.settings
         lines = [f"{self.title}: {len(self.entries)} entries; view {VIEWS[self.nested.index('current')]}",
                  f"settings: pairs {s.pairs}, mirror projection {'on' if s.mirror_projection else 'off'}, direct "
-                 f"{s.direct}, σ {s.sigma:g} meV, T {s.t_min:g}-{s.t_max:g} K step {s.t_step:g}",
-                 "rates: Δ1 = m_s S → S−1, Δ2 = S → S−2 (equal to their reverse and mirror transitions at these "
-                 "temperatures); T1 from direct + two-phonon (production)"]
+                 f"{s.direct}, σ {s.sigma:g} meV, T {s.t_min:g}-{s.t_max:g} K step {s.t_step:g}, "
+                 f"B {s.b_field_mt:g} mT (axial)",
+                 "rates: Δ1 = m_s S → S−1, Δ2 = S → S−2 (equal to their reverse transitions at these "
+                 "temperatures, and without a field to their −S mirrors); T1 from direct + two-phonon (production)"]
         for entry in self.entries:
             key = entry.package.key
             lines.append("")
@@ -536,6 +633,7 @@ class ComparisonTab(ttk.Frame):
     def state(self) -> dict:
         return {
             "key": self.key, "title": self.title, "entries": [str(e.package.path) for e in self.entries],
+            "colors": [e.color for e in self.entries],
             "settings": self.settings.to_dict(), "channels": sorted(self.channels),
             "log": self.log, "processes": sorted(self.processes), "t1_state": self.t1_state, "ratio": self.ratio,
             "map_entry": self.map_entry, "view": self.nested.index("current"),
@@ -550,16 +648,19 @@ class ComparisonTab(ttk.Frame):
         self.ratio = bool(state.get("ratio", False))
         self.map_entry = int(state.get("map_entry") or 0)
         packages = []
-        for path in state.get("entries") or []:
+        colors = list(state.get("colors") or [])
+        for index, path in enumerate(state.get("entries") or []):
             try:
-                packages.append(package_for_path(Path(path)))
+                packages.append((package_for_path(Path(path)), colors[index] if index < len(colors) else None))
             except Exception:  # noqa: BLE001 -- a package that is gone is left out
                 continue
         known = {e.package.key for e in self.entries}
-        for package in packages:
+        for package, color in packages:
             if package.key not in known:
-                self.entries.append(Entry(package, self.app.production_session(package),
-                                          pplots.entry_color(len(self.entries))))
+                used = {e.color for e in self.entries}
+                color = color if isinstance(color, str) and color not in used else self._free_color()
+                self.entries.append(Entry(package, self.app.production_session(package), color))
+                known.add(package.key)
         view = int(state.get("view") or 0)
         if 0 <= view < len(VIEWS):
             self.nested.select(view)

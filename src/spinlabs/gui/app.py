@@ -8,7 +8,6 @@ installation, so the import failure is turned into a helpful message.
 
 from __future__ import annotations
 
-from concurrent.futures import ThreadPoolExecutor
 import csv
 from dataclasses import dataclass
 import gc
@@ -36,7 +35,9 @@ from spinlabs.gui.production import (
     ProductionSession,
     production_packages,
     production_setups,
+    stop_worker,
     version_labels,
+    worker_executor,
 )
 from spinlabs.gui.state import GuiState, TabState, load_state, save_state
 from spinlabs.gui.tabs import TabView
@@ -581,8 +582,9 @@ class ConvergenceApp:
         self.catalog = Catalog()
         self.tabs: dict[str, PackTab | ComparisonTab] = {}
         self._tab_by_tabid: dict[str, PackTab | ComparisonTab] = {}
-        # Production couplings and rates are computed off the UI thread, one job at a time (each is numpy-heavy)
-        self.executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="spinlabs-gui")
+        # Production couplings, spectra, rates and T1 are computed in a separate worker process, one job at a
+        # time: the window keeps the interpreter to itself and no Tk object is ever touched by another thread
+        self.executor = worker_executor()
         self._sessions: dict[str, ProductionSession] = {}
         # Production sidebar: one row per setup (defect, cell, method, step), its versions newest first, and
         # the version chosen in the date dropdown (the latest unless changed)
@@ -1915,7 +1917,7 @@ class ConvergenceApp:
         if self._closed:
             return
         self._closed = True
-        self.executor.shutdown(wait=False, cancel_futures=True)
+        stop_worker(self.executor)
         try:
             self._save_state()
         except Exception:
