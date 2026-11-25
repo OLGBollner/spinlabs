@@ -222,6 +222,104 @@ def package_digest(path: Path) -> str:
         return h.hexdigest()
 
 
+# ---------------------------------------------------------------------------------------------------- experiment
+
+EXPERIMENT_DIRNAME = "experimental_data"  # <root>/experimental_data/<defect>/*.csv (spinlabs.experimental)
+# Series a new comparison leaves unticked, as the paper figures do: Jarmola et al. (2012) S2 (plot_t1_vs_experiment
+# EXPERIMENT_EXCLUDE; M2 "S2 present but not used")
+EXPERIMENT_OFF_BY_DEFAULT = ("NV/Jarmola_2012/S2",)
+
+
+@dataclass(frozen=True)
+class ExperimentSeries:
+    """One digitized experimental series of a defect, in K and Hz (rates) or s (T1)."""
+
+    defect: str
+    source: str  # the CSV's file name, e.g. Jarmola_2012
+    label: str  # the series name in the CSV, e.g. S8, omega
+    kind: str  # "relaxation" (T1 or 1/T1 of a polarized state), "omega" (0 <-> +-1) or "gamma" (+1 <-> -1)
+    citation: str
+    x: np.ndarray  # K
+    y: np.ndarray  # Hz for omega/gamma; s (T1) for relaxation
+
+    @property
+    def key(self) -> str:
+        return f"{self.defect}/{self.source}/{self.label}"
+
+    @property
+    def legend(self) -> str:
+        name = {"omega": "Ω", "gamma": "γ"}.get(self.kind, self.label)
+        return f"{self.citation} {name}".strip()
+
+
+def experiment_folder(defect: str, near: Path | None = None) -> Path | None:
+    """``experimental_data/<defect>`` in the working directory or a parent of ``near`` (the package: the data
+    tree lives next to it in the repository)."""
+    roots = [Path.cwd()] + (list(Path(near).resolve().parents) if near is not None else [])
+    for root in roots:
+        folder = root / EXPERIMENT_DIRNAME / defect
+        if folder.is_dir():
+            return folder
+    return None
+
+
+def experimental_series(defect: str, near: Path | None = None) -> list[ExperimentSeries]:
+    """Every experimental series of ``defect`` (none without a folder): relaxation data as T1 (s), Omega and
+    gamma as rates (Hz), temperatures in K, positive values only."""
+    from spinlabs.experimental import load_experimental_data
+
+    folder = experiment_folder(defect, near)
+    if folder is None:
+        return []
+    out = []
+    for source, series_list in load_experimental_data(folder).items():
+        for s in series_list:
+            s = s.to_units(x_unit="K", y_unit="s" if s.kind == "relaxation" else "Hz")
+            keep = np.isfinite(s.y) & (s.y > 0)
+            out.append(ExperimentSeries(defect, source, s.label, s.kind, s.citation or source.replace("_", " "),
+                                        np.asarray(s.x[keep], dtype=float), np.asarray(s.y[keep], dtype=float)))
+    return out
+
+
+def experiment_rates(series: list[ExperimentSeries], channel: str) -> list[ExperimentSeries]:
+    """The measured single-transition rates of a spin-flip channel: Omega for Delta1 (the m_s 1 -> 0 rate of the
+    Rates view), gamma for Delta2 (1 -> -1). S = 1 defects only (that is what Omega and gamma name)."""
+    kind = {"d1": "omega", "d2": "gamma"}.get(channel)
+    return [s for s in series if s.kind == kind and len(s.x)]
+
+
+def experiment_t1(series: list[ExperimentSeries], which: str) -> list[tuple[ExperimentSeries, np.ndarray, np.ndarray]]:
+    """(series, temperatures, T1 in s) to draw with the computed T1 of initial state ``which`` (T1_STATES).
+
+    The relaxation data are the T1 of the polarization the experiment prepares (optical pumping: the lowest
+    |m_s|), so they are drawn for that state only. Omega and gamma of a source give T1 of any S = 1 state by the
+    rate-equation solver (spinlabs.experimental.t1_from_rates), drawn as a series of the Omega entry.
+    """
+    from spinlabs.experimental import ExperimentalSeries as Raw, t1_from_rates
+
+    out = []
+    if which == T1_STATES[0]:
+        out += [(s, s.x, s.y) for s in series if s.kind == "relaxation" and len(s.x)]
+    by_source: dict[tuple, dict[str, ExperimentSeries]] = {}
+    for s in series:
+        if s.kind in ("omega", "gamma") and len(s.x):
+            by_source.setdefault((s.defect, s.source), {})[s.kind] = s
+    state = initial_state(1.0, which)
+    for rates in by_source.values():
+        if "omega" not in rates or "gamma" not in rates:
+            continue
+        omega, gamma = rates["omega"], rates["gamma"]
+        try:
+            t1 = t1_from_rates(Raw(omega.label, omega.x, omega.y, "K", "Hz", omega.source, "omega"),
+                               Raw(gamma.label, gamma.x, gamma.y, "K", "Hz", gamma.source, "gamma"), state)
+        except ValueError:  # Omega and gamma share no temperature range
+            continue
+        label = f"T1 {state} from Ω, γ"
+        out.append((ExperimentSeries(omega.defect, omega.source, label, "relaxation", omega.citation, t1.x, t1.y),
+                    t1.x, t1.y))
+    return out
+
+
 # ---------------------------------------------------------------------------------------------------- settings
 
 

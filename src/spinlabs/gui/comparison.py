@@ -29,6 +29,10 @@ from spinlabs.gui.production import (
     ProductionSession,
     Settings,
     package_for_path,
+    EXPERIMENT_OFF_BY_DEFAULT,
+    experiment_rates,
+    experiment_t1,
+    experimental_series,
     rate_direction,
     version_labels,
 )
@@ -63,6 +67,10 @@ class ComparisonTab(ttk.Frame):
         self.t1_state = T1_STATES[0]
         self.ratio = False
         self.map_entry = 0
+        self.show_experiment = True
+        self.experiment_off: set[str] = set(EXPERIMENT_OFF_BY_DEFAULT)  # series (ExperimentSeries.key) left out
+        self._experiment_cache: dict[str, list] = {}  # defect -> its experimental series
+        self._experiment_errors: dict[str, str] = {}
         self._poll_after: str | None = None
         self._last_keys: dict[int, tuple | None] = {i: None for i in range(len(VIEWS))}
         self._build()
@@ -184,6 +192,20 @@ class ComparisonTab(ttk.Frame):
         tip(b_field, "Axial magnetic field along the defect axis (mT): Zeeman-splits +m_s and −m_s, moves every "
                      "gap and opens the +m ↔ −m direct rate (spinlabs.pipeline.rate_series b_field_mt). With B ≠ 0 "
                      "the Rates view adds the −S transitions. Enter applies; the couplings are reused.")
+
+        box = ttk.LabelFrame(body, text="Experiment")
+        box.pack(fill=tk.X, padx=6, pady=4)
+        self.show_experiment_var = tk.BooleanVar(value=self.show_experiment)
+        show = ttk.Checkbutton(box, text="Show experimental data", variable=self.show_experiment_var,
+                               command=self._on_experiment)
+        show.pack(anchor=tk.W, padx=6, pady=1)
+        tip(show, "Measured points of the compared defects (experimental_data/<defect>/*.csv) in the Rates and T1 "
+                  "views. Rates: Ω in the Δ1 panels (m_s 1 → 0), γ in the Δ2 panels (1 → −1). T1: the measured "
+                  "T1 / 1/T1 data (an optically pumped polarization: drawn for the lowest |m_s|) and T1 of the "
+                  "chosen initial state solved from a source's Ω and γ.")
+        self.experiment_box = ttk.Frame(box, style="Card.TFrame")
+        self.experiment_box.pack(fill=tk.X, padx=12, pady=(0, 2))
+        self.experiment_vars: dict[str, tk.BooleanVar] = {}
 
         box = ttk.LabelFrame(body, text="Temperatures (K)")
         box.pack(fill=tk.X, padx=6, pady=4)
@@ -359,6 +381,86 @@ class ComparisonTab(ttk.Frame):
             self.map_entry = labels.index(self.map_var.get())
         self.render_current()
 
+    # -- experiment -------------------------------------------------------------------------------------
+
+    def experiment_series(self) -> list:
+        """Every experimental series of the compared defects, in a stable order (markers follow it)."""
+        out = []
+        for entry in self.entries:
+            defect = entry.package.defect
+            if defect not in self._experiment_cache:
+                try:
+                    self._experiment_cache[defect] = experimental_series(defect, near=entry.package.path)
+                except Exception as exc:  # noqa: BLE001 -- an unreadable CSV: reported in Details
+                    self._experiment_cache[defect] = []
+                    self._experiment_errors[defect] = f"{type(exc).__name__}: {exc}"
+        for defect in dict.fromkeys(e.package.defect for e in self.entries):
+            out.extend(self._experiment_cache.get(defect, []))
+        return out
+
+    def _experiment_markers(self) -> dict[str, str]:
+        return {s.key: pplots.experiment_marker(i) for i, s in enumerate(self.experiment_series())}
+
+    def _shown_experiment(self) -> list:
+        if not self.show_experiment:
+            return []
+        return [s for s in self.experiment_series() if s.key not in self.experiment_off]
+
+    def _experiment_style(self, s) -> tuple[str, str | None]:
+        """Legend and colour of a series: with several defects compared, the defect's first entry's colour
+        and the defect in the legend; else dark grey."""
+        defects = list(dict.fromkeys(e.package.defect for e in self.entries))
+        if len(defects) < 2:
+            return s.legend, None
+        color = next((e.color for e in self.entries if e.package.defect == s.defect), None)
+        return f"{s.defect}: {s.legend}", color
+
+    def _experiment_rates(self, channels) -> dict:
+        markers, shown = self._experiment_markers(), self._shown_experiment()
+        return {c: [(*self._experiment_style(s)[:1], markers[s.key], self._experiment_style(s)[1], s.x, s.y)
+                    for s in experiment_rates(shown, c)] for c in channels}
+
+    def _experiment_t1(self) -> list:
+        markers, shown = self._experiment_markers(), self._shown_experiment()
+        out = []
+        for s, x, y in experiment_t1(shown, self.t1_state):
+            omega_key = f"{s.defect}/{s.source}/omega"
+            marker = markers.get(s.key) or next((m for k, m in markers.items() if k.lower() == omega_key.lower()), "o")
+            legend, color = self._experiment_style(s)
+            out.append((legend, marker, color, x, y))
+        return out
+
+    def _rebuild_experiment_list(self) -> None:
+        for child in self.experiment_box.winfo_children():
+            child.destroy()
+        self.experiment_vars = {}
+        series = self.experiment_series()
+        markers = self._experiment_markers()
+        if not series:
+            text = "No experimental data for these defects." if self.entries else "Add entries first."
+            ttk.Label(self.experiment_box, text=text, style="CardMuted.TLabel").pack(anchor=tk.W)
+            return
+        many = len({s.defect for s in series}) > 1
+        for s in series:
+            var = tk.BooleanVar(value=s.key not in self.experiment_off)
+            kind = {"omega": "rate, Δ1", "gamma": "rate, Δ2"}.get(s.kind, "T1")
+            text = f"{markers[s.key]}  {s.defect + ': ' if many else ''}{s.legend} ({kind})"
+            ttk.Checkbutton(self.experiment_box, text=text, variable=var, command=self._on_experiment).pack(
+                anchor=tk.W, pady=0)
+            self.experiment_vars[s.key] = var
+        state = "normal" if self.show_experiment else "disabled"
+        for child in self.experiment_box.winfo_children():
+            child.configure(state=state)
+
+    def _on_experiment(self) -> None:
+        self.show_experiment = bool(self.show_experiment_var.get())
+        self.experiment_off = {k for k, var in self.experiment_vars.items() if not var.get()} | {
+            k for k in self.experiment_off if k not in self.experiment_vars}
+        state = "normal" if self.show_experiment else "disabled"
+        for child in self.experiment_box.winfo_children():
+            child.configure(state=state)
+        self.render_current()
+
     def apply_settings(self) -> None:
         try:
             settings = Settings(
@@ -395,6 +497,8 @@ class ComparisonTab(ttk.Frame):
         self.map_combo["values"] = labels
         self.map_entry = min(self.map_entry, max(0, len(labels) - 1))
         self.map_var.set(labels[self.map_entry] if labels else "")
+        self.show_experiment_var.set(self.show_experiment)
+        self._rebuild_experiment_list()
         self.update_entry_tree()
 
     def update_entry_tree(self) -> None:
@@ -449,7 +553,7 @@ class ComparisonTab(ttk.Frame):
     def _view_key(self, view: int) -> tuple:
         return (view, tuple(e.package.key for e in self.entries), tuple(sorted(self.channels)),
                 self.log, tuple(sorted(self.processes)), self.t1_state, self.ratio, self.map_entry,
-                self.settings.rate_key())
+                self.settings.rate_key(), self.show_experiment, tuple(sorted(self.experiment_off)))
 
     def _figure(self, view: int, *, canonical: bool = False) -> Figure:
         host = self.hosts[view]
@@ -478,9 +582,10 @@ class ComparisonTab(ttk.Frame):
             processes = {name: PROCESSES[name] for name in PROCESSES if name in self.processes}
             data = [(e.package.long_label, e.color, r) for e, r in self._fetch("rates")]
             return pplots.build_rates_figure(data, channels, processes, figsize=figsize,
-                                             mirror=bool(self.settings.b_field_mt))
+                                             mirror=bool(self.settings.b_field_mt),
+                                             experiment=self._experiment_rates(channels))
         data = [(e.package.long_label, e.color, t) for e, t in self._fetch("t1", self.t1_state)]
-        return pplots.build_t1_figure(data, ratio=self.ratio, figsize=figsize)
+        return pplots.build_t1_figure(data, ratio=self.ratio, experiment=self._experiment_t1(), figsize=figsize)
 
     def _needs(self, view: int) -> list[tuple]:
         """(session, kind, args) of the results a view draws."""
@@ -623,6 +728,17 @@ class ComparisonTab(ttk.Frame):
             if entry.session.busy():
                 lines.append("  computing…")
             lines.extend(f"  error: {e}" for e in entry.session.errors())
+        series = self.experiment_series()
+        if series:
+            shown = {s.key for s in self._shown_experiment()}
+            lines += ["", "experiment (Rates: Ω = m_s 1 → 0 with Δ1, γ = 1 → −1 with Δ2; T1: measured T1 / 1/T1 for "
+                      "the lowest |m_s|, and T1 of the chosen state solved from each source's Ω and γ):"]
+            for s in series:
+                span = f"{s.x.min():g}-{s.x.max():g} K" if len(s.x) else "no points"
+                lines.append(f"  {'on ' if s.key in shown else 'off'} {s.defect}: {s.legend} ({s.kind}, "
+                             f"{len(s.x)} points, {span})")
+        for defect, error in self._experiment_errors.items():
+            lines.append(f"  experiment of {defect} not read: {error}")
         return "\n".join(lines)
 
     def update_report(self) -> None:
@@ -636,7 +752,8 @@ class ComparisonTab(ttk.Frame):
             "colors": [e.color for e in self.entries],
             "settings": self.settings.to_dict(), "channels": sorted(self.channels),
             "log": self.log, "processes": sorted(self.processes), "t1_state": self.t1_state, "ratio": self.ratio,
-            "map_entry": self.map_entry, "view": self.nested.index("current"),
+            "map_entry": self.map_entry, "show_experiment": self.show_experiment,
+            "experiment_off": sorted(self.experiment_off), "view": self.nested.index("current"),
         }
 
     def apply_state(self, state: dict) -> None:
@@ -647,6 +764,9 @@ class ComparisonTab(ttk.Frame):
         self.t1_state = state.get("t1_state") if state.get("t1_state") in T1_STATES else T1_STATES[0]
         self.ratio = bool(state.get("ratio", False))
         self.map_entry = int(state.get("map_entry") or 0)
+        self.show_experiment = bool(state.get("show_experiment", True))
+        if "experiment_off" in state:
+            self.experiment_off = {str(k) for k in state.get("experiment_off") or []}
         packages = []
         colors = list(state.get("colors") or [])
         for index, path in enumerate(state.get("entries") or []):

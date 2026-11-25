@@ -221,6 +221,19 @@ sizes and methods in one graph, one colour per entry.
   the −S transitions), and the production settings
   (second-order pair treatment, direct model, mirror projection). The
   defaults are those of `spinlabs run`.
+- **Experimental data** (`experimental_data/<defect>/*.csv`, read by
+  `spinlabs.experimental`, found in the working directory or next to the
+  package's data tree) are drawn as open markers in the Rates and T1 views,
+  for the defects in the comparison. Rates: Ω in the Δ1 panels (the
+  m_s 1 → 0 rate) and γ in the Δ2 panels (1 → −1), in the +S row. T1: the
+  measured T1 or 1/T1 series (an optically pumped polarization, so drawn
+  for the lowest |m_s| only) and T1 of the chosen initial state solved from
+  each source's Ω and γ (`t1_from_rates`). The *Experiment* box has a master
+  toggle and one checkbox per series (its marker shown); Jarmola et al.
+  (2012) S2 starts unticked, as in the paper figures. With one defect the
+  points are dark grey; with several each defect's points take the colour
+  of its first entry. The choice is saved with the comparison, and Details
+  lists every series with its range.
 - All numbers come from the production code (`spinlabs.gui.production` over
   `spinlabs.pipeline`): `coupling_manager` for the couplings, `rate_series`
   for the rates, `t1_details` for T1; the spectral functions are the

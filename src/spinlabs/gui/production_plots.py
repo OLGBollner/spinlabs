@@ -16,6 +16,22 @@ from spinlabs.gui.production import CHANNEL_LABELS, SPIN_FLIP, rate_direction
 
 ENTRY_COLORS = ("#1f77b4", "#d62728", "#2ca02c", "#9467bd", "#ff7f0e", "#17becf", "#8c564b", "#e377c2",
                 "#7f7f7f", "#bcbd22")
+# Experimental points: dark grey, one marker per series (the entries keep the colours)
+EXPERIMENT_COLOR = "#333333"
+EXPERIMENT_MARKERS = ("o", "s", "^", "v", "D", "P", "X", "*", "<", ">", "h", "p")
+
+
+def experiment_marker(index: int) -> str:
+    return EXPERIMENT_MARKERS[index % len(EXPERIMENT_MARKERS)]
+
+
+def _draw_experiment(ax, points) -> None:
+    """``points``: (legend, marker, colour, x, y) drawn as open markers (colour None: dark grey)."""
+    for legend, marker, color, x, y in points:
+        ax.plot(x, y, ls="none", marker=marker, ms=4.5, mfc="none", mec=color or EXPERIMENT_COLOR, mew=0.9,
+                label=f"exp.: {legend}", zorder=3)
+
+
 PROCESS_STYLES = {"total": "-", "direct": "--", "two-phonon": ":", "Raman (1st order)": "-."}
 _MARKERS = ("o", "s", "^", "D", "v", "P", "X", "<", ">", "*")
 MAP_DYNAMIC_RANGE = 1e-6
@@ -131,10 +147,13 @@ def _direction_text(key: str) -> str:
     return key.replace("_to_", "→").replace("0.5", "½").replace("1.5", "3⁄2")
 
 
-def build_rates_figure(entries, channels, processes, *, mirror: bool = False, figsize=None, dpi: int = 100) -> Figure:
+def build_rates_figure(entries, channels, processes, *, mirror: bool = False, experiment=None, figsize=None,
+                       dpi: int = 100) -> Figure:
     """Rates against temperature, one panel per spin-flip channel (the transition of rate_direction), line style
     per process. ``entries``: (label, colour, Rates); ``processes``: {name: tuple of rate processes}. With
-    ``mirror`` (a magnetic field: +m and -m differ) a second row shows the transitions from m = -S."""
+    ``mirror`` (a magnetic field: +m and -m differ) a second row shows the transitions from m = -S.
+    ``experiment``: {channel: [(legend, marker, colour, temperatures, rate)]}, measured points drawn in the +S row (the
+    measurements are at zero or small field)."""
     channels = [c for c in channels if c in SPIN_FLIP]
     if not entries or not channels or not processes:
         return message_figure("Add entries, and select a spin-flip channel (Δ1, Δ2) and a process", dpi=dpi)
@@ -160,16 +179,23 @@ def build_rates_figure(entries, channels, processes, *, mirror: bool = False, fi
             if mirror:
                 fields = sorted({r.b_field_mt for _l, _c, r in entries})
                 field = f", B = {', '.join(f'{b:g}' for b in fields)} mT"
+            if row == 0 and experiment:
+                _draw_experiment(ax, experiment.get(channel, []))
             ax.set_title(f"{CHANNEL_LABELS[channel]} rate (m$_s$ {', '.join(sorted(directions))}{field})", fontsize=9)
             ax.grid(True, ls=":", lw=0.5, alpha=0.6)
         axes[row, 0].set_ylabel(r"rate (s$^{-1}$)")
     _legend(fig, axes)
+    for ax in axes[0, 1:]:  # another channel's measured points are not in the first panel's legend
+        pairs = [(h, lab) for h, lab in zip(*ax.get_legend_handles_labels()) if lab.startswith("exp.:")]
+        if pairs:
+            ax.legend(*zip(*pairs), fontsize=7, loc="best", frameon=False)
     return fig
 
 
-def build_t1_figure(entries, *, ratio: bool = False, figsize=None, dpi: int = 100) -> Figure:
+def build_t1_figure(entries, *, ratio: bool = False, experiment=None, figsize=None, dpi: int = 100) -> Figure:
     """T1 against temperature, one line per entry; with ``ratio`` a second panel of T1 / T1(first entry).
-    ``entries``: (label, colour, (temperatures, T1, initial state))."""
+    ``entries``: (label, colour, (temperatures, T1, initial state)); ``experiment``: [(legend, marker,
+    colour, temperatures, T1)] drawn as points in the T1 panel."""
     if not entries:
         return message_figure("Add entries", dpi=dpi)
     rows = 2 if ratio and len(entries) > 1 else 1
@@ -179,6 +205,8 @@ def build_t1_figure(entries, *, ratio: bool = False, figsize=None, dpi: int = 10
     for label, color, (temps, t1, state) in entries:
         ok = np.isfinite(t1) & (t1 > 0)
         ax.plot(temps[ok], t1[ok], color=color, lw=1.4, label=f"{label} ({state})")
+    if experiment:
+        _draw_experiment(ax, experiment)
     ax.set_yscale("log")
     ax.set_ylabel(r"$T_1$ (s)")
     ax.grid(True, ls=":", lw=0.5, alpha=0.6)

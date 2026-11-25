@@ -302,3 +302,35 @@ def test_garbage_is_collected_on_the_tk_thread_only():
     finally:
         if was_enabled:
             gc.enable()
+        matplotlib.use("Agg")  # importing the app switched to TkAgg; later figure tests draw headless
+
+
+def test_experimental_data_for_the_rates_and_t1_views(tmp_path, monkeypatch):
+    from spinlabs.experimental import ExperimentalSeries, t1_from_rates
+    from spinlabs.gui.production import experiment_rates, experiment_t1, experimental_series
+
+    folder = tmp_path / "experimental_data" / "NV"
+    folder.mkdir(parents=True)
+    (folder / "Paper_2000.csv").write_text("Paper et al. (2000)\nK,Hz\nS1,\nX,Y\n100,2.0\n50,0.5\n300,0.0\n")
+    (folder / "Rates_2001.csv").write_text(
+        "K,kHz\nomega,,gamma,\nX,Y,X,Y\n100,0.01,100,0.02\n200,0.1,200,0.3\n")
+    package = tmp_path / "data" / "NV_64" / "pack.npz"
+    package.parent.mkdir(parents=True)
+    monkeypatch.chdir(package.parent)  # found next to the package's tree, not only in the working directory
+    series = experimental_series("NV", near=package)
+    assert experimental_series("ClV", near=package) == []
+    relax = next(s for s in series if s.kind == "relaxation")
+    assert np.allclose(relax.x, [50, 100]) and np.allclose(relax.y, [2.0, 0.5])  # 1/T1 (Hz) -> T1 (s); zero dropped
+    assert relax.legend == "Paper et al. (2000) S1"
+    (omega,), (gamma,) = experiment_rates(series, "d1"), experiment_rates(series, "d2")
+    assert omega.kind == "omega" and np.allclose(omega.y, [10.0, 100.0]) and gamma.kind == "gamma"
+    assert experiment_rates(series, "d0") == []
+    lowest = experiment_t1(series, T1_STATES[0])
+    assert [s.kind for s, _x, _y in lowest] == ["relaxation", "relaxation"]  # measured data, and from Omega/gamma
+    ref = t1_from_rates(ExperimentalSeries("omega", omega.x, omega.y, "K", "Hz", "Rates_2001", "omega"),
+                        ExperimentalSeries("gamma", gamma.x, gamma.y, "K", "Hz", "Rates_2001", "gamma"), "ms_1")
+    (derived, x, y), = experiment_t1(series, T1_STATES[1])  # m_s = +1: no measured relaxation data
+    assert np.allclose(x, ref.x) and np.allclose(y, ref.y) and "ms_1" in derived.label
+    fig = pplots.build_t1_figure([("A", "#1f77b4", (np.array([50.0, 100.0]), np.array([1.0, 0.1]), "ms_0"))],
+                                 experiment=[(s.legend, "o", None, x, y) for s, x, y in lowest])
+    assert sum(1 for line in fig.axes[0].lines if line.get_label().startswith("exp.:")) == 2
