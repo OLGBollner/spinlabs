@@ -180,6 +180,80 @@ Each tab has nested **Summary** and **Mode detail** views.
 - An empty registry shows a short empty state with the `spinlabs package
   --conv` hint and the File → Open fallback.
 
+## Production comparisons
+
+A second kind of tab compares production data across packages: defects, cell
+sizes and methods in one graph, one colour per entry.
+
+- The **Production** sidebar tab lists the registered production packages
+  (`spinlabs package`: `packaged_zfs` files, full-decontamination sets as one
+  entry per folder) grouped as the registry groups them: one row per setup
+  (defect, cell, canonical method, step), showing its latest data, the package
+  `find_packaged --latest` picks (the newest registration; a legacy
+  `all_bands` package counts as AO). The row's date column says how many
+  versions exist; with one setup selected, the *Date* dropdown picks an
+  earlier one, newest first, as the convergence date dropdowns do. Inside a
+  comparison the *Date* dropdown under the entries switches the selected entry
+  to another version of its setup in place (same colour and position).
+  Entries can be dragged to reorder them: legends follow the order and the
+  first entry is the T1-ratio reference; each entry keeps its colour (saved
+  with the session).
+  *New comparison* opens a tab with the selected packages;
+  *Add to comparison* adds them to the open comparison (a new one if none is
+  open). An unregistered package can be added with *Add file…* in the tab.
+  Packages without second-order data (registry `pert_order` [1]: the older
+  first-order-only `*_1d.npz` files, and empty ones) are not listed, and a
+  file without it is refused: they have no two-phonon spectral function,
+  rates or T1. Central-difference packages are complete.
+- Views: **Couplings** (against the phonon energy, laid out as the spectral
+  functions: one column per channel, first order |V| per mode on top and the
+  diagonal second order |V^(ll)| below), **Spectral functions** (one-phonon J1(ω) and the
+  two-phonon J2(ω, ω) along the diagonal), **2D map** (the full J2(ωx, ωy) of
+  one entry, chosen in a dropdown), **Rates** (the Δ1 and Δ2 rates against
+  temperature, m_s S → S−1 and S → S−2) and **T1** (lowest or highest |m_s|
+  initial state, m_s = +S or m_s = −S, optionally relative to the first
+  entry).
+- Options in the tab: channels (Δ0, Δ1, Δ2), log scale, σ for the spectral
+  functions and the rates, processes for the rates (total, direct,
+  two-phonon, first-order Raman), temperatures, an axial magnetic field B
+  (mT; `rate_series(b_field_mt=…)`: Zeeman-splits +m and −m, moves every gap
+  and opens the +m ↔ −m direct rate; with B ≠ 0 the Rates view adds a row of
+  the −S transitions), and the production settings
+  (second-order pair treatment, direct model, mirror projection). The
+  defaults are those of `spinlabs run`.
+- **Experimental data** (`experimental_data/<defect>/*.csv`, read by
+  `spinlabs.experimental`, found in the working directory or next to the
+  package's data tree) are drawn as open markers in the Rates and T1 views,
+  for the defects in the comparison. Rates: Ω in the Δ1 panels (the
+  m_s 1 → 0 rate) and γ in the Δ2 panels (1 → −1), in the +S row. T1: the
+  measured T1 or 1/T1 series (an optically pumped polarization, so drawn
+  for the lowest |m_s| only) and T1 of the chosen initial state solved from
+  each source's Ω and γ (`t1_from_rates`). The *Experiment* box has a master
+  toggle and one checkbox per series (its marker shown); Jarmola et al.
+  (2012) S2 starts unticked, as in the paper figures. With one defect the
+  points are dark grey; with several each defect's points take the colour
+  of its first entry. The choice is saved with the comparison, and Details
+  lists every series with its range.
+- All numbers come from the production code (`spinlabs.gui.production` over
+  `spinlabs.pipeline`): `coupling_manager` for the couplings, `rate_series`
+  for the rates, `t1_details` for T1; the spectral functions are the
+  densities the rates integrate (zero-gap pairs left out). Everything is
+  computed in a separate worker process (spawned, one job at a time), so the
+  window never waits on numpy and no Tk object is touched off the Tk thread;
+  closing the window ends the worker. Couplings and rates are cached on disk
+  under `~/.spinlabs/gui_cache/` (written atomically), keyed on the package's
+  registered sha256 and the settings (B is part of the rates key). The tab
+  polls and redraws a view only when one of its results arrives or fails, or
+  its inputs change, so a view stays still while the rest is computed.
+- Tk objects must only be freed on the Tk thread, so `spinlabs gui` turns off
+  Python's automatic garbage collection and collects from the Tk event loop
+  instead (same generation thresholds, polled every 200 ms). Otherwise a
+  collection triggered on the worker thread by a large cell freed Tk variables
+  and images there and Tcl aborted the process.
+- If the Debye direct rate cannot be fitted to a spectrum, the Gaussian one is
+  used and the Details tab says so.
+- Comparison tabs are saved and restored with the session like pack tabs.
+
 ## Appearance
 
 The window uses the Sun Valley ttk theme (the Windows 11-style `sv-ttk`), with a
