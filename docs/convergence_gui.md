@@ -1,0 +1,279 @@
+# Interactive convergence GUI — design
+
+`spinlabs gui` is a local desktop viewer for the convergence packs made by
+`spinlabs package --conv`. It reuses the same analysis as
+`spinlabs plot convergence` and adds the spin-phonon coupling channels as a
+second view.
+
+## Scope
+
+- One window, Tkinter + embedded Matplotlib. Tkinter comes with the Python
+  build or the system (`python3-tk`); the theme, `sv-ttk`, is the optional
+  `gui` extra: `pip install -e ".[gui]"` (see Appearance). Plain
+  `pip install -e .` installs the CLI without any GUI dependency, for
+  machines without Tk or a display; only `spinlabs gui` imports Tk.
+- Convergence data only in this version. The shell is structured so another
+  viewer can become another top-level tab later.
+- The registry is read-only. `spinlabs package --conv` remains the only way to
+  register data. Unregistered `.npz` files and decont folders can be opened for
+  the session through File → Open or `spinlabs gui <path>`.
+
+## Data and tabs
+
+- A top-level tab is a **defect group**: defect + cell size + displacement
+  convention. Different cells or displacement conventions get separate tabs,
+  matching the separate summary figures the CLI writes.
+- Inside one tab the Summary has one column per selected **scheme** (AO, UO,
+  full decont, or a non-standard folder key), as in the CLI summary figure. A defect with only a decont pack shows one column; NV 512 with AO and
+  UO selected shows two.
+- The registry panel lists defect groups. Selecting one reveals the available
+  scheme folders with checkboxes and a per-scheme date dropdown (newest first).
+  Opening a group creates a tab, or focuses the tab already open for that group.
+  Changing the scheme selection updates that tab's columns.
+- Inside a tab the date dropdown of a column switches to another registered
+  date of the same scheme, across its date folders, in place.
+- On launch the previous session's tabs are restored when their files still
+  exist; otherwise only the newest defect group opens, with all of its latest
+  available schemes checked.
+- Pack tabs are closable (Ctrl+W, close others/all). Per-tab state includes
+  visible modes, active mode, active column, scheme checkboxes, Norm/Channels
+  choice and advanced parameters; registry filters are global.
+
+## Views
+
+Each tab has nested **Summary** and **Mode detail** views.
+
+- **Summary**: two stacked rows (first and second order) and one column per
+  selected scheme. Log |Q| axis ticked at the run step sizes.
+- **Mode detail**: the CLI's 3 × 2 grid — principal components with linear fit,
+  principal components with quadratic fit and residuals, finite differences per
+  traceless part. One column at a time, chosen by the tab's active-column
+  selector; the active mode is selected by clicking a row in the mode list.
+- The mode list shows mode number, symmetry and frequency when a registered
+  phonon file provides them. Checkboxes choose which modes appear in Summary;
+  All / None / Invert and a text filter are provided. The active mode for Mode
+  detail is independent of the checkbox state.  View settings, the mode list
+  and the collapsible Advanced settings share one scrollable sidebar tab.
+- Changing a setting builds the replacement figure while the current one stays
+  on screen, then swaps canvases once the new figure has been drawn. A watch
+  cursor is shown while the rebuild runs, so the plot does not blink empty and
+  the window does not repaint an intermediate state.
+
+## Difference schemes and norm view
+
+- Forward and Central are independent checkboxes. When both are checked both
+  point sets, fit lines and error curves are drawn; the safe-|Q| shading comes
+  from Forward (the production scheme) and Central's windows are listed in the
+  report. When Forward is unchecked Central supplies the shading. Central is
+  enabled when at least one selected pack has −Q runs; packs without them
+  simply have no Central series and say so in the report. The checkboxes also
+  filter the Mode-detail finite-difference row; with both checked its CLI
+  combined row is kept.
+- The **Norm** view uses exactly the current summary's values: first order
+  `||D(Q) − D₀|| / Q` and second order `||D(2Q) − 2D(Q) + D₀|| / Q²`, or the
+  central equivalents. The norm is over the five traceless tensor parts.
+  Column titles use the CLI's `<defect>_<cell> <scheme>` form, and the legends
+  and marker shapes match the CLI summary for a single scheme; a distinct open
+  marker is used only when Forward and Central are overlaid.
+  Safe bands, the common |Q| window and the grey error curve are the current
+  norm-based quantities. The GUI extends the CLI's six-colour palette so every
+  selected mode can be shown. On screen, central points use distinct open
+  markers when both schemes are overlaid; with a single scheme the CLI's row
+  marker and fill are kept. The common safe-|Q| region uses one shared green in
+  Norm and Coupling-channel views.
+- If both schemes are unticked, the difference rows show a placeholder and the
+  principal components remain available in Mode detail.
+
+## Coupling-channel view
+
+- The other Summary quantity shows all three spin-phonon coupling channels for
+  every mode, in both rows:
+
+  | channel | production name | marker |
+  | --- | --- | --- |
+  | `V_{Δ0}` | `V_0_0` | circle |
+  | `V_{Δ±1}` | `V_0_pm` | triangle |
+  | `V_{Δ±2}` | `V_p_m` | square |
+
+- Every mode shows all three channels, including symmetry-forbidden ones, so
+  the forbidden channels act as a visual zero check. Forbidden channels are
+  drawn but never narrow the safe region.
+- Channel values use the production derivative definitions and production V
+  formulas, on the convergence x-scale: MHz per unit perturbation scale. (The
+  production run's absolute V values are per SI displacement and require the
+  phonon spectrum; that conversion is not part of this view.)
+- First order at each measured step: `V(D(Q) − D₀) / Q` for forward, and
+  `V((D(Q) − D(−Q))/2) / Q` for central.
+- Second order at each step: production's diagonal difference
+  `d2D = (D(2Q) − 2D(Q) + D₀)/Q²` where `2Q` was run, or
+  `(D(Q) + D(−Q) − 2D₀)/Q²`; the channel value is `V(d2D)/2`.
+- The grey noise curves are on the points' scale: `err1/Q` in first order and
+  `err2/(2Q²)` in second order (`err2` is the error of the 2c differences,
+  the points are c): a point on the curve has SNR 1, and a channel's safe
+  window starts where its value is the SNR target (3) times the curve.
+- The horizontal Q → 0 lines come from the same polynomial fits the norm view
+  uses: `V(b)` for first order; `V(c)` for second order (equivalent to
+  `V(2c)/2`), with the fitted `c` from the pair cubic (forward) or quartic
+  (central) fit.
+- Channel points are one point per |Q| and channel. Colour = mode; marker
+  shape = channel. Forward points are filled, Central points open; Norm mode
+  keeps the current filled +Q / open −Q convention.
+- Forbidden channels are excluded from the safety aggregation. Unknown mode
+  symmetry (no registered phonon file) includes all three conservatively and
+  warns.
+- Per-channel error and safe window: the existing conservative norm error
+  scalars `err1`/`err2` are used for every channel; each channel substitutes its
+  own fitted coefficient into the existing SNR/truncation formulas, with the
+  next Taylor term obtained by applying the same channel functional to the
+  fitted `c`/`d`/`e`. Each allowed channel gets `q_lo..q_hi`; the shaded common
+  region is their intersection over modes and allowed channels. Forbidden
+  channels, unresolved channels and channels below `weak_fraction` of the
+  strongest allowed channel are drawn faint and excluded.
+- The horizontal channel lines are drawn for every channel with a positive
+  fitted Q → 0 value; an exactly zero coefficient is marked at the log-axis
+  floor so the forbidden-channel zero check stays visible. Allowed channels get
+  a thicker segment over their own safe window; a single vertical common region
+  is shaded. The grey conservative error curve remains. The report table lists
+  each channel's Q → 0 value, window and flags.
+- The Norm/Channels choice is a Summary-tab control only; Mode detail keeps the
+  component view.
+
+## Report and export
+
+- Window geometry, registry filters, the last directory, report visibility and
+  the open tabs with their per-tab state are remembered in `~/.spinlabs/gui.json`.
+
+- A collapsible bottom pane has two tabs:
+  - **Table** for the current view: mode, symmetry, frequency, coefficients,
+    safe windows and flags (one row per mode in Norm, one per mode × channel in
+    Channels).
+  - **Details**: the CLI-style `format_snr` text for the active mode/column plus
+    warnings (missing Q=0, unfinished runs, unknown symmetries, modes skipped).
+- Save figure rebuilds the current view at the CLI's canonical figure size and
+  layout under Matplotlib's default style, not the GUI's muted on-screen theme,
+  and writes PNG, SVG or PDF through the Save figure menu, with CLI-like names
+  under `figures/convergence/`.  This keeps exported axes, ticks, borders,
+  legend frames and font sizes identical to `spinlabs plot convergence`.
+  Export CSV writes the current table. The status bar shows the written path.
+- Advanced parameters live in a collapsed sidebar section: noise override
+  (automatic pooled sigma by default), SNR target, truncation tolerance,
+  weak-mode fraction, drop the Q=0 anchor (Mode detail), deviation plot and
+  quadratic fit (Mode detail; the quadratic extra values appear in Details).
+  Defaults match the CLI.
+
+## Failure behaviour
+
+- A pack without a Q=0 anchor is shown with a warning badge, can be opened, and
+  Summary explains that it cannot measure differences; Mode detail still shows
+  the principal components.
+- Unfinished runs (NaN tensors) are dropped with a report warning, as the CLI
+  does.
+- Too few amplitudes for the SNR estimate: the mode is listed as skipped in the
+  Details pane and omitted from the summary row, matching the CLI. The channel
+  view still draws its raw points and marks the fit as unavailable.
+- Phonon symmetry and frequency follow the main pipeline's pairing: a pack's
+  recorded full spectrum (`phonon_file`, plus its `aligned` tag) first, then the
+  registered full spectra, then `phonon_data.npz` / `phonon_data_aligned.npz`
+  next to the pack or under the stored ground-state defect folder.  A
+  symmetry-reduced file is resolved to its full spectrum.  Packs without an
+  `aligned` tag prefer the aligned full spectrum when both are present; the
+  Advanced tab can force Auto, Aligned full or Unaligned full per tab.
+  `package --conv` now copies and registers the full spectrum alongside the
+  convergence pack, using the aligned file when the trees displaced along
+  aligned modes.  If no full
+  spectrum covers the highest mode, the table leaves symmetry/frequency blank
+  and Details says which files were rejected and why.
+- An empty registry shows a short empty state with the `spinlabs package
+  --conv` hint and the File → Open fallback.
+
+## Production comparisons
+
+A second kind of tab compares production data across packages: defects, cell
+sizes and methods in one graph, one colour per entry.
+
+- The **Production** sidebar tab lists the registered production packages
+  (`spinlabs package`: `packaged_zfs` files, full-decontamination sets as one
+  entry per folder) grouped as the registry groups them: one row per setup
+  (defect, cell, canonical method, step), showing its latest data, the package
+  `find_packaged --latest` picks (the newest registration; a legacy
+  `all_bands` package counts as AO). The row's date column says how many
+  versions exist; with one setup selected, the *Date* dropdown picks an
+  earlier one, newest first, as the convergence date dropdowns do. Inside a
+  comparison the *Date* dropdown under the entries switches the selected entry
+  to another version of its setup in place (same colour and position).
+  Entries can be dragged to reorder them: legends follow the order and the
+  first entry is the T1-ratio reference; each entry keeps its colour (saved
+  with the session).
+  *New comparison* opens a tab with the selected packages;
+  *Add to comparison* adds them to the open comparison (a new one if none is
+  open). An unregistered package can be added with *Add file…* in the tab.
+  Packages without second-order data (registry `pert_order` [1]: the older
+  first-order-only `*_1d.npz` files, and empty ones) are not listed, and a
+  file without it is refused: they have no two-phonon spectral function,
+  rates or T1. Central-difference packages are complete.
+- Views: **Couplings** (against the phonon energy, laid out as the spectral
+  functions: one column per channel, first order |V| per mode on top and the
+  diagonal second order |V^(ll)| below), **Spectral functions** (one-phonon J1(ω) and the
+  two-phonon J2(ω, ω) along the diagonal), **2D map** (the full J2(ωx, ωy) of
+  one entry, chosen in a dropdown), **Rates** (the Δ1 and Δ2 rates against
+  temperature, m_s S → S−1 and S → S−2) and **T1** (lowest or highest |m_s|
+  initial state, m_s = +S or m_s = −S, optionally relative to the first
+  entry).
+- Options in the tab: channels (Δ0, Δ1, Δ2), log scale, σ for the spectral
+  functions and the rates, processes for the rates (total, direct,
+  two-phonon, first-order Raman), temperatures, an axial magnetic field B
+  (mT; `rate_series(b_field_mt=…)`: Zeeman-splits +m and −m, moves every gap
+  and opens the +m ↔ −m direct rate; with B ≠ 0 the Rates view adds a row of
+  the −S transitions), and the production settings
+  (second-order pair treatment, direct model, mirror projection). The
+  defaults are those of `spinlabs run`.
+- **Experimental data** (`experimental_data/<defect>/*.csv`, read by
+  `spinlabs.experimental`, found in the working directory or next to the
+  package's data tree) are drawn as open markers in the Rates and T1 views,
+  for the defects in the comparison. Rates: Ω in the Δ1 panels (the
+  m_s 1 → 0 rate) and γ in the Δ2 panels (1 → −1), in the +S row. T1: the
+  measured T1 or 1/T1 series (an optically pumped polarization, so drawn
+  for the lowest |m_s| only) and T1 of the chosen initial state solved from
+  each source's Ω and γ (`t1_from_rates`). The *Experiment* box has a master
+  toggle and one checkbox per series (its marker shown); Jarmola et al.
+  (2012) S2 starts unticked, as in the paper figures. With one defect the
+  points are dark grey; with several each defect's points take the colour
+  of its first entry. The choice is saved with the comparison, and Details
+  lists every series with its range.
+- All numbers come from the production code (`spinlabs.gui.production` over
+  `spinlabs.pipeline`): `coupling_manager` for the couplings, `rate_series`
+  for the rates, `t1_details` for T1; the spectral functions are the
+  densities the rates integrate (zero-gap pairs left out). Everything is
+  computed in a separate worker process (spawned, one job at a time), so the
+  window never waits on numpy and no Tk object is touched off the Tk thread;
+  closing the window ends the worker. If the worker process dies (killed, out
+  of memory) the next job starts a fresh one; the job it died on is retried
+  once and then reported as failed. Couplings and rates are cached on disk
+  under `~/.spinlabs/gui_cache/` (written atomically), keyed on the package's
+  registered sha256, the settings (B is part of the rates key), the phonon
+  spectrum override and a fingerprint of the spinlabs code that computes them
+  (everything but the GUI, the CLI and plotting), so a code change recomputes
+  instead of showing stale numbers. Only the latest few results per kind are
+  kept in memory; older ones come back from the disk cache. An entry reads
+  "failed" only for errors under the current settings. The tab
+  polls and redraws a view only when one of its results arrives or fails, or
+  its inputs change, so a view stays still while the rest is computed.
+- Tk objects must only be freed on the Tk thread, so `spinlabs gui` turns off
+  Python's automatic garbage collection and collects from the Tk event loop
+  instead (same generation thresholds, polled every 200 ms). Otherwise a
+  collection triggered on the worker thread by a large cell freed Tk variables
+  and images there and Tcl aborted the process.
+- If the Debye direct rate cannot be fitted to a spectrum, the Gaussian one is
+  used and the Details tab says so.
+- Comparison tabs are saved and restored with the session like pack tabs.
+
+## Appearance
+
+The window uses the Sun Valley ttk theme (the Windows 11-style `sv-ttk`), with a
+dark header, white cards on a soft grey surface, one blue accent and a
+consistent type scale.  `src/spinlabs/gui/theme.py` owns the small custom layer
+and falls back to the previous dependency-free clam theme if `sv-ttk` is not
+installed.  `sv-ttk` is the optional `gui` extra: install it with
+`pip install -e ".[gui]"` (plain `pip install -e .` leaves it out, for
+headless machines).  Matplotlib's on-screen figures
+use matching surface colours, muted axes and typography.

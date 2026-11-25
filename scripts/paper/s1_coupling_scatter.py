@@ -3,7 +3,7 @@
 Second order: the pairs of M3(b), every pair computed in both AO and UO (diagonal only for all but VV0), coloured
 by the geometric-mean IPR sqrt(IPR_l IPR_l') of the pair's two modes.
 
-Rows NV- (512), VV0 (128), ClV+ (576), V_Si- (128) (m3_rho.SYSTEMS); columns V00, V+-, V0+-. No mode filter (as rho in M3); points with a zero
+Rows NV- (512), VV0 (128), ClV+ (576), V_Si- (576) (m3_rho.SYSTEMS); columns V00, V+-, V0+-. No mode filter (as rho in M3); points with a zero
 coupling in either scheme cannot be drawn on log axes and are counted in the record. Dashed: |V_UO| = |V_AO|;
 solid (colour outside the IPR map): |V_UO| = rho |V_AO|.
 """
@@ -24,7 +24,7 @@ def figure(plt, order, rec):
     fig.subplots_adjust(wspace=0.42, hspace=0.32, right=0.88)
     info = {}
     for row, s in enumerate(SYSTEMS):
-        ipr = np.asarray(parse_phonon_data(str(C.DATA / s / "phonon_data.npz")).get_ipr(), dtype=float)
+        ipr = np.asarray(parse_phonon_data(str(C.phonon_file(s))).get_ipr(), dtype=float)  # the modes the data ran along
         if order == 2:  # a pair's IPR: the geometric mean of its two modes'
             rows, cols = shared_pairs(s)
             ipr = np.sqrt(ipr[rows] * ipr[cols])

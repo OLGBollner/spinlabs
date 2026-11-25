@@ -164,8 +164,10 @@ def column_title(path) -> str:
     return f"{title} [{key}]" if key and key not in STANDARD_KEYS else title
 
 
-def _registered_symmetries(defect: str, cell: int, n_needed: int) -> tuple[tuple[str, ...], Path] | None:
-    """Symmetry labels of the first registered full phonon spectrum of defect_cell with n_needed modes or more."""
+def _registered_spectrum(
+    defect: str, cell: int, n_needed: int
+) -> tuple[tuple[str, ...], np.ndarray, Path] | None:
+    """Symmetries and frequencies of the first registered phonon spectrum with n_needed modes or more."""
     from spinlabs.parsers import parse_phonon_data
     from spinlabs.registry import ensure_db, find_phonon
     from spinlabs.symmetry import classify_and_pair
@@ -176,8 +178,78 @@ def _registered_symmetries(defect: str, cell: int, n_needed: int) -> tuple[tuple
             continue
         if spectrum.symmetries is None:
             classify_and_pair(spectrum)
-        return tuple(str(s) for s in spectrum.symmetries), path
+        return tuple(str(s) for s in spectrum.symmetries), np.asarray(spectrum.frequencies_mev), path
     return None
+
+
+def mode_details(
+    path, modes, cache: dict | None = None, meta: dict | None = None, phonon_file=None
+) -> dict[int, tuple[str | None, float | None]]:
+    """(symmetry, frequency in meV) per mode from the defect's registered phonon data.
+
+    Empty, with a warning, when the pack names no defect/cell or no registered spectrum
+    covers the modes. ``cache`` keeps parsed spectra between packs of one figure.
+    ``meta`` saves loading the pack again when the caller already has its metadata.
+    ``phonon_file`` uses that full spectrum instead of looking it up in the registry.
+    """
+    cache = {} if cache is None else cache
+    if phonon_file is not None:
+        from spinlabs.parsers import parse_phonon_data
+        from spinlabs.symmetry import classify_and_pair
+
+        spectrum_key = ("phonon-spectrum", str(phonon_file))
+        spectrum = cache.get(spectrum_key)
+        if spectrum is None:
+            try:
+                spectrum = parse_phonon_data(phonon_file)
+            except Exception as exc:
+                LOGGER.warning(f"{Path(path).name}: cannot read phonon file {phonon_file}: {exc}")
+                return {}
+            cache[spectrum_key] = spectrum
+        if spectrum.symmetries is None:
+            classify_and_pair(spectrum)
+        labels = tuple(str(s) for s in spectrum.symmetries)
+        frequencies = np.asarray(spectrum.frequencies_mev)
+        return {
+            m: (
+                labels[m - 1] if m <= len(labels) else None,
+                float(frequencies[m - 1]) if m <= len(frequencies) else None,
+            )
+            for m in modes
+        }
+    meta = load_convergence(path).metadata if meta is None else meta
+    name = f"{meta.get('defect')}_{meta.get('cell')}"
+    if not modes:
+        return {}
+    if meta.get("defect") is None or meta.get("cell") is None:
+        LOGGER.warning(f"{Path(path).name} names no defect/cell; modes without symmetry or frequency")
+        return {}
+    try:
+        cell = int(meta["cell"])
+    except (TypeError, ValueError):
+        LOGGER.warning(f"{Path(path).name} has a non-numeric cell size; modes without symmetry or frequency")
+        return {}
+    key = (str(meta["defect"]), cell, max(modes))
+    if key not in cache:
+        cache[key] = _registered_spectrum(*key)
+    found = cache[key]
+    if found is None:
+        warned = ("warned-no-phonon", key)
+        if warned not in cache:
+            LOGGER.warning(
+                f"no registered phonon data for {name} covers modes up to {max(modes)}; modes without symmetry or "
+                "frequency (package the defect folder to register its phonon_data.npz)"
+            )
+            cache[warned] = True
+        return {}
+    labels, frequencies, source = found
+    LOGGER.debug(f"mode details of {name} from {source}")
+    out: dict[int, tuple[str | None, float | None]] = {}
+    for m in modes:
+        label = labels[m - 1] if m <= len(labels) else None
+        freq = float(frequencies[m - 1]) if m <= len(frequencies) else None
+        out[m] = (label, freq)
+    return out
 
 
 def mode_symmetries(path, modes, cache: dict | None = None) -> dict[int, str]:
@@ -186,27 +258,7 @@ def mode_symmetries(path, modes, cache: dict | None = None) -> dict[int, str]:
     Empty, with a warning, when the pack names no defect/cell or no registered spectrum covers the modes.
     ``cache`` keeps parsed spectra between the packs of one figure (a defect's columns share one).
     """
-    cache = {} if cache is None else cache
-    meta = load_convergence(path).metadata
-    name = f"{meta.get('defect')}_{meta.get('cell')}"
-    if not modes:
-        return {}
-    if meta.get("defect") is None or meta.get("cell") is None:
-        LOGGER.warning(f"{Path(path).name} names no defect/cell; legend without mode symmetries")
-        return {}
-    key = (str(meta["defect"]), int(meta["cell"]), max(modes))
-    if key not in cache:
-        cache[key] = _registered_symmetries(*key)
-    found = cache[key]
-    if found is None:
-        LOGGER.warning(
-            f"no registered phonon data for {name} covers modes up to {max(modes)}; legend without mode symmetries "
-            "(package the defect folder to register its phonon_data.npz)"
-        )
-        return {}
-    labels, source = found
-    LOGGER.debug(f"mode symmetries of {name} from {source}")
-    return {m: labels[m - 1] for m in modes}
+    return {m: sym for m, (sym, _freq) in mode_details(path, modes, cache).items() if sym is not None}
 
 
 def safe_window(r, order: int) -> tuple[float, float, bool] | None:
@@ -240,7 +292,13 @@ def _coefficient(r, order: int) -> float:
 
 
 def shade_safe_windows(
-    ax, rows, order: int, xlim: tuple[float, float], name: str, weak_fraction: float = WEAK_FRACTION
+    ax,
+    rows,
+    order: int,
+    xlim: tuple[float, float],
+    name: str,
+    weak_fraction: float = WEAK_FRACTION,
+    colors: list[str] | None = None,
 ) -> list[int]:
     """Each mode's safe |Q| as a band along its fit line, and the |Q| safe for every mode as a column.
 
@@ -249,10 +307,14 @@ def shade_safe_windows(
     Weak modes are left out of the column and their bands drawn faint: below the SNR target at
     every measured step (below_target_everywhere), or with a coefficient under ``weak_fraction``
     of the strongest resolved mode's (0 turns this off). Returns those neglected modes.
+    ``colors`` is one colour per row (default: the CLI palette); a short palette cycles.
     """
     strongest = max((_coefficient(r, order) for *_, r in rows if safe_window(r, order)), default=0.0)
     los, his, neglected = [], [], []
-    for color, (mode, _p, first, second, r) in zip(COLORS, rows):
+    palette = list(COLORS if colors is None else colors) or list(COLORS)
+    if len(palette) < len(rows):  # never silently drop rows on a short palette
+        palette = [palette[i % len(palette)] for i in range(len(rows))]
+    for color, (mode, _p, first, second, r) in zip(palette, rows):
         window = safe_window(r, order)
         if window is None:
             continue

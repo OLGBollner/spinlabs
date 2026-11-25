@@ -79,7 +79,22 @@ SYSTEMS = {
     "V_Si_128": dict(defect="V_Si", cell=128, step=0.05, label=r"V$_\mathrm{Si}^-$ (128)", packages={
         "AO": _pkg("V_Si_128", 0.05, "all_bands", "20261105", "central"),
         "UO": _pkg("V_Si_128", 0.05, "defect_band_approx", "20261105", "central")}),
+    # the 576-atom cell (M5, F4): central differences along mirror-aligned modes (phonon_data_aligned.npz). UO lacks
+    # the -Q runs of modes 1712 (A1, 113.7 meV) and 1717 (Ex, 114.1 meV): no second difference for those two
+    "V_Si_576": dict(defect="V_Si", cell=576, step=0.05, label=r"V$_\mathrm{Si}^-$ (576)", packages={
+        "AO": _pkg("V_Si_576", 0.05, "AO", "20261124", "central"),
+        "UO": _pkg("V_Si_576", 0.05, "UO", "20261124", "central")}),
 }
+
+
+def phonon_file(system: str) -> Path:
+    """The full phonon spectrum a system's packages were displaced along: data/<system>/phonon_data_aligned.npz for
+    data run along mirror-aligned modes (the package's aligned tag), else phonon_data.npz."""
+    from spinlabs.models import packaged_phonon_name
+
+    with np.load(package(system, "AO"), allow_pickle=True) as d:
+        aligned = d["aligned"].item() if "aligned" in d.files else None
+    return DATA / system / packaged_phonon_name(bool(aligned) if aligned is not None else None)
 
 
 def package(system: str, scheme: str) -> Path:

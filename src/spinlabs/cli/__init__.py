@@ -36,6 +36,10 @@ def build_parser() -> argparse.ArgumentParser:
     plot_parser = subparsers.add_parser("plot", help="Plotting commands")
     build_plot_parser(plot_parser.add_subparsers(dest="command", required=True))
 
+    from spinlabs.cli.gui import build_gui_parser
+
+    build_gui_parser(subparsers.add_parser("gui", help="Interactive convergence viewer (Tk)"))
+
     build_run_parser(subparsers.add_parser("run", help="Run the end-to-end analysis pipeline"))
 
     table_parser = subparsers.add_parser("table", help="LaTeX table commands")

@@ -1,4 +1,4 @@
-"""M5: T1 against temperature for V_Si^- (V2, k site, S = 3/2; 128 atoms), AO and UO, against experiment.
+"""M5: T1 against temperature for V_Si^- (V2, k site, S = 3/2; 576 atoms), AO and UO, against experiment.
 
 Production settings (config.py), as M2 and M4. The initial state is the {+-1/2} doublet (optical pumping polarizes
 V2 into it), T1 fitted to the doublet's summed population; the {+-3/2} doublet gives the same T1 (only the population
@@ -9,6 +9,9 @@ temperature, drawn as T1 = 1/rate. The dashed line marks the onset of the phonon
 (phonon_limited.py): 42.5 K, an upper limit since their temperature-independent term is given only as A0 <= 0.1 1/s.
 Shaded: the effect of the mirror projection (central data: the mirror-forbidden SCF noise), from each curve to the T1
 without it (dotted; config.projection_band).
+The 576-atom cell (central differences along mirror-aligned modes); its UO package lacks the -Q runs of two modes
+(1712, A1, and 1717, Ex, at 113.7 and 114.1 meV), which have no second difference. The 128-atom cell is compared with
+it in F4 (f4_finite_size_vsi.py).
 """
 
 import numpy as np
@@ -19,7 +22,7 @@ from phonon_limited import SIMIN, onset, simin_dep
 
 from spinlabs.experimental import read_experimental_csv
 
-SYSTEM = "V_Si_128"
+SYSTEM = "V_Si_576"
 STATE = "ms_pm1_2"
 STATE_LABEL = r"$m_s=\pm1/2$"
 EXPERIMENT = (("Simin_2017", "Simin 2017"),)  # (source, legend text)
@@ -37,7 +40,7 @@ def experiment():
 
 def main():
     plt = C.style()
-    rec = Record("M5", "V_Si- (128) T1 vs temperature against experiment", "scripts/paper/m5_vsi_t1.py", "main")
+    rec = Record("M5", "V_Si- (576) T1 vs temperature against experiment", "scripts/paper/m5_vsi_t1.py", "main")
     T = C.TEMPERATURES
     res, debye, band = {}, {}, {}
     for sch in C.SCHEMES:
@@ -73,10 +76,12 @@ def main():
     ax.text(0.97, 0.96, C.SYSTEMS[SYSTEM]["label"], transform=ax.transAxes, ha="right", va="top")
     ax.legend(loc="upper right", bbox_to_anchor=(1.0, 0.88), fontsize=C.FONT - 2, handlelength=2.2)
     fig.tight_layout()
-    rec.data["files"] = C.save(fig, C.MAIN, "M5_VSi128_T1_vs_T")
+    rec.data["files"] = C.save(fig, C.MAIN, "M5_VSi576_T1_vs_T")
 
     rec.data["settings"] = {
         "system": {"step": C.SYSTEMS[SYSTEM]["step"], **{sch: C.SYSTEMS[SYSTEM]["packages"][sch] for sch in C.SCHEMES}},
+        "cell": "576 atoms (575 + vacancy); UO without the -Q runs of modes 1712 (A1) and 1717 (Ex), no second "
+                "difference for them; the 128-atom cell in F4",
         "conventions": {sch: str(rates(SYSTEM, sch)["convention"]) for sch in C.SCHEMES},
         "spin": "S = 3/2 (NUPDOWN = 3); UO tensors x2/3 (spin correction)",
         "sigma_meV": C.SIGMA, "direct": C.DIRECT, "zero-gap pairs": "excluded by symmetry",

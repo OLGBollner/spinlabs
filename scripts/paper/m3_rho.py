@@ -1,9 +1,9 @@
-"""M3: coupling ratio rho = sqrt(sum V_UO^2 / sum V_AO^2) for NV- (512), VV0 (128), ClV+ (576), V_Si- (128).
+"""M3: coupling ratio rho = sqrt(sum V_UO^2 / sum V_AO^2) for NV- (512), VV0 (128), ClV+ (576), V_Si- (576).
 
 (a) first order, over the modes; (b) second order, over every pair (l, l') computed in both AO and UO (each
 unordered pair once; computed couplings, no fill; pairs excluded as inconsistent left out). Only VV0 (128) has
-off-diagonal pairs (|gap| < ~20 meV in both schemes); NV- (512), ClV+ (576) and V_Si- (128) have the diagonal V^(ll)
-only. Channels V00, V+-, V0+-. The weighted SD of the per-mode (per-pair) ratios r = |V_UO| / |V_AO| about rho,
+off-diagonal pairs (|gap| < ~20 meV in both schemes); NV- (512), ClV+ (576) and V_Si- (576) have the diagonal V^(ll)
+only (V_Si- (576) UO lacks modes 1712 and 1717, whose pairs drop out of the shared ones). Channels V00, V+-, V0+-. The weighted SD of the per-mode (per-pair) ratios r = |V_UO| / |V_AO| about rho,
 weights V_AO^2 (modes with V_AO = 0 carry no weight), goes to the numbers file only; it is not drawn. No mode filter.
 Couplings in MHz as they enter the rates (ZFSManager of the production packages): UO includes the spin
 correction, x3/2 for the S = 1 defects and x2/3 for V_Si- (S = 3/2).
@@ -17,7 +17,7 @@ from functools import lru_cache
 
 from common import Record, computed_pairs, couplings
 
-SYSTEMS = ("NV_512", "DiV_128", "ClV_576", "V_Si_128")
+SYSTEMS = ("NV_512", "DiV_128", "ClV_576", "V_Si_576")
 KEYS = {1: {"V00": "V_0_0", "Vpm": "V_p_m", "V0pm": "V_0_pm"},
         2: {"V00": "V2_0_0", "Vpm": "V2_p_m", "V0pm": "V2_0_pm"}}
 
@@ -96,7 +96,7 @@ def main():
         "weighted SD (numbers only, not drawn)": "sqrt(sum w (r - rho)^2 / sum w), r = |V_UO|/|V_AO| per "
                                                   "mode/pair, w = V_AO^2",
         "mode filter": "none",
-        "ClV_576, V_Si_128 second order": "diagonal V^(ll) from central differences (f(+Q) + f(-Q) - 2 f(0)) / Q^2",
+        "ClV_576, V_Si_576 second order": "diagonal V^(ll) from central differences (f(+Q) + f(-Q) - 2 f(0)) / Q^2",
         "UO spin correction": "x3/2 for S = 1 (NV, VV0, ClV), x2/3 for S = 3/2 (V_Si), in the packages",
         "units": "couplings in MHz (rho is dimensionless)",
     }
