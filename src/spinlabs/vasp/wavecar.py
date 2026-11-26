@@ -11,6 +11,11 @@ WAVECAR layout (records of ``recl`` bytes): record 0 holds (recl, nspin, rtag), 
 (nk, nb, encut, lattice, efermi); then per spin and k-point a header record (nplw, k, and
 (eig, 0, occ) per band) followed by one record per band with its nplw plane-wave coefficients,
 complex64 for rtag 45200 and complex128 for 45210.
+
+Only vasp_std WAVECARs can be aligned. vasp_gam stores half of the plane waves (psi(-G) = psi(G)^*)
+under the same precision tag; the overlaps would then miss the factor 2 on G != 0 and a complex
+rotation would break the real-wavefunction condition. :func:`check_full_sphere` compares each
+k-point's stored plane-wave count with the full ENCUT sphere and refuses anything else.
 """
 
 from __future__ import annotations
@@ -22,6 +27,8 @@ from pathlib import Path
 import numpy as np
 
 _DTYPES = {45200: np.complex64, 45210: np.complex128}
+HSQDTM = 13.605826 * 0.529177249**2  # hbar^2 / 2 m_e in eV A^2 (VASP's RYTOEV * AUTOA^2)
+SPHERE_TOL = 0.01  # relative slack of the stored plane-wave count against the ENCUT sphere
 
 
 @dataclass(frozen=True)
@@ -52,6 +59,56 @@ def read_header(path: str | Path) -> WavecarHeader:
         f.seek(recl)
         nk, nb = np.fromfile(f, dtype=np.float64, count=2).astype(int)
     return WavecarHeader(int(recl), int(nspin), int(rtag), int(nk), int(nb))
+
+
+def sphere_count(lattice, encut: float, kpoint) -> int:
+    """Plane waves G with hbar^2 |k + G|^2 / 2m < ``encut`` (eV): the full sphere vasp_std stores.
+
+    ``lattice`` rows are the direct lattice vectors (A), ``kpoint`` is in reciprocal-lattice units.
+    """
+    lattice, kpoint = np.asarray(lattice, dtype=float), np.asarray(kpoint, dtype=float)
+    recip = 2 * np.pi * np.linalg.inv(lattice).T  # rows b_i, a_i . b_j = 2 pi delta_ij
+    gmax = np.sqrt(encut / HSQDTM)
+    # |n_i + k_i| = |(k + G) . a_i| / 2 pi <= gmax |a_i| / 2 pi
+    nmax = (gmax * np.linalg.norm(lattice, axis=1) / (2 * np.pi) + np.abs(kpoint)).astype(int) + 1
+    n1, n2 = np.meshgrid(np.arange(-nmax[0], nmax[0] + 1), np.arange(-nmax[1], nmax[1] + 1), indexing="ij")
+    plane = (n1[..., None] + kpoint[0]) * recip[0] + (n2[..., None] + kpoint[1]) * recip[1]
+    count = 0
+    for n3 in range(-nmax[2], nmax[2] + 1):  # one plane at a time keeps large cells cheap
+        q = plane + (n3 + kpoint[2]) * recip[2]
+        count += int(np.count_nonzero(HSQDTM * np.einsum("...i,...i", q, q) < encut))
+    return count
+
+
+def check_full_sphere(path: str | Path) -> None:
+    """ValueError unless every spin and k-point of the WAVECAR stores the full ENCUT sphere (vasp_std).
+
+    About half of it is a Gamma-only (vasp_gam) file, which cannot be aligned.
+    """
+    path = Path(path)
+    header = read_header(path)
+    with open(path, "rb") as f:
+        f.seek(header.recl)
+        rec = np.fromfile(f, dtype=np.float64, count=12)
+    encut, lattice = float(rec[2]), rec[3:12].reshape(3, 3)
+    for spin in range(header.nspin):
+        for k in range(header.nk):
+            with open(path, "rb") as f:
+                f.seek(header.k_header_record(spin, k) * header.recl)
+                rec = np.fromfile(f, dtype=np.float64, count=4)
+            nplw, full = int(rec[0]), sphere_count(lattice, encut, rec[1:4])
+            if abs(nplw - full) <= SPHERE_TOL * full:
+                continue
+            where = f"{path}, spin {spin + 1}, k-point {k + 1}: {nplw} plane waves stored"
+            if abs(nplw - (full + 1) / 2) <= SPHERE_TOL * full:
+                raise ValueError(
+                    f"{where}, half of the {full} in the ENCUT = {encut:g} eV sphere: a Gamma-only (vasp_gam) "
+                    "WAVECAR. Only vasp_std WAVECARs can be aligned; run the SCF with vasp_std"
+                )
+            raise ValueError(
+                f"{where}, but the ENCUT = {encut:g} eV sphere holds {full} (vasp_gam would store "
+                f"{(full + 1) // 2}); not a vasp_std WAVECAR"
+            )
 
 
 def _nplw(path: Path, header: WavecarHeader, spin: int, k: int) -> int:
@@ -118,10 +175,11 @@ def align_down_pair(path: str | Path, bands, out: str | Path | None = None, k: i
     M = <up_i|down_j>: M = W S V^H, U = V W^H), so afterwards <up_i|down'_j> = W S W^H is
     Hermitian with the largest possible diagonal. Written in place, or to a copy at ``out``.
     The band eigenvalues and occupations in the k-point header are left as they are. Returns the
-    overlaps before and after.
+    overlaps before and after. ValueError for a WAVECAR that is not vasp_std (:func:`check_full_sphere`).
     """
     bands = tuple(int(b) for b in bands)
     path = Path(path)
+    check_full_sphere(path)
     target = Path(out) if out is not None else path
     if out is not None:
         shutil.copyfile(path, target)
@@ -160,8 +218,9 @@ MIN_SPAN = 0.9  # smallest singular value of the up/down overlap block for the c
 def align_unpaired(run_dir: str | Path, min_span: float = MIN_SPAN) -> list[PairAlignment]:
     """Align the down channel to the up channel over the unpaired bands, degenerate or not.
 
-    The unpaired bands (occupied up, empty down) come from the run's INCAR occupations
-    (DOCCUP/DOCCDO or FERWE/FERDO, spinlabs.vasp.occupations); each run of consecutive unpaired
+    The unpaired bands (occupied up, empty down) come from the run's own EIGENVAL, written by the
+    SCF that wrote the WAVECAR (first k-point, occupation threshold 0.5; refused when the down
+    channel is the majority or a band is occupied down but empty up); each run of consecutive unpaired
     bands with two or more members is aligned in place as one set (:func:`align_down_pair`).
     There is no degeneracy condition: a displacement that splits a degenerate level (an E mode
     splitting the NV e pair) can split it in opposite order in the two channels, and the flips
@@ -169,16 +228,22 @@ def align_unpaired(run_dir: str | Path, min_span: float = MIN_SPAN) -> list[Pair
     empty in the SCF, so the rotation leaves its state alone, and ALGO = None keeps the rotated
     orbitals. ValueError when the two channels' bands do not span the same space (smallest
     singular value of the overlap below ``min_span``): the flips would then not move an electron
-    into the orbital it left, and no alignment can fix that.
+    into the orbital it left, and no alignment can fix that. ValueError too for a WAVECAR that is
+    not vasp_std (:func:`check_full_sphere`).
     """
-    from spinlabs.vasp.occupations import parse_occupations
+    from spinlabs.vasp.occupations import occupied_bands_from_eigenval
 
     run_dir = Path(run_dir)
-    wavecar = run_dir / "WAVECAR"
-    up, dn = parse_occupations((run_dir / "INCAR").read_text())
-    unpaired = [i + 1 for i, (u, d) in enumerate(zip(up, dn)) if u > 0.5 and d < 0.5]
+    wavecar, eigenval = run_dir / "WAVECAR", run_dir / "EIGENVAL"
+    check_full_sphere(wavecar)
+    n_up, n_dn, _, unpaired_up, unpaired_dn = occupied_bands_from_eigenval(eigenval)
+    if n_up <= n_dn:
+        raise ValueError(f"{eigenval}: {n_up} occupied up bands, {n_dn} down; the up channel must be the majority")
+    if unpaired_dn:
+        raise ValueError(f"{eigenval}: bands {sorted(unpaired_dn)} occupied down but empty up")
+    unpaired = sorted(unpaired_up)
     if not unpaired:
-        raise ValueError(f"no unpaired band in the occupations of {run_dir / 'INCAR'}")
+        raise ValueError(f"no unpaired band (occupied up, empty down) in {eigenval}")
     results = []
     for group in consecutive_groups(unpaired):
         if len(group) < 2:
