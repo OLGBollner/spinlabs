@@ -33,7 +33,6 @@ def _draw_experiment(ax, points) -> None:
 
 
 PROCESS_STYLES = {"total": "-", "direct": "--", "two-phonon": ":", "Raman (1st order)": "-."}
-_MARKERS = ("o", "s", "^", "D", "v", "P", "X", "<", ">", "*")
 MAP_DYNAMIC_RANGE = 1e-6
 
 
@@ -53,10 +52,35 @@ def _legend(fig: Figure, axes) -> None:
         axes.flat[0].legend(handles, labels, fontsize=7, loc="best", frameon=False)
 
 
+COUPLING_LOG_RANGE = 1e-6  # on the log scale, the lines start at most this far below a panel's largest |V|
+
+
+def _coupling_lines(ax, series, log: bool) -> None:
+    """Each mode as a vertical line from the baseline to |V| at its phonon energy, as the older coupling
+    plots (plotter.plot_vlines_sorted_by_magnitude). ``series``: (label, colour, frequencies, values).
+
+    The entry with the larger mean coupling goes behind, so a smaller set drawn over it stays visible;
+    the legend keeps the entry order. On the log scale the lines start just below the smallest coupling
+    shown (at most COUPLING_LOG_RANGE below the largest), as there is no zero to start from."""
+    shown = [(label, color, x[v > 0] if log else x, v[v > 0] if log else v) for label, color, x, v in series]
+    values = np.concatenate([v for *_, v in shown]) if shown else np.empty(0)
+    if log and values.size:
+        top = float(values.max())
+        base = max(float(values.min()), top * COUPLING_LOG_RANGE) / 1.5
+        ax.set_ylim(base, top * 1.5)
+    else:
+        base = 0.0
+        ax.set_ylim(0, 1.05 * float(values.max()) if values.size and values.max() > 0 else 1.0)
+    behind = np.argsort([-float(np.mean(v)) if v.size else 0.0 for *_, v in shown])  # largest first
+    zorder = {int(i): 2 + 0.01 * rank for rank, i in enumerate(behind)}
+    for k, (label, color, x, v) in enumerate(shown):
+        ax.vlines(x, base, v, color=color, lw=1.0, alpha=0.75, label=label, zorder=zorder[k])
+
+
 def build_coupling_figure(entries, channels, *, log: bool = True, figsize=None, dpi: int = 100) -> Figure:
     """The couplings against the phonon energy, laid out as the spectral functions: one column per channel
-    (transition), first order |V| per mode on top and the diagonal second order |V^(ll)| below.
-    ``entries``: (label, colour, Couplings)."""
+    (transition), first order |V| per mode on top and the diagonal second order |V^(ll)| below. Each mode
+    is a vertical line at its energy (:func:`_coupling_lines`). ``entries``: (label, colour, Couplings)."""
     channels = [c for c in channels if c in CHANNEL_LABELS]
     if not entries or not channels:
         return message_figure("Add entries and select a channel", dpi=dpi)
@@ -64,13 +88,12 @@ def build_coupling_figure(entries, channels, *, log: bool = True, figsize=None, 
     for col, channel in enumerate(channels):
         for row, ylabel in enumerate((r"$|V|$ (MHz)", r"$|V^{(ll)}|$ (MHz)")):
             ax = axes[row, col]
-            for k, (label, color, c) in enumerate(entries):
-                values = c.first[channel] if row == 0 else np.abs(np.diag(c.second[channel]))
-                ok = values > 0 if log else np.ones(len(values), bool)
-                ax.plot(c.frequencies[ok], values[ok], ls="none", marker=_MARKERS[k % len(_MARKERS)], ms=3.5,
-                        mfc=color, mec="white", mew=0.3, alpha=0.85, label=label)
+            series = [(label, color, np.asarray(c.frequencies, float),
+                       np.abs(np.asarray(c.first[channel] if row == 0 else np.diag(c.second[channel]), float)))
+                      for label, color, c in entries]
             if log:
                 ax.set_yscale("log")
+            _coupling_lines(ax, series, log)
             ax.set_xlim(left=0)
             ax.grid(True, ls=":", lw=0.5, alpha=0.6)
             if col == 0:

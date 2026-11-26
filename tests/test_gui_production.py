@@ -252,7 +252,17 @@ def test_figure_builders_draw_every_entry(session):
     c = session.get("couplings", SETTINGS)
     entries = [("A", "#1f77b4", c), ("B", "#d62728", c)]
     fig = pplots.build_coupling_figure(entries, ["d1", "d2"])  # as the spectral functions: a column per channel
-    assert len(fig.axes) == 4 and all(len(ax.lines) == 2 for ax in fig.axes)
+    assert len(fig.axes) == 4 and all(len(ax.collections) == 2 and not ax.lines for ax in fig.axes)
+    # one vertical line per mode with a coupling, from just below the smallest one (log scale) up to |V|
+    values = np.abs(np.asarray(c.first["d1"], float))
+    segments = fig.axes[0].collections[0].get_segments()
+    assert len(segments) == np.count_nonzero(values > 0)
+    assert all(seg[0, 0] == seg[1, 0] for seg in segments)  # vertical
+    assert np.allclose(sorted(seg[1, 1] for seg in segments), np.sort(values[values > 0]))
+    assert all(seg[0, 1] == fig.axes[0].get_ylim()[0] > 0 for seg in segments)
+    assert [t.get_text() for t in fig.axes[0].get_legend().get_texts()] == ["A", "B"]  # entry order
+    linear = pplots.build_coupling_figure(entries, ["d1"], log=False)
+    assert linear.axes[0].get_ylim() == pytest.approx((0, 1.05 * values.max())) and all(seg[0, 1] == 0 for seg in linear.axes[0].collections[0].get_segments())
     top, bottom = fig.axes[0], fig.axes[2]  # first order above, the diagonal second order below
     assert "first order" in top.get_title() and "second order" in bottom.get_title()
     spectra = session.get("spectral", SETTINGS)
