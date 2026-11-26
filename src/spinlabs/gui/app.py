@@ -1442,6 +1442,7 @@ class ConvergenceApp:
             self._sync_controls_to_tab(self.active_tab)
             self.active_tab.render_current()
         else:
+            self._show_view_panel(None)
             self.set_report(ReportData([], [], "No pack open."))
             self.set_status("No pack open")
 
@@ -1526,8 +1527,19 @@ class ConvergenceApp:
 
     # -- controls ----------------------------------------------------------
 
+    def _show_view_panel(self, tab: PackTab | ComparisonTab | None) -> None:
+        """The View sidebar tab follows the open tab: a comparison's entries, view options and production
+        settings (ComparisonTab.controls) while it is open, else the convergence view controls."""
+        panel = tab.controls if isinstance(tab, ComparisonTab) else self.view_scroll
+        for child in self.view_tab.winfo_children():
+            if child is not panel and child.winfo_manager():
+                child.pack_forget()
+        if not panel.winfo_manager():
+            panel.pack(fill=tk.BOTH, expand=True)
+
     def _sync_controls_to_tab(self, tab: PackTab | ComparisonTab) -> None:
-        if isinstance(tab, ComparisonTab):  # its controls live in the tab; the View sidebar is for packs
+        self._show_view_panel(tab)
+        if isinstance(tab, ComparisonTab):  # its controls are its own panel in the View tab
             self.mode_tree.delete(*self.mode_tree.get_children())
             self._column_combo["values"] = []
             for child in self.columns_frame.winfo_children():

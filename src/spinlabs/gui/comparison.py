@@ -49,6 +49,7 @@ class Entry:
     package: ProductionPackage
     session: ProductionSession
     color: str
+    hidden: bool = False  # left out of every view and the report, keeping its colour and place
 
 
 class ComparisonTab(ttk.Frame):
@@ -81,13 +82,11 @@ class ComparisonTab(ttk.Frame):
     # -- widgets ----------------------------------------------------------------------------------------
 
     def _build(self) -> None:
-        panes = tk.PanedWindow(self, orient=tk.HORIZONTAL, sashwidth=6, sashrelief=tk.FLAT,
-                               background=self.app.palette.background, borderwidth=0)
-        panes.pack(fill=tk.BOTH, expand=True)
-        side = ttk.Frame(panes, style="Card.TFrame", width=300)
-        panes.add(side, minsize=260, width=300)
-        self.nested = ttk.Notebook(panes)
-        panes.add(self.nested, stretch="always")
+        # The entries, view options and production settings live in the app's View sidebar tab, which shows
+        # this panel while this comparison is the open tab (ConvergenceApp._show_view_panel)
+        self.controls = ttk.Frame(self.app.view_tab, style="Card.TFrame")
+        self.nested = ttk.Notebook(self)
+        self.nested.pack(fill=tk.BOTH, expand=True)
         self.hosts = []
         for name in VIEWS:
             host = FigureHost(self.nested)
@@ -95,23 +94,28 @@ class ComparisonTab(ttk.Frame):
             self.hosts.append(host)
         self.nested.bind("<<NotebookTabChanged>>", lambda _e: self.render_current())
 
-        scroll = ScrollableFrame(side, palette=self.app.palette)
+        scroll = ScrollableFrame(self.controls, palette=self.app.palette)
         scroll.pack(fill=tk.BOTH, expand=True)
         body = scroll.content
         tip = self.app._tip
 
         box = ttk.LabelFrame(body, text="Entries")
         box.pack(fill=tk.X, padx=6, pady=4)
-        self.entry_tree = ttk.Treeview(box, columns=("entry", "status"), show="headings", height=6,
+        self._show_icons = (self.app._checkbox_image(False), self.app._checkbox_image(True))
+        self.entry_tree = ttk.Treeview(box, columns=("entry", "status"), show=("tree", "headings"), height=6,
                                        selectmode="extended")
+        self.entry_tree.heading("#0", text="Show")
+        self.entry_tree.column("#0", width=48, stretch=False, anchor=tk.W)
+        self.entry_tree.tag_configure("hidden", foreground="#9aa0a6")
         self.entry_tree.heading("entry", text="Entry")
         self.entry_tree.heading("status", text="Status")
         self.entry_tree.column("entry", width=170, anchor=tk.W)
         self.entry_tree.column("status", width=80, anchor=tk.W)
         self.entry_tree.pack(fill=tk.X, padx=4, pady=4)
         tip(self.entry_tree, "The packages compared in this tab, one colour each. Add them from the Production tab; "
-                             "drag an entry to reorder (legends follow the order; the first entry is the T1 "
-                             "ratio reference).")
+                             "click Show to hide an entry from the views and the report (it keeps its colour and "
+                             "place); drag an entry to reorder (legends follow the order; the first shown entry is "
+                             "the T1 ratio reference).")
         self._drag: str | None = None
         self._dragged = False
         self.entry_tree.bind("<ButtonPress-1>", self._drag_start, add="+")
@@ -122,6 +126,10 @@ class ComparisonTab(ttk.Frame):
         remove = ttk.Button(row, text="Remove", command=self.remove_selected)
         remove.pack(side=tk.LEFT, expand=True, fill=tk.X)
         tip(remove, "Remove the selected entries from this comparison.")
+        toggle = ttk.Button(row, text="Hide/show", command=self.toggle_selected)
+        toggle.pack(side=tk.LEFT, expand=True, fill=tk.X, padx=(4, 0))
+        tip(toggle, "Hide the selected entries from the views and the report, or show them again when all of them "
+                    "are hidden.")
         add_file = ttk.Button(row, text="Add file…", command=self.add_file)
         add_file.pack(side=tk.LEFT, expand=True, fill=tk.X, padx=(4, 0))
         tip(add_file, "Add a packaged ZFS file that is not in the registry.")
@@ -274,6 +282,29 @@ class ComparisonTab(ttk.Frame):
         self.invalidate()
         self.render_current()
 
+    @property
+    def shown(self) -> list[Entry]:
+        """The entries the views and the report draw, in entry order."""
+        return [e for e in self.entries if not e.hidden]
+
+    def set_hidden(self, keys, hidden: bool) -> None:
+        keys = set(keys)
+        changed = False
+        for entry in self.entries:
+            if entry.package.key in keys and entry.hidden != hidden:
+                entry.hidden, changed = hidden, True
+        if changed:
+            self.update_entry_tree()
+            self.invalidate()
+            self.render_current()
+            self.app._save_state()
+
+    def toggle_selected(self) -> None:
+        """Hide the selected entries, or show them if all of them are hidden."""
+        selected = [e for e in self.entries if e.package.key in set(self.entry_tree.selection())]
+        if selected:
+            self.set_hidden([e.package.key for e in selected], not all(e.hidden for e in selected))
+
     def _selected_entry(self) -> Entry | None:
         selection = self.entry_tree.selection()
         if len(selection) != 1:
@@ -331,9 +362,17 @@ class ComparisonTab(ttk.Frame):
 
     # -- drag to reorder --------------------------------------------------------------------------------
 
-    def _drag_start(self, event) -> None:
-        self._drag = self.entry_tree.identify_row(event.y) or None
+    def _drag_start(self, event):
+        row = self.entry_tree.identify_row(event.y)
+        if row and self.entry_tree.identify_column(event.x) == "#0":  # the Show checkbox: toggle, no drag
+            entry = next((e for e in self.entries if e.package.key == row), None)
+            if entry is not None:
+                self.set_hidden([row], not entry.hidden)
+            self._drag, self._dragged = None, False
+            return "break"
+        self._drag = row or None
         self._dragged = False
+        return None
 
     def _drag_motion(self, event) -> None:
         if self._drag is None:
@@ -515,7 +554,11 @@ class ComparisonTab(ttk.Frame):
         for index, entry in enumerate(self.entries):
             tag = f"c{entry.color}"
             tree.tag_configure(tag, foreground=entry.color)
-            if entry.session.errors(self.settings):
+            tags = ("hidden",) if entry.hidden else (tag,)
+            image = self._show_icons[0 if entry.hidden else 1]
+            if entry.hidden:
+                status = "hidden"
+            elif entry.session.errors(self.settings):
                 status = "failed"
             elif entry.session.busy():
                 status = "computing…"
@@ -523,12 +566,13 @@ class ComparisonTab(ttk.Frame):
                 status = "ready"
             values = (entry.package.long_label, status)
             if tree.exists(entry.package.key):
-                if tuple(tree.item(entry.package.key, "values")) != values:
-                    tree.item(entry.package.key, values=values, tags=(tag,))
+                if tuple(tree.item(entry.package.key, "values")) != values or \
+                        tuple(tree.item(entry.package.key, "tags")) != tags:
+                    tree.item(entry.package.key, values=values, tags=tags, image=image)
                 if tree.index(entry.package.key) != index:
                     tree.move(entry.package.key, "", index)
             else:
-                tree.insert("", index, iid=entry.package.key, values=values, tags=(tag,))
+                tree.insert("", index, iid=entry.package.key, text="", image=image, values=values, tags=tags)
 
     # -- data -------------------------------------------------------------------------------------------
 
@@ -536,7 +580,7 @@ class ComparisonTab(ttk.Frame):
         """[(entry, result)] of the entries whose result is ready; queues the others. Failures are skipped
         (listed in the report)."""
         ready = []
-        for entry in self.entries:
+        for entry in self.shown:
             try:
                 result = entry.session.get(kind, self.settings, *args, executor=self.app.executor)
             except RuntimeError:
@@ -546,7 +590,7 @@ class ComparisonTab(ttk.Frame):
         return ready
 
     def _pending(self) -> bool:
-        return any(entry.session.busy() for entry in self.entries)
+        return any(entry.session.busy() for entry in self.shown)
 
     # -- rendering --------------------------------------------------------------------------------------
 
@@ -555,7 +599,7 @@ class ComparisonTab(ttk.Frame):
         self._last_report = None
 
     def _view_key(self, view: int) -> tuple:
-        return (view, tuple(e.package.key for e in self.entries), tuple(sorted(self.channels)),
+        return (view, tuple(e.package.key for e in self.shown), tuple(sorted(self.channels)),
                 self.log, tuple(sorted(self.processes)), self.t1_state, self.ratio, self.map_entry,
                 self.settings.rate_key(), self.show_experiment, tuple(sorted(self.experiment_off)))
 
@@ -564,6 +608,8 @@ class ComparisonTab(ttk.Frame):
         figsize = None if canonical else host.target_figsize()
         if not self.entries:
             return message_figure("No entries: add production packages from the Production tab", figsize=figsize or (8, 5))
+        if not self.shown:
+            return message_figure("Every entry is hidden: tick Show in the entry list", figsize=figsize or (8, 5))
         channels = [c for c in CHANNELS if c in self.channels]
         if view == 0:
             data = [(e.package.long_label, e.color, c) for e, c in self._fetch("couplings")]
@@ -572,7 +618,7 @@ class ComparisonTab(ttk.Frame):
             data = [(e.package.long_label, e.color, s) for e, s in self._fetch("spectral")]
             return pplots.build_spectral_figure(data, channels, self.settings.sigma, log=self.log, figsize=figsize)
         if view == 2:
-            entry = self.entries[min(self.map_entry, len(self.entries) - 1)]
+            entry = self._map_entry()
             try:
                 maps = entry.session.get("spectral_map", self.settings, executor=self.app.executor)
             except RuntimeError as exc:
@@ -593,22 +639,26 @@ class ComparisonTab(ttk.Frame):
 
     def _needs(self, view: int) -> list[tuple]:
         """(session, kind, args) of the results a view draws."""
-        if not self.entries:
+        if not self.shown:
             return []
         if view == 2:
-            entry = self.entries[min(self.map_entry, len(self.entries) - 1)]
-            return [(entry.session, "spectral_map", ())]
+            return [(self._map_entry().session, "spectral_map", ())]
         kind, args = {0: ("couplings", ()), 1: ("spectral", ()), 3: ("rates", ()), 4: ("t1", (self.t1_state,))}[view]
-        return [(e.session, kind, args) for e in self.entries]
+        return [(e.session, kind, args) for e in self.shown]
+
+    def _map_entry(self) -> Entry:
+        """The entry the 2D map draws: the chosen one, else (it is hidden) the first shown entry."""
+        entry = self.entries[min(self.map_entry, len(self.entries) - 1)]
+        return self.shown[0] if entry.hidden and self.shown else entry
 
     def _signature(self, needs) -> tuple:
         return tuple(session.status(kind, self.settings, *args) for session, kind, args in needs)
 
     def _report_signature(self) -> tuple:
-        needs = [(e.session, k, a) for e in self.entries
+        needs = [(e.session, k, a) for e in self.shown
                  for k, a in (("couplings", ()), ("rates", ()), ("t1", (self.t1_state,)))]
-        return (self._signature(needs), tuple(len(e.session.errors(self.settings)) for e in self.entries),
-                tuple(e.package.key for e in self.entries), self.settings.rate_key(), self.t1_state)
+        return (self._signature(needs), tuple(len(e.session.errors(self.settings)) for e in self.shown),
+                tuple(e.package.key for e in self.shown), self.settings.rate_key(), self.t1_state)
 
     def render_current(self) -> None:
         """Draw the current view when what it shows changed: new inputs, or one of its results became ready
@@ -685,11 +735,11 @@ class ComparisonTab(ttk.Frame):
         columns += [(f"{c}_{t:g}", f"Δ{c[1]} rate {t:g} K (1/s)", 115) for c in ("d1", "d2") for t in QUOTE_T]
         # only what is already computed: the report never queues work of other views
         peek = lambda kind, *args: {  # noqa: E731
-            e.package.key: v for e in self.entries if (v := e.session.peek(kind, self.settings, *args)) is not None
+            e.package.key: v for e in self.shown if (v := e.session.peek(kind, self.settings, *args)) is not None
         }
         couplings, rates, t1 = peek("couplings"), peek("rates"), peek("t1", self.t1_state)
         rows = []
-        for entry in self.entries:
+        for entry in self.shown:
             key = entry.package.key
             row = {"entry": entry.package.long_label}
             c, r = couplings.get(key), rates.get(key)
@@ -712,13 +762,15 @@ class ComparisonTab(ttk.Frame):
 
     def _details(self, couplings, rates) -> str:
         s = self.settings
-        lines = [f"{self.title}: {len(self.entries)} entries; view {VIEWS[self.nested.index('current')]}",
+        hidden = len(self.entries) - len(self.shown)
+        lines = [f"{self.title}: {len(self.entries)} entries" + (f" ({hidden} hidden)" if hidden else "")
+                 + f"; view {VIEWS[self.nested.index('current')]}",
                  f"settings: pairs {s.pairs}, mirror projection {'on' if s.mirror_projection else 'off'}, direct "
                  f"{s.direct}, σ {s.sigma:g} meV, T {s.t_min:g}-{s.t_max:g} K step {s.t_step:g}, "
                  f"B {s.b_field_mt:g} mT (axial)",
                  "rates: Δ1 = m_s S → S−1, Δ2 = S → S−2 (equal to their reverse transitions at these "
                  "temperatures, and without a field to their −S mirrors); T1 from direct + two-phonon (production)"]
-        for entry in self.entries:
+        for entry in self.shown:
             key = entry.package.key
             lines.append("")
             lines.append(f"{entry.package.long_label}: {entry.package.path}")
@@ -753,7 +805,7 @@ class ComparisonTab(ttk.Frame):
     def state(self) -> dict:
         return {
             "key": self.key, "title": self.title, "entries": [str(e.package.path) for e in self.entries],
-            "colors": [e.color for e in self.entries],
+            "colors": [e.color for e in self.entries], "hidden": [str(e.package.path) for e in self.entries if e.hidden],
             "settings": self.settings.to_dict(), "channels": sorted(self.channels),
             "log": self.log, "processes": sorted(self.processes), "t1_state": self.t1_state, "ratio": self.ratio,
             "map_entry": self.map_entry, "map_key": self.map_key, "show_experiment": self.show_experiment,
@@ -786,6 +838,9 @@ class ComparisonTab(ttk.Frame):
                 color = color if isinstance(color, str) and color not in used else self._free_color()
                 self.entries.append(Entry(package, self.app.production_session(package), color))
                 known.add(package.key)
+        hidden = {str(p) for p in state.get("hidden") or []}
+        for entry in self.entries:
+            entry.hidden = str(entry.package.path) in hidden
         if self.map_key not in known and self.entries:
             self.map_key = self.entries[min(saved_index, len(self.entries) - 1)].package.key
         view = int(state.get("view") or 0)
@@ -802,6 +857,7 @@ class ComparisonTab(ttk.Frame):
             if host.figure is not None:
                 plt.close(host.figure)
                 host.figure = None
+        self.controls.destroy()
         super().destroy()
 
 
