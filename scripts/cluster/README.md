@@ -113,8 +113,9 @@ from that snapshot.
   the bands occupied up and empty down in the SCF's EIGENVAL) rotated onto the up-spin ones in
   its WAVECAR (`python -m spinlabs.vasp.wavecar align .`, `.wavecar_aligned`; each channel picks
   its own basis or order of the pair, and a spin flip must land in the orbital it left;
-  a run whose channels cannot be matched, or whose WAVECAR is not from vasp_std, gets a CHECK
-  file and no sublevel runs; vasp_gam stores half the plane waves and cannot be aligned),
+  a vasp_gam WAVECAR, real orbitals on half the plane-wave sphere, is aligned with its own real
+  overlaps and a real rotation; a run whose channels cannot be matched, or whose WAVECAR is
+  neither vasp_std nor vasp_gam, gets a CHECK file and no sublevel runs),
   3. a subfolder per sublevel with the run's POSCAR/KPOINTS/POTCAR, `WAVECAR -> ../WAVECAR` and
   its INCAR, written just before from the run's SCF INCAR (`python -m spinlabs.vasp.sublevels`):
   a setting changed in `input/INCAR` reaches every sublevel, with the sublevel's own settings

@@ -139,27 +139,82 @@ def test_sphere_count_of_a_cubic_cell():
     )
 
 
-def test_a_gamma_only_wavecar_is_refused(tmp_path, capsys):
-    """vasp_gam stores half the sphere under the same precision tag: refused, nothing written."""
-    run = _rotated_run(tmp_path)
-    up = read_bands(run / "WAVECAR", 0, range(1, NB + 1))
-    down = read_bands(run / "WAVECAR", 1, range(1, NB + 1))
-    _wavecar(run / "WAVECAR", up, down, EIG, EIG, nplw=(NPLW + 1) // 2)
-    before = (run / "WAVECAR").read_bytes()
-    with pytest.raises(ValueError, match="vasp_gam"):
-        align_unpaired(run)
-    with pytest.raises(ValueError, match="vasp_gam"):
-        align_down_pair(run / "WAVECAR", (3, 4))
-    assert main(["align", str(run)]) == 1
-    assert "Gamma-only (vasp_gam) WAVECAR" in capsys.readouterr().out
-    assert (run / "WAVECAR").read_bytes() == before
+def _half_sphere():
+    """vasp_gam's storage: G = 0, then one G of each +-G pair inside the ENCUT sphere of LATTICE."""
+    recip = 2 * np.pi * np.linalg.inv(LATTICE).T
+    n = 4
+    grid = np.array([(i, j, k) for i in range(-n, n + 1) for j in range(-n, n + 1) for k in range(-n, n + 1)])
+    inside = grid[HSQDTM * np.sum((grid @ recip) ** 2, axis=1) < ENCUT]
+    assert len(inside) == NPLW  # the grid covers the sphere sphere_count counts
+    positive = [g for g in inside if (g[2] > 0) or (g[2] == 0 and g[1] > 0) or (g[2] == 0 and g[1] == 0 and g[0] > 0)]
+    return len(positive) + 1  # and G = 0
+
+
+def _real_orbitals(rng, n_orbitals):
+    """Orthonormal real orbitals in vasp_gam storage: rows (G = 0, half-sphere G); orthonormalised in the
+    real coordinates (c_0, sqrt2 Re c_G, sqrt2 Im c_G), in which the full-sphere overlap is the dot product."""
+    n_half = _half_sphere()
+    q, _ = np.linalg.qr(rng.normal(size=(2 * n_half - 1, n_orbitals)))
+    q = q.T
+    coeffs = np.zeros((n_orbitals, n_half), dtype=complex)
+    coeffs[:, 0] = q[:, 0]
+    coeffs[:, 1:] = (q[:, 1:n_half] + 1j * q[:, n_half:]) / np.sqrt(2)
+    return coeffs
+
+
+def _gam_run(tmp_path, theta=74.0):
+    """A vasp_gam run: the down pair (bands 3, 4) is the up pair rotated by ``theta`` (real), one of them
+    with its sign flipped."""
+    up = _real_orbitals(np.random.default_rng(11), NB)
+    t = np.radians(theta)
+    down = up.copy()
+    down[2:4] = np.array([[np.cos(t), np.sin(t)], [np.sin(t), -np.cos(t)]]) @ up[2:4]
+    _eigenval(tmp_path / "EIGENVAL")
+    padded = [np.pad(c, ((0, 0), (0, NPLW - c.shape[1]))) for c in (up, down)]  # the records' fixed length
+    _wavecar(tmp_path / "WAVECAR", *padded, EIG, EIG, nplw=_half_sphere())
+    return tmp_path, up
+
+
+def test_a_gamma_only_wavecar_is_recognised():
+    assert _half_sphere() == (NPLW + 1) // 2
+
+
+def test_vasp_gam_overlaps_are_the_full_sphere_ones(tmp_path):
+    """Stored half-sphere coefficients give <a|b> = a_0^* b_0 + 2 Re sum a_G^* b_G: real, and the overlap of
+    the full real orbitals; the vasp_std treatment of the same file (no factor 2, complex) is not."""
+    from spinlabs.vasp.wavecar import GAM, STD, wavecar_storage
+
+    run, _ = _gam_run(tmp_path, theta=30.0)
+    assert wavecar_storage(run / "WAVECAR") == GAM
+    m = pair_overlap(run / "WAVECAR", (3, 4))
+    t = np.radians(30.0)
+    assert m.dtype.kind == "f"
+    assert np.allclose(m, [[np.cos(t), np.sin(t)], [np.sin(t), -np.cos(t)]], atol=1e-5)
+    wrong = pair_overlap(run / "WAVECAR", (3, 4), storage=STD)  # what the old code computed
+    assert not np.allclose(np.abs(wrong), np.abs(m), atol=1e-2)
+
+
+def test_a_vasp_gam_down_pair_is_aligned_by_a_real_rotation(tmp_path, capsys):
+    """The NV_64 HSE case: vasp_gam, the down e pair swapped. A real orthogonal rotation aligns it, so the
+    orbitals stay real: the rotated down pair is the up pair again."""
+    from spinlabs.vasp.wavecar import GAM
+
+    run, up = _gam_run(tmp_path, theta=88.6)
+    (result,) = align_unpaired(run)
+    assert result.storage == GAM and np.isrealobj(result.rotation)
+    assert np.allclose(result.rotation.T @ result.rotation, np.eye(2))
+    assert result.angle() == pytest.approx(88.6, abs=1e-3) and result.angle("after") == pytest.approx(0.0, abs=1e-3)
+    new = read_bands(run / "WAVECAR", 1, (3, 4))[:, : _half_sphere()]
+    assert np.allclose(new, up[2:4], atol=1e-5)  # real orbitals again: the up pair, stored as vasp_gam stores it
+    assert main(["align", str(run)]) == 0
+    assert "(vasp_gam WAVECAR: real overlaps, real rotation)" in capsys.readouterr().out
 
 
 def test_a_wavecar_with_another_plane_wave_count_is_refused(tmp_path):
     run = _rotated_run(tmp_path)
     up = read_bands(run / "WAVECAR", 0, range(1, NB + 1))
     _wavecar(run / "WAVECAR", up, up, nplw=NPLW - 10)
-    with pytest.raises(ValueError, match="not a vasp_std WAVECAR"):
+    with pytest.raises(ValueError, match="neither a vasp_std nor a vasp_gam WAVECAR"):
         check_full_sphere(run / "WAVECAR")
 
 

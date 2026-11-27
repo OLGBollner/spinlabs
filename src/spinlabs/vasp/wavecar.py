@@ -12,10 +12,14 @@ WAVECAR layout (records of ``recl`` bytes): record 0 holds (recl, nspin, rtag), 
 (eig, 0, occ) per band) followed by one record per band with its nplw plane-wave coefficients,
 complex64 for rtag 45200 and complex128 for 45210.
 
-Only vasp_std WAVECARs can be aligned. vasp_gam stores half of the plane waves (psi(-G) = psi(G)^*)
-under the same precision tag; the overlaps would then miss the factor 2 on G != 0 and a complex
-rotation would break the real-wavefunction condition. :func:`check_full_sphere` compares each
-k-point's stored plane-wave count with the full ENCUT sphere and refuses anything else.
+vasp_std and vasp_gam WAVECARs are both aligned, each in its own storage (:func:`wavecar_storage`,
+from each k-point's plane-wave count against the full ENCUT sphere). vasp_gam stores real orbitals
+(psi(-G) = psi(G)^*) by G = 0 and one G of each +-G pair, about half the sphere, under the same
+precision tag: its overlaps are <a|b> = a_0^* b_0 + 2 Re sum_{G != 0} a_G^* b_G over the stored
+coefficients, a real matrix, and the rotation is the real orthogonal one, so the rotated orbitals
+stay real. (Treated as vasp_std, a vasp_gam file got overlaps without the factor 2 and a complex
+rotation that broke the real-wavefunction condition: the NV_64 HSE run of 2026-11-27, vasp_gam
+5.4.4, had its down e pair rotated 88.6 deg that way and its ms_0 sublevels lost the C3v symmetry.)
 """
 
 from __future__ import annotations
@@ -80,35 +84,57 @@ def sphere_count(lattice, encut: float, kpoint) -> int:
     return count
 
 
-def check_full_sphere(path: str | Path) -> None:
-    """ValueError unless every spin and k-point of the WAVECAR stores the full ENCUT sphere (vasp_std).
+STD, GAM = "std", "gam"  # vasp_std (full plane-wave sphere) and vasp_gam (half of it) storage
 
-    About half of it is a Gamma-only (vasp_gam) file, which cannot be aligned.
-    """
+
+def wavecar_storage(path: str | Path) -> str:
+    """STD when every spin and k-point of the WAVECAR stores the full ENCUT sphere (vasp_std), GAM when
+    it stores about half of it at the Gamma point only (vasp_gam). ValueError for any other count."""
     path = Path(path)
     header = read_header(path)
     with open(path, "rb") as f:
         f.seek(header.recl)
         rec = np.fromfile(f, dtype=np.float64, count=12)
     encut, lattice = float(rec[2]), rec[3:12].reshape(3, 3)
+    kinds = set()
     for spin in range(header.nspin):
         for k in range(header.nk):
             with open(path, "rb") as f:
                 f.seek(header.k_header_record(spin, k) * header.recl)
                 rec = np.fromfile(f, dtype=np.float64, count=4)
-            nplw, full = int(rec[0]), sphere_count(lattice, encut, rec[1:4])
-            if abs(nplw - full) <= SPHERE_TOL * full:
-                continue
+            nplw, kpoint, full = int(rec[0]), rec[1:4], sphere_count(lattice, encut, rec[1:4])
             where = f"{path}, spin {spin + 1}, k-point {k + 1}: {nplw} plane waves stored"
-            if abs(nplw - (full + 1) / 2) <= SPHERE_TOL * full:
+            if abs(nplw - full) <= SPHERE_TOL * full:
+                kinds.add(STD)
+            elif abs(nplw - (full + 1) / 2) <= SPHERE_TOL * full:
+                if header.nk != 1 or np.any(np.abs(kpoint) > 1e-8):
+                    raise ValueError(f"{where}, half the ENCUT sphere away from a single Gamma point: not a "
+                                     "WAVECAR this code can read")
+                kinds.add(GAM)
+            else:
                 raise ValueError(
-                    f"{where}, half of the {full} in the ENCUT = {encut:g} eV sphere: a Gamma-only (vasp_gam) "
-                    "WAVECAR. Only vasp_std WAVECARs can be aligned; run the SCF with vasp_std"
+                    f"{where}, but the ENCUT = {encut:g} eV sphere holds {full} (vasp_gam would store "
+                    f"{(full + 1) // 2}); neither a vasp_std nor a vasp_gam WAVECAR"
                 )
-            raise ValueError(
-                f"{where}, but the ENCUT = {encut:g} eV sphere holds {full} (vasp_gam would store "
-                f"{(full + 1) // 2}); not a vasp_std WAVECAR"
-            )
+    if len(kinds) != 1:
+        raise ValueError(f"{path}: the spins store different plane-wave sets")
+    return kinds.pop()
+
+
+def check_full_sphere(path: str | Path) -> None:
+    """ValueError unless the WAVECAR is a vasp_std one (the full ENCUT sphere at every k-point)."""
+    if wavecar_storage(path) != STD:
+        raise ValueError(f"{path}: a Gamma-only (vasp_gam) WAVECAR, not vasp_std")
+
+
+def _inner(a: np.ndarray, b: np.ndarray, storage: str) -> np.ndarray:
+    """<a_i|b_j> over the full sphere from stored coefficients (rows): vasp_gam rows hold G = 0 first
+    and one G of each +-G pair of a real orbital, so <a|b> = a_0^* b_0 + 2 Re sum_{G != 0} a_G^* b_G."""
+    if storage == STD:
+        return a.conj() @ b.T
+    weights = np.full(a.shape[1], 2.0)
+    weights[0] = 1.0
+    return np.real((a.conj() * weights) @ b.T)
 
 
 def _nplw(path: Path, header: WavecarHeader, spin: int, k: int) -> int:
@@ -144,13 +170,16 @@ def write_bands(path: str | Path, spin: int, bands, coeffs: np.ndarray, k: int =
             f.write(np.ascontiguousarray(c, dtype=header.dtype).tobytes())
 
 
-def pair_overlap(path: str | Path, bands, k: int = 0) -> np.ndarray:
-    """<up_i|down_j> of 1-based ``bands`` (plane-wave part, each orbital normalised)."""
+def pair_overlap(path: str | Path, bands, k: int = 0, storage: str | None = None) -> np.ndarray:
+    """<up_i|down_j> of 1-based ``bands`` (plane-wave part, each orbital normalised), over the full sphere
+    in either storage (``storage``: STD or GAM, default from the file: :func:`wavecar_storage`); real for
+    vasp_gam."""
+    storage = storage or wavecar_storage(path)
     up = read_bands(path, 0, bands, k).astype(np.complex128)
     dn = read_bands(path, 1, bands, k).astype(np.complex128)
-    up /= np.linalg.norm(up, axis=1, keepdims=True)
-    dn /= np.linalg.norm(dn, axis=1, keepdims=True)
-    return up.conj() @ dn.T
+    up /= np.sqrt(np.real(np.diag(_inner(up, up, storage))))[:, None]
+    dn /= np.sqrt(np.real(np.diag(_inner(dn, dn, storage))))[:, None]
+    return _inner(up, dn, storage)
 
 
 @dataclass(frozen=True)
@@ -158,7 +187,8 @@ class PairAlignment:
     bands: tuple[int, ...]
     before: np.ndarray  # |<up_i|down_j>| before
     after: np.ndarray  # |<up_i|down_j>| after
-    rotation: np.ndarray  # unitary U: new down_j = sum_i old down_i U_ij
+    rotation: np.ndarray  # unitary U: new down_j = sum_i old down_i U_ij (real orthogonal for vasp_gam)
+    storage: str = STD  # the WAVECAR's: STD (vasp_std) or GAM (vasp_gam)
 
     def angle(self, which: str = "before") -> float:
         """Rotation of a 2-band down pair against the up pair, in degrees (0 = aligned, 90 = swapped):
@@ -175,20 +205,24 @@ def align_down_pair(path: str | Path, bands, out: str | Path | None = None, k: i
     M = <up_i|down_j>: M = W S V^H, U = V W^H), so afterwards <up_i|down'_j> = W S W^H is
     Hermitian with the largest possible diagonal. Written in place, or to a copy at ``out``.
     The band eigenvalues and occupations in the k-point header are left as they are. Returns the
-    overlaps before and after. ValueError for a WAVECAR that is not vasp_std (:func:`check_full_sphere`).
+    overlaps before and after. A vasp_gam WAVECAR has real overlaps (:func:`_inner`), so U is real
+    orthogonal and the rotated orbitals stay real; ValueError for a WAVECAR that is neither
+    (:func:`wavecar_storage`).
     """
     bands = tuple(int(b) for b in bands)
     path = Path(path)
-    check_full_sphere(path)
+    storage = wavecar_storage(path)
     target = Path(out) if out is not None else path
     if out is not None:
         shutil.copyfile(path, target)
-    m = pair_overlap(target, bands, k)
+    m = pair_overlap(target, bands, k, storage)
     w, _, vh = np.linalg.svd(m)
     u = vh.conj().T @ w.conj().T
+    if storage == GAM:
+        u = np.real(u)  # m is real, so its SVD is; dropping the zero imaginary rounding keeps psi real
     down = read_bands(target, 1, bands, k).astype(np.complex128)
     write_bands(target, 1, bands, u.T @ down, k)  # row j of the result: sum_i U_ij down_i
-    return PairAlignment(bands, np.abs(m), np.abs(pair_overlap(target, bands, k)), u)
+    return PairAlignment(bands, np.abs(m), np.abs(pair_overlap(target, bands, k, storage)), u, storage)
 
 
 def read_eigenvalues(path: str | Path, spin: int, k: int = 0) -> np.ndarray:
@@ -229,13 +263,13 @@ def align_unpaired(run_dir: str | Path, min_span: float = MIN_SPAN) -> list[Pair
     orbitals. ValueError when the two channels' bands do not span the same space (smallest
     singular value of the overlap below ``min_span``): the flips would then not move an electron
     into the orbital it left, and no alignment can fix that. ValueError too for a WAVECAR that is
-    not vasp_std (:func:`check_full_sphere`).
+    neither vasp_std nor vasp_gam (:func:`wavecar_storage`).
     """
     from spinlabs.vasp.occupations import occupied_bands_from_eigenval
 
     run_dir = Path(run_dir)
     wavecar, eigenval = run_dir / "WAVECAR", run_dir / "EIGENVAL"
-    check_full_sphere(wavecar)
+    wavecar_storage(wavecar)  # neither vasp_std nor vasp_gam: refused before anything is read
     n_up, n_dn, _, unpaired_up, unpaired_dn = occupied_bands_from_eigenval(eigenval)
     if n_up <= n_dn:
         raise ValueError(f"{eigenval}: {n_up} occupied up bands, {n_dn} down; the up channel must be the majority")
@@ -278,6 +312,8 @@ def main(argv: list[str] | None = None) -> int:
         if len(r.bands) == 2:
             line += f"rotation {r.angle():.1f} -> {r.angle('after'):.2f} deg, "
         line += f"|<up_i|down_i>| {np.round(np.diag(r.before), 3).tolist()} -> {np.round(np.diag(r.after), 3).tolist()}"
+        if r.storage == GAM:
+            line += " (vasp_gam WAVECAR: real overlaps, real rotation)"
         print(line)
     return 0
 
