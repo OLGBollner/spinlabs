@@ -19,13 +19,14 @@
 # (.wavecar_aligned: each channel picks its own basis or order of the pair, and a spin flip must put
 # the electron in the orbital it left), 3. one subfolder per spin sublevel
 # (input/sublevels/<name>: ms=S and every ms=S-1 spin flip), 4. in each, the ZFS from ../WAVECAR
-# (a symlink) with ALGO=None. The run directory is done once every sublevel has its ZFS block;
-# its WAVECAR is kept.
+# (a symlink) with ALGO=None, its INCAR written just before from the run's SCF INCAR
+# (python -m spinlabs.vasp.sublevels: a setting changed in input/INCAR reaches every sublevel). The
+# run directory is done once every sublevel has its ZFS block; its WAVECAR is kept.
 #
 # ground_state: a defect's unperturbed ground state, submitted on its own with run_ground_state.sh in
 # its folder (spinlabs init zfs). ZFS_full (the full spin decontamination): the SCF from its
-# INCAR/POSCAR/CHGCAR, then the ALGO=None ZFS in every ms_*/ subfolder (its INCAR already there) from
-# ../WAVECAR. ZFS_AO / ZFS_UO (no ms_*/): one self-consistent ZFS run of the INCAR.
+# INCAR/POSCAR/CHGCAR, then the ALGO=None ZFS in every ms_*/ subfolder from ../WAVECAR, its INCAR
+# rewritten from ZFS_full/INCAR before it runs (edit the SCF INCAR; the sublevels follow). ZFS_AO / ZFS_UO (no ms_*/): one self-consistent ZFS run of the INCAR.
 
 ORDER=${1:-}
 case $ORDER in
@@ -60,7 +61,7 @@ if [ "$ORDER" = "ground_state" ]; then
   done
   # No ms_* sublevels (ZFS_AO, ZFS_UO): one plain self-consistent ZFS run of this folder's INCAR.
   if [ -n "$SUBLEVELS" ]; then DECONT=1; else DECONT=0; fi
-  SUBLEVEL_INCARS=""  # each ms_*/INCAR is already in place
+  # each ms_*/INCAR marks a sublevel; the runner rewrites it from the SCF INCAR before running it
 else
   [ -d "$INPUT_DIR" ] || fail "input dir '$INPUT_DIR' missing (run this from the tree basis folder: AO, UO, ...)"
   case ${DEFECT:-} in ''|*'<defect>'*) fail "DEFECT unset or still placeholder: '${DEFECT:-}'" ;; esac
@@ -85,9 +86,10 @@ else
   else
     case ${PERT:-} in ''|*'<pert_scale>'*) fail "PERT unset or still placeholder: '${PERT:-}'" ;; esac
   fi
-  # Full spin decontamination: input/sublevels/<name>/INCAR, one per spin sublevel.
+  # Full spin decontamination: input/sublevels/<name>/, one per spin sublevel; each run writes the
+  # sublevel's INCAR from its own SCF INCAR (python -m spinlabs.vasp.sublevels), so input/INCAR is the
+  # one to edit.
   DECONT=0
-  SUBLEVEL_INCARS="$HEAD_DIR/$INPUT_DIR/sublevels"
   if [ -d "$INPUT_DIR/sublevels" ]; then
     DECONT=1
     for d in "$INPUT_DIR"/sublevels/*/; do
@@ -415,9 +417,17 @@ decont_sublevels() {
     mkdir -p "$s"
     rm -f "$s/OUTCAR" "$s/OSZICAR" "$s/WAVECAR"
     cp POSCAR KPOINTS POTCAR "$s"/
-    if [ -n "$SUBLEVEL_INCARS" ]; then
-      cp "$SUBLEVEL_INCARS/$s/INCAR" "$s"/
+    # The sublevel's INCAR from this run's SCF INCAR, written now: a setting changed in the SCF INCAR
+    # (e.g. the HSE06 tags) reaches every sublevel; only the sublevel's own settings are set over it.
+    if ! INCAR_MSG=$(python -m spinlabs.vasp.sublevels INCAR "$s" 2>&1 > "$s/INCAR.new"); then
+      rm -f "$s/INCAR.new"
+      echo "$ID: $1: no INCAR for sublevel $s ($INCAR_MSG) -- not run"
+      printf '%s\n' "sublevel $s: $INCAR_MSG" >> CHECK
+      VASP_FAILED=$((VASP_FAILED + 1))  # a failure of this run, as a VASP one: the job reports it
+      left=$((left + 1))
+      continue
     fi
+    mv "$s/INCAR.new" "$s/INCAR"
     ln -s ../WAVECAR "$s/WAVECAR"
     cd "$s"
     echo "$ID: $1: ZFS of sublevel $s (ALGO=None from ../WAVECAR)"

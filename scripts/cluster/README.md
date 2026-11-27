@@ -104,7 +104,7 @@ from that snapshot.
 - `create_perturbation_tree.py --full-decont`: trees for the full spin decontamination
   (Biktagirov) instead, one basis `full_decont/` from `ZFS_AO` (and `convergence_test_decont/`).
   Its `input/INCAR` is the SCF of the ms=S state with `LWAVE = .TRUE.` and `LDMATRIX = .FALSE.`;
-  `input/sublevels/<name>/INCAR` is one ALGO=None ZFS run per spin sublevel: `ms_<S>` (the
+  `input/sublevels/<name>/` is one ALGO=None ZFS run per spin sublevel: `ms_<S>` (the
   ZFS_AO occupations) and, for each of the 2S unpaired bands k (occupied up, empty down),
   `ms_<S-1>_<k>`: k's electron moved to the down channel, NUPDOWN = 2S-2 (NV: `ms_1`,
   `ms_0_127`, `ms_0_128`). The runner sees `input/sublevels/` and does, per run directory:
@@ -114,13 +114,17 @@ from that snapshot.
   `.wavecar_aligned`; each channel picks its own basis or order of the pair, and a spin flip must
   land in the orbital it left;
   a run whose channels cannot be matched gets a CHECK file and no sublevel runs),
-  3. a subfolder per sublevel with its INCAR, the run's POSCAR/KPOINTS/POTCAR and
-  `WAVECAR -> ../WAVECAR`, 4. VASP there (ALGO=None, ISTART=1, LWAVE off); a sublevel gets
+  3. a subfolder per sublevel with the run's POSCAR/KPOINTS/POTCAR, `WAVECAR -> ../WAVECAR` and
+  its INCAR, written just before from the run's SCF INCAR (`python -m spinlabs.vasp.sublevels`):
+  a setting changed in `input/INCAR` reaches every sublevel, with the sublevel's own settings
+  (ALGO=None, ISTART=1, its NUPDOWN and occupations, LDMATRIX, LWAVE off) set over it; a sublevel
+  the SCF occupations no longer give is not run (CHECK), 4. VASP there; a sublevel gets
   `.done` with its ZFS block, the run directory once all have it. WAVECAR is kept; CHGCAR/CHG
   go. A restart reuses a finished SCF and runs only the sublevels left. The unperturbed ground
   state goes through the same steps once per defect in `<defect>/ZFS_full/` (next to `ZFS_AO/`),
   filled at creation: the SCF input (INCAR, POSCAR, KPOINTS, POTCAR, CHGCAR from ZFS_AO), one
-  `ms_*/INCAR` per sublevel and `run_ground_state.sh`. Submit it on its own from there with
+  `ms_*/` folder per sublevel (its INCAR rewritten from `ZFS_full/INCAR` before it runs: edit the
+  SCF INCAR, the sublevels follow) and `run_ground_state.sh`. Submit it on its own from there with
   `sh run_ground_state.sh` (one job, the runner's `ground_state` mode); the trees' jobs do not
   run it. A rerun skips a finished SCF and sublevels. Unlike the runs, it keeps its CHGCAR.
   `spinlabs package` (method `decont`, picked by default when the trees exist) writes one npz

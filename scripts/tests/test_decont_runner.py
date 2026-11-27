@@ -164,6 +164,47 @@ def test_the_ground_state_folder_is_ready_to_submit_on_its_own(tmp_path):
     assert not (tmp_path / "srun.log").exists()
 
 
+def test_a_setting_changed_in_the_scf_incar_reaches_every_sublevel(tmp_path):
+    """The sublevel INCARs are written at run time from the SCF INCAR: an edit of input/INCAR (here the
+    HSE06 tags and ENCUT) is in every sublevel's INCAR, over which the sublevel's own settings go."""
+    from spinlabs.vasp.hse import hse_incar
+
+    folder = _tree(tmp_path)
+    scf = folder / "input" / "INCAR"
+    scf.write_text(hse_incar(scf.read_text()).replace("ENCUT = 520", "ENCUT = 600"))
+    r = _run(tmp_path, folder)
+    assert r.returncode == 0, r.stdout + r.stderr
+    for d in [folder / "runs" / run for run in RUNS]:
+        for level in SUBLEVELS:
+            incar = (d / level / "INCAR").read_text()
+            assert "ENCUT = 600" in incar and "LHFCALC = .TRUE." in incar and "NCORE = 1" in incar, level
+            assert "ALGO = None" in incar and "ISTART = 1" in incar, level  # still the sublevel's own run
+
+
+def test_the_ground_state_sublevels_follow_its_scf_incar(tmp_path):
+    folder = _tree(tmp_path)
+    ground = folder.parent / "ZFS_full"
+    (ground / "INCAR").write_text((ground / "INCAR").read_text().replace("ENCUT = 520", "ENCUT = 650"))
+    r = _run_ground_state(tmp_path, folder.parent)
+    assert r.returncode == 0, r.stdout + r.stderr
+    for level in SUBLEVELS:
+        incar = (ground / level / "INCAR").read_text()
+        assert "ENCUT = 650" in incar and "ALGO = None" in incar, level
+
+
+def test_a_sublevel_the_scf_occupations_no_longer_give_is_not_run(tmp_path):
+    """Occupations edited in the SCF INCAR so that a sublevel folder has no determinant: it is not run, the
+    run directory gets a CHECK and no .done; the other sublevels run."""
+    folder = _tree(tmp_path)
+    (folder / "input" / "sublevels" / "ms_0_5").mkdir()
+    (folder / "input" / "sublevels" / "ms_0_5" / "INCAR").write_text("ALGO = None\n")
+    r = _run(tmp_path, folder)
+    assert r.returncode == 1
+    d = folder / "runs" / RUNS[0]
+    assert "no INCAR for sublevel ms_0_5" in r.stdout and "not ms_0_5" in (d / "CHECK").read_text()
+    assert not (d / ".done").exists() and all((d / level / ".done").is_file() for level in SUBLEVELS)
+
+
 def test_a_restart_reruns_only_the_sublevels_left(tmp_path):
     folder = _tree(tmp_path)
     ground = folder.parent / "ZFS_full"
