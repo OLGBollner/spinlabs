@@ -226,10 +226,12 @@ DOCCDO = {doccdo}
     return "\n".join(body_lines).rstrip() + "\n" + additions
 
 
-def prepare_relax_to_zfs(relax: Path, zfs: Path, unpaired_only: bool = False, ranks: int | None = None) -> list[str]:
+def prepare_relax_to_zfs(relax: Path, zfs: Path, unpaired_only: bool = False, ranks: int | None = None,
+                         hse: bool = False) -> list[str]:
     """Prepare one ZFS run directory from a finished relaxation directory.
 
     ``unpaired_only``: the UO scheme's occupations, only the unpaired orbitals (see patch_incar).
+    ``hse``: the HSE06 tags (spinlabs.vasp.hse) in the INCAR, set before NBANDS is fitted (NCORE = 1).
     ``ranks``: the MPI ranks the ZFS job runs on. NBANDS (the relaxation's, from its EIGENVAL) is then
     raised to the next multiple of VASP's band groups for that job (nbands_for_ranks, from the INCAR's
     NCORE/KPAR/NPAR), and the occupations list the extra bands as empty; otherwise VASP would change
@@ -308,7 +310,12 @@ def prepare_relax_to_zfs(relax: Path, zfs: Path, unpaired_only: bool = False, ra
     if nupdown and int(float(nupdown)) != n_up - n_dn:
         fail(f"NUPDOWN = {nupdown} inconsistent with occupied difference {n_up} - {n_dn} = {n_up - n_dn}")
 
-    incar = patch_incar(incar_text, n_up, n_dn, nbands, unp_up, unp_dn, unpaired_only=unpaired_only)
+    from spinlabs.vasp.hse import hse_incar
+
+    def finished(text: str) -> str:  # the HSE tags first: NCORE = 1 sets the band groups NBANDS is fitted to
+        return hse_incar(text) if hse else text
+
+    incar = finished(patch_incar(incar_text, n_up, n_dn, nbands, unp_up, unp_dn, unpaired_only=unpaired_only))
     if ranks:
         # the band groups of the ZFS INCAR itself (patch_incar drops KPAR, for one)
         try:
@@ -322,11 +329,13 @@ def prepare_relax_to_zfs(relax: Path, zfs: Path, unpaired_only: bool = False, ra
                 f"of the {ranks}-rank job (NCORE {parse_tag(incar, 'NCORE') or 1}, KPAR "
                 f"{parse_tag(incar, 'KPAR') or 1}); the {run_nbands - nbands} extra bands are empty"
             )
-            incar = patch_incar(incar_text, n_up, n_dn, run_nbands, unp_up, unp_dn, unpaired_only=unpaired_only)
+            incar = finished(patch_incar(incar_text, n_up, n_dn, run_nbands, unp_up, unp_dn,
+                                         unpaired_only=unpaired_only))
     (zfs / "INCAR").write_text(incar)
     LOGGER.info(
         f"wrote INCAR with NUPDOWN={n_up - n_dn}, DOCCUP={parse_tag(incar, 'DOCCUP')}, "
         f"DOCCDO={parse_tag(incar, 'DOCCDO')}" + (" (unpaired orbitals only)" if unpaired_only else "")
+        + (", HSE06 (LHFCALC, NCORE = 1)" if hse else "")
     )
 
     if failures:

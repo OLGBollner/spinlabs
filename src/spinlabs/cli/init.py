@@ -40,6 +40,12 @@ def build_init_parser(subparsers) -> None:
     zfs.add_argument("--vasp-binary", type=resolve_path, default=None, help="VASP binary for run_ground_state.sh")
     zfs.add_argument("--max-hours", type=float, default=None, help="cap on the job's time limit in hours")
     zfs.add_argument("--force", action="store_true", help="refill a folder that was already filled")
+    zfs.add_argument(
+        "--hse", action="store_true",
+        help="HSE06: the hybrid-functional tags in the INCAR (LHFCALC, HFSCREEN = 0.2, AEXX, AGGAX, AGGAC, LASPH, "
+        "ALGO = All, PREC = Accurate, PRECFOCK = Fast, NCORE = 1); the perturbation trees built from the folder "
+        "copy them and keep each run's WAVECAR. Run with a Gamma-only binary, e.g. --vasp-binary .../vasp_gam",
+    )
     add_verbosity_args(zfs)
     zfs.set_defaults(func=_run_zfs)
 
@@ -95,7 +101,7 @@ def _run_zfs(args: argparse.Namespace) -> None:
     if not args.relax.is_dir():
         raise SystemExit(f"error: not a folder: {args.relax}")
     failures = init_zfs(args.relax, args.method, vasp_binary=args.vasp_binary, max_hours=args.max_hours,
-                        force=args.force)
+                        force=args.force, hse=args.hse)
     if failures:
         raise SystemExit("error: " + "; ".join(failures))
 

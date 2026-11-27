@@ -107,7 +107,7 @@ def _filled(zfs: Path) -> bool:
 
 def init_zfs(
     relax: str | Path, method: str = "AO", *, vasp_binary: str | Path | None = None,
-    max_hours: float | None = None, force: bool = False,
+    max_hours: float | None = None, force: bool = False, hse: bool = False,
 ) -> list[str]:
     """Fill the ground-state folder of ``method`` (AO, UO, full_decont; any spelling) next to the
     finished relaxation ``relax``. Returns the failure messages (empty on success).
@@ -115,7 +115,8 @@ def init_zfs(
     AO: ZFS_AO with the EIGENVAL occupations. UO: ZFS_UO with only the unpaired orbitals occupied.
     Both run as one self-consistent ZFS calculation (run_ground_state.sh, the runner's plain
     ground_state mode). full_decont: ZFS_full, the SCF that writes the WAVECAR and one ALGO=None
-    ms_*/INCAR per spin sublevel. A folder already filled is kept unless ``force``.
+    ms_*/INCAR per spin sublevel. A folder already filled is kept unless ``force``. With ``hse`` the INCAR
+    gets the HSE06 tags (spinlabs.vasp.hse); the perturbation trees built from the folder copy them.
     """
     from spinlabs.vasp.occupations import prepare_relax_to_zfs
     from spinlabs.vasp.trees import (
@@ -137,7 +138,7 @@ def init_zfs(
     # NBANDS is fitted to the job run_ground_state.sh submits (its template's node and task counts), so
     # VASP keeps it and the occupations fit; the trees' jobs use the same counts.
     ranks = script_ranks((TEMPLATES / GROUND_STATE_SCRIPT).read_text())
-    failures = prepare_relax_to_zfs(relax, dst, unpaired_only=METHODS[key].spin_corrected, ranks=ranks)
+    failures = prepare_relax_to_zfs(relax, dst, unpaired_only=METHODS[key].spin_corrected, ranks=ranks, hse=hse)
     if failures:
         return failures
     seconds = read_outcar_time(relax)  # an upper bound: the relaxation ran several ionic steps

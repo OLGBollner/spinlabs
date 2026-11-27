@@ -189,3 +189,70 @@ def test_zfs_replaces_a_finer_relaxation_grid_by_gamma(tmp_path, caplog):
     kpoints = (out / "ZFS_AO" / "KPOINTS").read_text().split("\n")
     assert kpoints[1:4] == ["0", "Gamma", "1 1 1"]
     assert "Gamma 3 3 3, not Gamma 1 1 1" in caplog.text
+
+
+# -- HSE06 (spinlabs init zfs --hse) ---------------------------------------------------------------------
+
+
+def test_hse_incar_sets_the_hybrid_tags_in_place_and_appends_the_rest():
+    from spinlabs.vasp.hse import HSE_HEADER, HSE_TAGS, hse_incar, is_hse
+
+    text = hse_incar("ENCUT = 520\nALGO = Normal  # PBE\nNCORE = 32\n")
+    assert _tag(text, "ALGO") == "All" and "ALGO = All  # PBE" in text  # in place, its comment kept
+    assert _tag(text, "NCORE") == "1" and text.count("NCORE") == 1
+    for tag, value in HSE_TAGS.items():
+        assert _tag(text, tag) == value, tag
+    assert HSE_HEADER in text and _tag(text, "ENCUT") == "520"
+    assert hse_incar(text) == text  # a second pass changes nothing
+    assert is_hse(text) and not is_hse("ENCUT = 520\n") and not is_hse("LHFCALC = .TRUE.\nLHFCALC = .FALSE.\n")
+
+
+def test_zfs_hse_fits_nbands_to_ncore_1(tmp_path):
+    """NCORE = 1 makes every MPI rank a band group: NBANDS goes up to a multiple of the job's 256 ranks, and the
+    occupations follow, so VASP keeps NBANDS and reads DOCCUP/DOCCDO."""
+    from spinlabs.vasp.occupations import nbands_problems
+
+    out = init_tree("NV_8", _inputs(tmp_path), parent=tmp_path)
+    relax = _relaxed(out)
+    assert init_zfs(relax, "all", hse=True) == []
+    incar = (out / "ZFS_AO" / "INCAR").read_text()
+    assert (_tag(incar, "LHFCALC"), _tag(incar, "HFSCREEN"), _tag(incar, "NCORE")) == (".TRUE.", "0.2", "1")
+    assert (_tag(incar, "ALGO"), _tag(incar, "PREC"), _tag(incar, "PRECFOCK")) == ("All", "Accurate", "Fast")
+    assert _tag(incar, "LDMATRIX") == ".TRUE." and _tag(incar, "NSW") == "0"  # still the ZFS run
+    assert _tag(incar, "NBANDS") == "256" and _tag(incar, "DOCCUP") == "5*1.0 251*0.0"
+    assert nbands_problems(incar, 256) == []
+    assert init_zfs(relax, "unpaired") == []  # without --hse: PBE, as before
+    assert _tag((out / "ZFS_UO" / "INCAR").read_text(), "LHFCALC") is None
+
+
+def test_cli_zfs_hse(tmp_path):
+    out = init_tree("NV_8", _inputs(tmp_path), parent=tmp_path)
+    main(["init", "zfs", str(_relaxed(out)), "--method", "all", "--hse"])
+    assert _tag((out / "ZFS_AO" / "INCAR").read_text(), "LHFCALC") == ".TRUE."
+
+
+def test_trees_of_an_hse_ground_state_keep_their_wavecar(tmp_path):
+    """The trees copy the ground state's INCAR: an HSE06 one gets KEEP_WAVECAR=1 in its job scripts, a PBE one
+    keeps the default (removed)."""
+    from test_perturbation_tree import _save, _tiny  # the tree tests' tiny spectrum
+    from spinlabs.vasp import build_perturbation_tree
+    from spinlabs.vasp.hse import hse_incar
+
+    defect = tmp_path / "NV_8"
+    (defect / "data").mkdir(parents=True)
+    _save(_tiny([10.0, 20.0, 30.0], ["A1", "Ex", "A2"]), defect / "data" / "phonon_data.npz")
+    for stage, incar in (("ZFS_AO", hse_incar("ENCUT = 520\n")), ("ZFS_UO", "ENCUT = 520\n")):
+        d = defect / stage
+        d.mkdir()
+        (d / "INCAR").write_text(incar)
+        for name in ("POSCAR", "KPOINTS", "POTCAR"):
+            (d / name).write_text(name + "\n")
+        (d / "OUTCAR").write_text("Elapsed time (sec):   100.000\n")
+    assert build_perturbation_tree(out=defect, pert=[0.05], displacement="normalized", conv_modes=None,
+                                   phonon=defect / "data" / "phonon_data.npz", array_jobs=1, force=True,
+                                   vasp_binary=Path("/bin/true")) == []
+    for basis, keep in (("AO", "${KEEP_WAVECAR:-1}"), ("UO", "${KEEP_WAVECAR:-0}")):
+        tree = defect / "first_order" / "pert_0.05" / basis
+        assert _tag((tree / "run_perturbation_first_order.sh").read_text(), "KEEP_WAVECAR") == keep, basis
+    hse = (defect / "first_order" / "pert_0.05" / "AO" / "input" / "INCAR").read_text()
+    assert _tag(hse, "LHFCALC") == ".TRUE." and _tag(hse, "ICHARG") == "1"  # from the CHGCAR, as PBE runs

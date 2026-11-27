@@ -296,11 +296,14 @@ def test_verify_setup_flags_missing_phonon_path(tmp_path):
     assert any(p.startswith("FAIL") and "PHONON_PATH" in p for p in problems)
 
 
-def test_verify_setup_warns_on_gamma_binary(tmp_path):
+@pytest.mark.parametrize("ncore, warned", [("NCORE = 4\n", True), ("NCORE = 1\n", False), ("", False)])
+def test_verify_setup_warns_on_gamma_binary_with_ncore_above_1(tmp_path, ncore, warned):
+    """Gamma-only builds broke the D tensor with NCORE > 1 (issue 33); NCORE = 1 (HSE runs) or unset is fine."""
     problems = _verify_folder(
-        tmp_path, script="BINARY=/opt/vasp/vasp.5.4.4_gam\nPHONON_PATH=" + str(tmp_path / "phon.npz") + "\nPERT=0.025\n"
+        tmp_path, script="BINARY=/opt/vasp/vasp.5.4.4_gam\nPHONON_PATH=" + str(tmp_path / "phon.npz") + "\nPERT=0.025\n",
+        incar="LDMATRIX = .TRUE.\nALGO = Normal\nIBRION = -1\nISYM = 0\n" + ncore,
     )
-    assert any(p.startswith("WARNING") and "gamma-only" in p for p in problems)
+    assert any(p.startswith("WARNING") and "gamma-only" in p for p in problems) == warned
 
 
 def test_verify_setup_lowercase_vars_and_preflight_lines(tmp_path):

@@ -11,6 +11,7 @@ from pathlib import Path
 
 from spinlabs.models import reduced_spectrum_reason
 from spinlabs.parsers import parse_phonon_data, save_phonon_npz
+from spinlabs.vasp.hse import is_hse
 from spinlabs.vasp.modes import mode_numbers
 from spinlabs.symmetry import (
     SymmetryDetectionError,
@@ -578,8 +579,10 @@ def prepare_basis(
     # the restart flags and ISYM = 0 (symmetry off): same setup, only the
     # structure differs, and the CHGCAR lets a failed run pick up where it left off
     incar_path = inp / "INCAR"
+    hse = False
     if incar_path.is_file():
         incar = guarded_incar(incar_path.read_text(), dst)
+        hse = is_hse(incar)  # an HSE06 ZFS INCAR (spinlabs init zfs --hse): its runs keep their WAVECAR
         if decont:
             try:
                 levels = write_decont_inputs(inp, incar)
@@ -627,6 +630,9 @@ def prepare_basis(
     if pair_mode:
         text = replace_tag(text, "PAIR_MODE", pair_mode)
     text = replace_tag(text, "DISPLACEMENT", displacement)
+    if hse:
+        text = replace_tag(text, "KEEP_WAVECAR", "${KEEP_WAVECAR:-1}")
+        LOGGER.info(f"{dst.name}: HSE06 INCAR -- the runs keep their WAVECAR (KEEP_WAVECAR=1)")
     # The loop and the structure scripts run from a snapshot of this repo taken at
     # submission (see the script header), so the script only names the checkout.
     text = replace_tag(text, "SPINLABS_REPO", str(repo_root()))

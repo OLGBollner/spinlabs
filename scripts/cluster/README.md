@@ -27,6 +27,19 @@ ZFS_UO are one self-consistent ZFS run (ALGO from the relaxation, NSW = 0, IBRIO
 LDMATRIX), ZFS_full the SCF, WAVECAR alignment and sublevel runs. The methods are AO (all orbitals),
 UO (unpaired orbitals, spin-corrected) and full_decont; `--method` takes all/AO, unpaired/UO, decont.
 
+### HSE06
+
+`spinlabs init zfs ... --hse` writes the hybrid-functional tags into the ground-state INCAR (any
+`--method`): LHFCALC = .TRUE., HFSCREEN = 0.2, AEXX = 0.25, AGGAX = 0.75, AGGAC = 1.00, LASPH = .TRUE.,
+ALGO = All, PREC = Accurate, PRECFOCK = Fast and NCORE = 1 (a tag the INCAR has is changed in place).
+NBANDS is fitted after them: with NCORE = 1 every MPI rank is a band group, so NBANDS goes up to a
+multiple of the job's ranks and the occupations list the extra bands as empty. Everything else is as
+for PBE: the trees built from the folder copy its INCAR, and the runs start from the ground state's
+CHGCAR. Their job scripts get `KEEP_WAVECAR=${KEEP_WAVECAR:-1}`: each finished run keeps its WAVECAR.
+Run with a Gamma-only build, e.g. `--vasp-binary .../vasp_gam`; it gives correct D tensors with
+NCORE = 1 (the setup check warns about a gamma-only build only for NCORE > 1, issue 33). Keep HSE and
+PBE in separate defect folders, since both use ZFS_AO/ and ZFS_UO/.
+
 ## Perturbation runs
 
 ZFS perturbation runs on SLURM. Each tree folder (e.g. `first_order/pert_0.025/AO/`,

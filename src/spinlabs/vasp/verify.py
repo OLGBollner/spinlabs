@@ -173,14 +173,14 @@ def verify_setup(folder: Path, script_name: str) -> list[str]:
                 "fail to find inverse rotations; trees are built with ISYM=0"
             )
         gam = "gam" in (_tag_value(_read(script), "BINARY") or "").lower()
-        if gam:
+        ncore = _tag_value(itext, "NCORE")
+        # Gamma-only 5.4.4 builds gave broken D tensors with NCORE > 1 (issue 33); NCORE = 1 (VASP's default,
+        # and what HSE runs use: spinlabs init zfs --hse) is the safe setting
+        if gam and ncore is not None and ncore.isdigit() and int(ncore) > 1:
             problems.append(
-                "WARNING: the SLURM script uses a gamma-only "
-                "VASP build; 5.4.4 gamma-only builds produced "
-                "broken D tensors with NCORE>1 (issue #33)"
+                f"WARNING: gamma-only VASP build with NCORE={ncore}; 5.4.4 gamma-only builds produced broken "
+                "D tensors with NCORE>1 (issue 33) -- use NCORE = 1 with vasp_gam"
             )
-        if (ncore := _tag_value(itext, "NCORE")) is not None and gam:
-            problems.append(f"WARNING: gamma-only build with NCORE={ncore} -- untested combination for ZFS")
     return problems
 
 
