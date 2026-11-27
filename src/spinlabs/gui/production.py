@@ -100,6 +100,9 @@ class ProductionPackage:
     # Registry id (a full-decontamination set: its newest file). Within a setup the highest id is the latest
     # data, as registry.find_packaged(latest=True) picks it.
     registered: int = 0
+    # The AO dataset of a full-decontamination set: its high-spin sublevel file (e.g. ms_1), the m_s = S
+    # determinant with the AO occupations, here on its own as an AO package (central differences, the set's step)
+    sublevel: str | None = None
 
     @property
     def key(self) -> str:
@@ -114,7 +117,8 @@ class ProductionPackage:
     @property
     def setup_key(self) -> str:
         defect, cell, method, step = self.setup
-        return f"{defect}|{cell}|{method}|{step:g}"
+        source = "|FD" if self.sublevel else ""  # an FD set's AO data: its own setup, apart from AO packages
+        return f"{defect}|{cell}|{method}|{step:g}{source}"
 
     @property
     def setup_label(self) -> str:
@@ -127,7 +131,8 @@ class ProductionPackage:
     def label(self) -> str:
         cell = f" ({self.cell})" if self.cell else ""
         step = f" {self.step:g}" if self.step is not None else ""
-        return f"{self.defect}{cell} {self.method or '?'}{step}"
+        source = f" (FD {self.sublevel})" if self.sublevel else ""
+        return f"{self.defect}{cell} {self.method or '?'}{step}{source}"
 
     @property
     def long_label(self) -> str:
@@ -158,14 +163,18 @@ def production_packages(conn=None, *, complete_only: bool = True) -> list[Produc
     """
     conn = conn or registry.ensure_db()
     rows = conn.execute(
-        "SELECT id, kind, path, defect, cell_size, calc_method, pert_scale, pert_order FROM files "
+        "SELECT id, kind, path, defect, cell_size, calc_method, pert_scale, pert_order, spin_sublevel FROM files "
         "WHERE kind IN ('packaged_zfs', 'packaged_zfs_sublevel')"
     ).fetchall()
     out: dict[str, ProductionPackage] = {}
-    for row_id, kind, path, defect, cell, method, step, pert_order in rows:
+    sublevel_files: dict[str, list[tuple]] = {}  # set folder -> (file, sublevel, row id, complete) of its files
+    for row_id, kind, path, defect, cell, method, step, pert_order, sublevel in rows:
         complete = _has_second_order(pert_order)
         path = Path(path)
         if kind == "packaged_zfs_sublevel":
+            if path.exists():
+                sublevel_files.setdefault(str(path.parent), []).append(
+                    (path, sublevel or _sublevel_name(path), int(row_id), complete))
             path = path.parent  # the set is the folder of its sublevel files
             method = method or "full_decont"
         if not path.exists():
@@ -180,11 +189,50 @@ def production_packages(conn=None, *, complete_only: bool = True) -> list[Produc
             date=_date_of(path), complete=complete and (previous is None or previous.complete),
             registered=max(int(row_id), previous.registered if previous else 0),
         )
+    # Each full-decontamination set's AO data: its high-spin sublevel file on its own
+    for folder, files in sublevel_files.items():
+        fd = out.get(folder)
+        high = _high_spin_file([(f, name) for f, name, _row, _complete in files])
+        if fd is None or high is None:
+            continue
+        path, name = high
+        row_id, complete = next((r, c) for f, _n, r, c in files if f == path)
+        out[str(path)] = ProductionPackage(path=path, defect=fd.defect, cell=fd.cell, method="AO", step=fd.step,
+                                           date=fd.date, complete=complete, registered=row_id, sublevel=name)
     # Filtered after a decontamination set's sublevel files are merged: one first-order-only file makes the set
     # incomplete
     packages = [p for p in out.values() if p.complete or not complete_only]
     packages.sort(key=lambda p: -p.registered)  # newest first within each setup
     return sorted(packages, key=lambda p: (p.defect, p.cell or 0, p.setup[2], p.step if p.step is not None else -1))
+
+
+def _sublevel_name(path: Path) -> str | None:
+    """The spin_sublevel a package file records (for registry rows from before the registry stored it)."""
+    try:
+        with np.load(str(path), allow_pickle=True) as data:
+            return str(data["spin_sublevel"]) if "spin_sublevel" in data.files else None
+    except Exception:  # noqa: BLE001 -- an unreadable file has no sublevel to offer
+        return None
+
+
+def _high_spin_file(files: list[tuple[Path, str | None]]) -> tuple[Path, str] | None:
+    """(file, sublevel name) of a full-decontamination set's m_s = S sublevel (spinlabs.decont.high_spin), from
+    (file, sublevel name) pairs."""
+    from spinlabs.decont import high_spin, sublevel_info
+
+    names = {}
+    for path, name in files:
+        if name is None:
+            continue
+        try:
+            sublevel_info(name)
+        except ValueError:
+            continue
+        names[name] = path
+    if not names:
+        return None
+    name = high_spin(names)
+    return names[name], name
 
 
 def production_setups(packages: list[ProductionPackage]) -> dict[str, list[ProductionPackage]]:
@@ -225,6 +273,18 @@ def package_for_path(path: Path) -> ProductionPackage:
     for package in production_packages(complete_only=False):
         if package.path == path:
             return package
+    if not path.is_dir() and raw.spin_sublevel:  # one sublevel file of a full-decontamination set
+        from spinlabs.decont import sublevel_info
+
+        ms, flipped = sublevel_info(raw.spin_sublevel)
+        if flipped is not None or (raw.spin is not None and abs(ms - float(raw.spin)) > 1e-9):
+            raise ValueError(f"{path.name} is the spin-flip sublevel {raw.spin_sublevel} of a full-decontamination "
+                             "set: not a dataset on its own. Open the set's folder (FD), or its m_s = S file (AO).")
+        return ProductionPackage(
+            path=path, defect=str(raw.defect or path.stem), cell=int(raw.cell_size) if raw.cell_size else None,
+            method="AO", step=float(raw.pert_scale) if raw.pert_scale is not None else None, date=_date_of(path),
+            sublevel=raw.spin_sublevel,
+        )
     method = "full_decont" if path.is_dir() else raw.calc_method
     return ProductionPackage(
         path=path, defect=str(raw.defect or path.stem), cell=int(raw.cell_size) if raw.cell_size else None,
@@ -637,6 +697,8 @@ class ProductionSession:
             manager, phonon = pipeline.coupling_manager(
                 raw_zfs_file=self.package.path, phonon_file=self.phonon_file, pairs=settings.pairs,
                 mirror_projection=settings.mirror_projection,
+                # an FD set's m_s = S file is AO data (the label; no spin correction either way)
+                calc_method="AO" if self.package.sublevel else None,
             )
             folder.mkdir(parents=True, exist_ok=True)
             manager.process_both_orders(output_filename=str(folder / "coupling"))
@@ -783,7 +845,12 @@ def compute_remote(package: ProductionPackage, cache_dir: Path, phonon_file: Pat
 def _init_worker() -> None:
     import matplotlib
 
+    from spinlabs.logging_utils import configure_logging
+
     matplotlib.use("Agg")  # the worker never draws on screen
+    # A spawned worker starts unconfigured: without this its warnings reach the terminal bare (Python's
+    # last-resort handler), with no warning: prefix or where they were logged. Warnings and errors only.
+    configure_logging(quiet=True)
 
 
 def _process_pool() -> ProcessPoolExecutor:

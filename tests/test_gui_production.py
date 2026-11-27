@@ -171,14 +171,19 @@ def test_production_packages_list_files_and_decont_sets(tmp_path, monkeypatch):
                            pert_scale=0.05, pert_order=[1])
     for level in ("ms_1", "ms_0_127"):
         f = folder / f"{level}.npz"
-        f.write_bytes(b"y")
+        np.savez(f, spin_sublevel=level)
         registry.register_file(conn, f, "packaged_zfs_sublevel", defect="NV", cell_size=64,
                                calc_method="full_decont", pert_scale=0.2, spin_sublevel=level, pert_order=[1, 2])
     packages = {p.path: p for p in production_packages(conn)}
-    assert set(packages) == {single, folder}  # the first-order-only package is left out
+    high = folder / "ms_1.npz"  # the set's AO data: its m_s = S sublevel on its own
+    assert set(packages) == {single, folder, high}  # the first-order-only package is left out
     assert packages[single].date == "20261101" and packages[folder].method == "full_decont"
+    ao = packages[high]
+    assert (ao.method, ao.sublevel, ao.step, ao.date) == ("AO", "ms_1", 0.2, "20261119")
+    assert ao.label == "NV (64) AO 0.2 (FD ms_1)" and ao.setup_key == "NV|64|AO|0.2|FD"  # apart from AO packages
+    assert ao.setup_key != packages[single].setup_key
     every = {p.path: p for p in production_packages(conn, complete_only=False)}
-    assert set(every) == {single, folder, first_only} and not every[first_only].complete
+    assert set(every) == {single, folder, high, first_only} and not every[first_only].complete
 
 
 def test_packages_are_grouped_by_setup_latest_first(tmp_path, monkeypatch):
@@ -431,6 +436,7 @@ def test_a_decont_set_with_a_first_order_only_file_is_incomplete(tmp_path, monke
         f.write_bytes(level.encode())
         registry.register_file(conn, f, "packaged_zfs_sublevel", defect="NV", cell_size=64,
                                calc_method="full_decont", pert_scale=0.2, spin_sublevel=level, pert_order=orders)
-    assert production_packages(conn) == []
-    (package,) = production_packages(conn, complete_only=False)
-    assert package.path == folder and not package.complete
+    # the set is incomplete; its AO data (the m_s = S file, both orders) is not
+    assert [(p.path, p.sublevel) for p in production_packages(conn)] == [(folder / "ms_1.npz", "ms_1")]
+    every = {p.path: p for p in production_packages(conn, complete_only=False)}
+    assert set(every) == {folder, folder / "ms_1.npz"} and not every[folder].complete

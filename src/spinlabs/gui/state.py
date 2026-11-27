@@ -49,6 +49,8 @@ class GuiState:
     comparisons: list[dict] = field(default_factory=list)
     # experimental-data folder chosen in a comparison (<folder>/<defect>/*.csv); None: found next to the packages
     experiment_dir: str | None = None
+    # Save figure in the paper figures' style (spinlabs.figure_style); False: the CLI's
+    paper_figures: bool = True
 
 
 def load_state(path: Path | None = None) -> GuiState:
@@ -79,6 +81,7 @@ def load_state(path: Path | None = None) -> GuiState:
         last_directory=raw.get("last_directory"),
         comparisons=[c for c in raw.get("comparisons") or [] if isinstance(c, dict) and c.get("key")],
         experiment_dir=raw.get("experiment_dir") if isinstance(raw.get("experiment_dir"), str) else None,
+        paper_figures=bool(raw.get("paper_figures", True)),
     )
 
 

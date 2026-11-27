@@ -17,6 +17,8 @@ import matplotlib
 from matplotlib.figure import Figure
 import matplotlib.pyplot as plt
 
+from spinlabs import pipeline
+from spinlabs.figure_style import paper_style, to_paper_layout
 from spinlabs.gui import production_plots as pplots
 from spinlabs.gui.plots import message_figure
 from spinlabs.gui.production import (
@@ -40,6 +42,18 @@ from spinlabs.gui.widgets import FigureHost, ReportData, ScrollableFrame, _fmt, 
 
 VIEWS = ("Couplings", "Spectral functions", "2D map", "Rates", "T1")
 _POLL_MS = 400
+_SCHEME_GROUP = "scheme:"  # iid prefix of the entry list's scheme groups (AO, UO, FD)
+_SCHEME_ORDER = ("AO", "UO", "FD")
+
+
+def entry_scheme(package: ProductionPackage) -> str:
+    """The scheme label of a package's method: AO, UO or FD (spinlabs.methods), else the method itself."""
+    from spinlabs.methods import METHODS, normalize_calc_method
+
+    method = METHODS.get(normalize_calc_method(package.method)) if package.method else None
+    return method.label if method is not None else (package.method or "other")
+
+
 _PLAIN_CHANNELS = {"d0": "Δ0 (V00)", "d1": "Δ1 (V0±)", "d2": "Δ2 (V±)"}
 QUOTE_T = (100.0, 300.0)
 
@@ -106,16 +120,19 @@ class ComparisonTab(ttk.Frame):
         self.entry_tree = ttk.Treeview(box, columns=("entry", "status"), show=("tree", "headings"), height=6,
                                        selectmode="extended")
         self.entry_tree.heading("#0", text="Show")
-        self.entry_tree.column("#0", width=48, stretch=False, anchor=tk.W)
+        self.entry_tree.column("#0", width=110, stretch=False, anchor=tk.W)
         self.entry_tree.tag_configure("hidden", foreground="#9aa0a6")
+        self.entry_tree.tag_configure("group", font=(self.app.family, 9, "bold"))
+        self.entry_groups_closed: set[str] = set()  # scheme groups of the entry list left closed
         self.entry_tree.heading("entry", text="Entry")
         self.entry_tree.heading("status", text="Status")
-        self.entry_tree.column("entry", width=170, anchor=tk.W)
+        self.entry_tree.column("entry", width=150, anchor=tk.W)
         self.entry_tree.column("status", width=80, anchor=tk.W)
         self.entry_tree.pack(fill=tk.X, padx=4, pady=4)
         tip(self.entry_tree, "The packages compared in this tab, one colour each. Add them from the Data tab (Production); "
-                             "click Show to hide an entry from the views and the report (it keeps its colour and "
-                             "place); drag an entry to reorder (legends follow the order; the first shown entry is "
+                             "grouped by scheme (AO, UO, FD). Click Show to hide an entry from the views and the "
+                             "report (it keeps its colour and place), a scheme's checkbox for all of its entries, its "
+                             "name to open or close it; drag an entry onto another to reorder (legends follow the order; the first shown entry is "
                              "the T1 ratio reference).")
         self._drag: str | None = None
         self._dragged = False
@@ -188,7 +205,11 @@ class ComparisonTab(ttk.Frame):
         state = ttk.Combobox(box, textvariable=self.state_var, state="readonly", values=T1_STATES)
         state.pack(fill=tk.X, padx=6, pady=2)
         state.bind("<<ComboboxSelected>>", lambda _e: self._on_option())
-        tip(state, "Lowest |m_s|: m_s = 0 (S = 1) or ±1/2 (S = 3/2), the optically pumped state of NV- and V2.")
+        tip(state, "The state whose T1 the T1 view shows:\n"
+                   "lowest |m_s|: m_s = 0 (S = 1) or ±1/2 (S = 3/2), the optically pumped state of NV- and V2\n"
+                   "highest |m_s|: m_s = +1 (S = 1) or ±3/2 (S = 3/2)\n"
+                   "m_s = -S: m_s = -1 (S = 1; differs from +1 only in a magnetic field); for S = 3/2 the "
+                   "±3/2 doublet, as highest |m_s|")
         self.ratio_var = tk.BooleanVar(value=self.ratio)
         ratio = ttk.Checkbutton(box, text="T1 relative to the first entry", variable=self.ratio_var,
                                 command=self._on_option)
@@ -252,11 +273,15 @@ class ComparisonTab(ttk.Frame):
         self.pairs_var = tk.StringVar(value=self.settings.pairs)
         pairs = ttk.Combobox(box, textvariable=self.pairs_var, state="readonly", values=PAIR_TREATMENTS)
         pairs.pack(fill=tk.X, padx=6, pady=2)
-        tip(pairs, "sqrt: computed pairs + geometric-mean fill (production); see spinlabs.pipeline.PAIR_MODES.")
+        tip(pairs, "Which second-order pairs (l, l') the couplings use:\n" + "\n".join(
+            f"{name}: {text}" for name, text in pipeline.PAIR_MODES.items()))  # every option, not just one
         ttk.Label(box, text="Direct (one-phonon) rate", style="Card.TLabel").pack(anchor=tk.W, padx=6)
         self.direct_var = tk.StringVar(value=self.settings.direct)
-        ttk.Combobox(box, textvariable=self.direct_var, state="readonly", values=DIRECT_MODELS).pack(
-            fill=tk.X, padx=6, pady=2)
+        direct = ttk.Combobox(box, textvariable=self.direct_var, state="readonly", values=DIRECT_MODELS)
+        direct.pack(fill=tk.X, padx=6, pady=2)
+        tip(direct, "The one-phonon (direct) rate at the spin gap, far below the supercell's phonons:\n"
+                    "debye: J(E) = C E^3, C fitted to the folded acoustic modes (production)\n"
+                    "gaussian: the Gaussian-smeared one-phonon spectral function at the gap (depends on σ)")
         self.mirror_var = tk.BooleanVar(value=self.settings.mirror_projection)
         mirror = ttk.Checkbutton(box, text="Mirror projection", variable=self.mirror_var)
         mirror.pack(anchor=tk.W, padx=6, pady=1)
@@ -322,7 +347,9 @@ class ComparisonTab(ttk.Frame):
 
     def toggle_selected(self) -> None:
         """Hide the selected entries, or show them if all of them are hidden."""
-        selected = [e for e in self.entries if e.package.key in set(self.entry_tree.selection())]
+        chosen = set(self.entry_tree.selection())
+        groups = {iid[len(_SCHEME_GROUP):] for iid in chosen if iid.startswith(_SCHEME_GROUP)}
+        selected = [e for e in self.entries if e.package.key in chosen or entry_scheme(e.package) in groups]
         if selected:
             self.set_hidden([e.package.key for e in selected], not all(e.hidden for e in selected))
 
@@ -384,8 +411,22 @@ class ComparisonTab(ttk.Frame):
     # -- drag to reorder --------------------------------------------------------------------------------
 
     def _drag_start(self, event):
-        row = self.entry_tree.identify_row(event.y)
-        if row and self.entry_tree.identify_column(event.x) == "#0":  # the Show checkbox: toggle, no drag
+        tree = self.entry_tree
+        row = tree.identify_row(event.y)
+        if row.startswith(_SCHEME_GROUP):
+            self._drag, self._dragged = None, False
+            element = tree.identify_element(event.x, event.y)
+            if "indicator" in element:
+                self.after_idle(self._entry_groups_changed)
+                return None  # the tree itself opens or closes the group
+            if tree.identify_column(event.x) == "#0" and "image" in element:  # Show for the whole scheme
+                members = [e for e in self.entries if entry_scheme(e.package) == row[len(_SCHEME_GROUP):]]
+                self.set_hidden([e.package.key for e in members], not any(e.hidden for e in members))
+            else:
+                tree.item(row, open=not tree.item(row, "open"))
+                self._entry_groups_changed()
+            return "break"
+        if row and tree.identify_column(event.x) == "#0":  # the Show checkbox: toggle, no drag
             entry = next((e for e in self.entries if e.package.key == row), None)
             if entry is not None:
                 self.set_hidden([row], not entry.hidden)
@@ -399,10 +440,12 @@ class ComparisonTab(ttk.Frame):
         if self._drag is None:
             return
         target = self.entry_tree.identify_row(event.y)
-        if not target or target == self._drag:
+        if not target or target == self._drag or target.startswith(_SCHEME_GROUP):
             return
-        self.move_entry(self._drag, self.entry_tree.index(target), redraw=False)
-        self._dragged = True
+        index = next((i for i, e in enumerate(self.entries) if e.package.key == target), None)
+        if index is not None:  # to the target's place in the entry order (legends follow it)
+            self.move_entry(self._drag, index, redraw=False)
+            self._dragged = True
 
     def _drag_end(self, _event) -> None:
         dragged, self._drag, self._dragged = self._dragged, None, False
@@ -425,7 +468,7 @@ class ComparisonTab(ttk.Frame):
         index = max(0, min(index, len(self.entries) - 1))
         entry = self.entries.pop(position)
         self.entries.insert(index, entry)
-        self.entry_tree.move(key, "", index)
+        self.update_entry_tree()
         labels = [e.package.long_label for e in self.entries]
         self.map_combo["values"] = labels
         self.map_var.set(labels[self.map_entry] if labels else "")
@@ -630,14 +673,40 @@ class ComparisonTab(ttk.Frame):
         self._rebuild_experiment_list()
         self.update_entry_tree()
 
+    def _entry_groups_changed(self) -> None:
+        self.entry_groups_closed = {g[len(_SCHEME_GROUP):] for g in self.entry_tree.get_children()
+                                    if not self.entry_tree.item(g, "open")}
+        self.app._save_state()
+
     def update_entry_tree(self) -> None:
-        """Rows in entry order, updated in place (no rebuild: the selection and a drag survive the polls)."""
+        """A group row per scheme (AO, UO, FD: Show for all of its entries, "n/N shown"), its entries in entry
+        order below; updated in place (no rebuild: the selection and a drag survive the polls)."""
         tree = self.entry_tree
-        keys = [e.package.key for e in self.entries]
-        for iid in tree.get_children():
-            if iid not in keys:
-                tree.delete(iid)
-        for index, entry in enumerate(self.entries):
+        keys = {e.package.key for e in self.entries}
+        members: dict[str, list[Entry]] = {}
+        for entry in self.entries:
+            members.setdefault(entry_scheme(entry.package), []).append(entry)
+        order = sorted(members, key=lambda name: (_SCHEME_ORDER.index(name) if name in _SCHEME_ORDER
+                                                  else len(_SCHEME_ORDER), name))
+        for group in tree.get_children():
+            for iid in tree.get_children(group):
+                if iid not in keys:
+                    tree.delete(iid)
+            if group[len(_SCHEME_GROUP):] not in members:
+                tree.delete(group)
+        for position, name in enumerate(order):
+            group = _SCHEME_GROUP + name
+            shown = sum(not e.hidden for e in members[name])
+            text = f"{name}  ({shown}/{len(members[name])} shown)"
+            image = self._show_icons[1 if shown == len(members[name]) else 0]
+            if not tree.exists(group):
+                tree.insert("", position, iid=group, open=name not in self.entry_groups_closed, tags=("group",))
+            elif tree.index(group) != position:
+                tree.move(group, "", position)
+            tree.item(group, text=text, image=image)
+        for entry in self.entries:
+            group = _SCHEME_GROUP + entry_scheme(entry.package)
+            index = members[entry_scheme(entry.package)].index(entry)
             tag = f"c{entry.color}"
             tree.tag_configure(tag, foreground=entry.color)
             tags = ("hidden",) if entry.hidden else (tag,)
@@ -655,10 +724,10 @@ class ComparisonTab(ttk.Frame):
                 if tuple(tree.item(entry.package.key, "values")) != values or \
                         tuple(tree.item(entry.package.key, "tags")) != tags:
                     tree.item(entry.package.key, values=values, tags=tags, image=image)
-                if tree.index(entry.package.key) != index:
-                    tree.move(entry.package.key, "", index)
+                if tree.parent(entry.package.key) != group or tree.index(entry.package.key) != index:
+                    tree.move(entry.package.key, group, index)
             else:
-                tree.insert("", index, iid=entry.package.key, text="", image=image, values=values, tags=tags)
+                tree.insert(group, index, iid=entry.package.key, text="", image=image, values=values, tags=tags)
 
     # -- data -------------------------------------------------------------------------------------------
 
@@ -803,7 +872,14 @@ class ComparisonTab(ttk.Frame):
             bits.append(f"{len(failed)} failed (see Details)")
         return "  |  ".join(bits)
 
-    def canonical_figure(self) -> Figure:
+    def canonical_figure(self, paper: bool = False) -> Figure:
+        """The current view rebuilt for a file: Matplotlib's defaults (the CLI's look), or with ``paper`` the
+        paper figures' style and width (spinlabs.figure_style)."""
+        if paper:
+            with paper_style():
+                figure = self._figure(self.nested.index("current"), canonical=True)
+                to_paper_layout(figure)
+                return figure
         with matplotlib.rc_context(matplotlib.rcParamsDefault):
             return self._figure(self.nested.index("current"), canonical=True)
 
@@ -896,6 +972,7 @@ class ComparisonTab(ttk.Frame):
             "log": self.log, "processes": sorted(self.processes), "t1_state": self.t1_state, "ratio": self.ratio,
             "map_entry": self.map_entry, "map_key": self.map_key, "show_experiment": self.show_experiment,
             "experiment_off": sorted(self.experiment_off), "experiment_open": sorted(self.experiment_open),
+            "entry_groups_closed": sorted(self.entry_groups_closed),
             "view": self.nested.index("current"),
         }
 
@@ -912,6 +989,7 @@ class ComparisonTab(ttk.Frame):
         if "experiment_off" in state:
             self.experiment_off = {str(k) for k in state.get("experiment_off") or []}
         self.experiment_open = {str(d) for d in state.get("experiment_open") or []}
+        self.entry_groups_closed = {str(g) for g in state.get("entry_groups_closed") or []}
         packages = []
         colors = list(state.get("colors") or [])
         for index, path in enumerate(state.get("entries") or []):

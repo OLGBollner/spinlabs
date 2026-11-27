@@ -43,6 +43,7 @@ from spinlabs.gui.state import GuiState, TabState, load_state, save_state
 from spinlabs.gui.tabs import TabView
 from spinlabs.gui.tooltips import Tooltip
 from spinlabs.gui.widgets import FigureHost, ReportData, ScrollableFrame, _fmt, _safe_name
+from spinlabs.figure_style import paper_style, to_paper_layout
 from spinlabs.logging_utils import get_logger
 from spinlabs.methods import normalize_calc_method
 from spinlabs.utils import resolve_path
@@ -346,18 +347,22 @@ class PackTab(ttk.Frame):
         self._mode_result = result
         self.mode_view.set_figure(figure)
 
-    def canonical_figure(self) -> Figure:
-        """The figure as the CLI would write it, independent of the window size.
+    def canonical_figure(self, paper: bool = False) -> Figure:
+        """The figure for a file, independent of the window size.
 
         The GUI applies its own muted Matplotlib style for the screen.  Exports
         are rebuilt under Matplotlib's default style so they match the figures
-        written by ``spinlabs plot convergence``.
+        written by ``spinlabs plot convergence``, or with ``paper`` in the paper
+        figures' style and width (spinlabs.figure_style).
         """
-        with matplotlib.rc_context(matplotlib.rcParamsDefault):
+        context = paper_style() if paper else matplotlib.rc_context(matplotlib.rcParamsDefault)
+        with context:
             if self.nested.index("current") == 1:
                 figure, _result = self._mode_figure(canonical=True)
             else:
                 figure = self._summary_figure(canonical=True)
+            if paper:
+                to_paper_layout(figure)
             return figure
 
     # -- report ------------------------------------------------------------
@@ -666,7 +671,8 @@ class ConvergenceApp:
         self.filter_method = tk.StringVar(value="All")
         self.filter_displacement = tk.StringVar(value="All")
         self.latest_only = tk.BooleanVar(value=True)
-        self.filter_kind = tk.StringVar(value="All")  # Data tab: All, Convergence or Production (DATA_KINDS)
+        self.filter_kind = tk.StringVar(value="All")
+        self.paper_figures = tk.BooleanVar(value=self.state.paper_figures)  # Save figure: the paper's style  # Data tab: All, Convergence or Production (DATA_KINDS)
         self.forward_var = tk.BooleanVar(value=True)
         self.central_var = tk.BooleanVar(value=False)
         self.display_var = tk.StringVar(value="Norm")
@@ -698,8 +704,7 @@ class ConvergenceApp:
         file_menu.add_command(label="Refresh registry", command=self.refresh_registry)
         file_menu.add_separator()
         save_menu = tk.Menu(file_menu, tearoff=False)
-        for fmt, label in (("png", "PNG"), ("svg", "SVG"), ("pdf", "PDF")):
-            save_menu.add_command(label=f"{label}…", command=lambda f=fmt: self.save_figure(f))
+        self._fill_save_menu(save_menu)
         file_menu.add_cascade(label="Save figure", menu=save_menu)
         file_menu.add_command(label="Export table CSV…", command=self.export_csv)
         file_menu.add_separator()
@@ -747,12 +752,13 @@ class ConvergenceApp:
         self._tip(refresh_button, "Re-read the registry and refresh the defect groups.")
         save_button = ttk.Menubutton(bar, text="Save figure")
         save_menu = tk.Menu(save_button, tearoff=False)
-        for fmt, label in (("png", "PNG"), ("svg", "SVG"), ("pdf", "PDF")):
-            save_menu.add_command(label=f"{label}…", command=lambda f=fmt: self.save_figure(f))
+        self._fill_save_menu(save_menu)
         save_button.configure(menu=save_menu)
         self._save_menu = save_menu
         save_button.pack(side=tk.LEFT, padx=(0, 2))
-        self._tip(save_button, "Save the current view as a CLI-style PNG, SVG or PDF figure.")
+        self._tip(save_button, "Save the current view as a PNG, SVG or PDF figure: in the paper figures' style "
+                               "(fonts, line widths, journal column width, panel letters) by default, or in the "
+                               "CLI's style with Paper style unticked.")
         csv_button = ttk.Button(bar, text="Export CSV", command=self.export_csv)
         csv_button.pack(side=tk.LEFT, padx=(0, 2))
         self._tip(csv_button, "Export the current report table as a CSV file.")
@@ -1045,6 +1051,8 @@ class ConvergenceApp:
         date = version_labels(versions)[versions.index(package)]
         if len(versions) > 1:
             date += f"  [{len(versions)}]"
+        if package.sublevel:  # an FD set's AO data (its m_s = S sublevel)
+            method = f"{method} (FD)"
         return (defect, cell or "", method, f"{step:g}" if package.step is not None else "", date)
 
     def _sync_production_date(self) -> None:
@@ -1900,13 +1908,21 @@ class ConvergenceApp:
         folder = "comparison" if isinstance(tab, ComparisonTab) else "convergence"
         return Path("figures") / folder / f"{tab.save_stem()}{suffix}"
 
+    def _fill_save_menu(self, menu: tk.Menu) -> None:
+        for fmt, label in (("png", "PNG"), ("svg", "SVG"), ("pdf", "PDF")):
+            menu.add_command(label=f"{label}…", command=lambda f=fmt: self.save_figure(f))
+        menu.add_separator()
+        menu.add_checkbutton(label="Paper style", variable=self.paper_figures, command=self._save_state)
+
     def save_figure(self, fmt: str = "png") -> None:
-        """Write the CLI-style figure (not the stretched on-screen one) in the chosen format."""
+        """Write the figure rebuilt for a file (not the stretched on-screen one) in the chosen format: in the
+        paper figures' style (spinlabs.figure_style) unless Paper style is off, then the CLI's."""
         tab = self.active_tab
         if tab is None:
             return
         fmt = fmt.lower() if fmt.lower() in ("png", "svg", "pdf") else "png"
-        figure = tab.canonical_figure()
+        paper = bool(self.paper_figures.get())
+        figure = tab.canonical_figure(paper=paper)
         default = self._default_output(tab, f".{fmt}")
         default.parent.mkdir(parents=True, exist_ok=True)
         path = filedialog.asksaveasfilename(
@@ -1921,7 +1937,7 @@ class ConvergenceApp:
         if path.suffix.lower() not in (".png", ".svg", ".pdf"):
             path = path.with_suffix(f".{fmt}")
         try:
-            figure.savefig(path, dpi=300)
+            figure.savefig(path, dpi=300, **({"bbox_inches": "tight"} if paper else {}))
         except Exception as exc:
             messagebox.showerror("Save failed", str(exc))
             return
@@ -1988,6 +2004,7 @@ class ConvergenceApp:
             last_directory=self.state.last_directory,
             comparisons=comparisons,
             experiment_dir=self.state.experiment_dir,
+            paper_figures=bool(self.paper_figures.get()),
         )
         try:
             save_state(self.state)

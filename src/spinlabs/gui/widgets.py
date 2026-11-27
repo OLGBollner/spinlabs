@@ -166,6 +166,19 @@ class ScrollableFrame(ttk.Frame):
         except tk.TclError:
             pass
 
+    def _scrolls_itself(self, widget) -> bool:
+        """Whether ``widget`` is a list or text inside this pane with more content than it shows: the wheel
+        over it is its own (Tk has already scrolled it by its class binding when the pane sees the event)."""
+        if not isinstance(widget, (ttk.Treeview, tk.Listbox, tk.Text)):
+            return False  # also a widget name Tkinter does not know (a file dialog's internals: a str)
+        if not str(widget).startswith(str(self.content)):
+            return False
+        try:
+            top, bottom = (float(v) for v in widget.yview())
+        except (tk.TclError, ValueError):
+            return False
+        return top > 0.0 or bottom < 1.0
+
     def _on_wheel(self, event) -> None:
         # A bounds test avoids winfo_containing(): Tk's file dialogs are
         # internal toplevels whose widget names are not in Tkinter's cache and
@@ -177,6 +190,8 @@ class ScrollableFrame(ttk.Frame):
             return
         if not (left <= event.x_root < right and top <= event.y_root < bottom):
             return
+        if self._scrolls_itself(event.widget):
+            return  # a list with more rows than it shows scrolls itself (its class binding), not the pane
         if getattr(event, "num", None) == 4:
             self.canvas.yview_scroll(-1, "units")
         elif getattr(event, "num", None) == 5:
