@@ -33,7 +33,7 @@ from spinlabs.models import PhononSpectrum, SpinPhononCouplingData
 from spinlabs.relaxation_dynamics import init_populations
 from spinlabs.spin import direction_key, spin_projections
 from spinlabs.transition_rate import TransitionRate
-from spinlabs.utils import MathUtils
+from spinlabs.utils import MathUtils, resolve_path
 
 # Channel -> (first-order key, second-order key) of a coupling file; the names of convergence_channels
 CHANNELS = ("d0", "d1", "d2")
@@ -275,9 +275,13 @@ class ExperimentSeries:
         return f"{self.citation} {name}".strip()
 
 
-def experiment_folder(defect: str, near: Path | None = None) -> Path | None:
+def experiment_folder(defect: str, near: Path | None = None, root: str | Path | None = None) -> Path | None:
     """``experimental_data/<defect>`` in the working directory or a parent of ``near`` (the package: the data
-    tree lives next to it in the repository)."""
+    tree lives next to it in the repository). ``root``: an experimental-data folder chosen instead (holding one
+    ``<defect>/`` folder per defect); only that one is looked in."""
+    if root is not None:
+        folder = resolve_path(root) / defect
+        return folder if folder.is_dir() else None
     roots = [Path.cwd()] + (list(Path(near).resolve().parents) if near is not None else [])
     for root in roots:
         folder = root / EXPERIMENT_DIRNAME / defect
@@ -286,12 +290,12 @@ def experiment_folder(defect: str, near: Path | None = None) -> Path | None:
     return None
 
 
-def experimental_series(defect: str, near: Path | None = None) -> list[ExperimentSeries]:
+def experimental_series(defect: str, near: Path | None = None, root: str | Path | None = None) -> list[ExperimentSeries]:
     """Every experimental series of ``defect`` (none without a folder): relaxation data as T1 (s), Omega and
-    gamma as rates (Hz), temperatures in K, positive values only."""
+    gamma as rates (Hz), temperatures in K, positive values only. ``root`` as in :func:`experiment_folder`."""
     from spinlabs.experimental import load_experimental_data
 
-    folder = experiment_folder(defect, near)
+    folder = experiment_folder(defect, near, root)
     if folder is None:
         return []
     out = []

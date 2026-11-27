@@ -72,6 +72,7 @@ class ComparisonTab(ttk.Frame):
         self.experiment_off: set[str] = set(EXPERIMENT_OFF_BY_DEFAULT)  # series (ExperimentSeries.key) left out
         self._experiment_cache: dict[str, list] = {}  # defect -> its experimental series
         self._experiment_errors: dict[str, str] = {}
+        self.experiment_open: set[str] = set()  # defects whose experiment dropdown is open
         self._poll_after: str | None = None
         self._last_keys: dict[int, tuple | None] = {i: None for i in range(len(VIEWS))}
         self._build()
@@ -94,7 +95,7 @@ class ComparisonTab(ttk.Frame):
             self.hosts.append(host)
         self.nested.bind("<<NotebookTabChanged>>", lambda _e: self.render_current())
 
-        scroll = ScrollableFrame(self.controls, palette=self.app.palette)
+        scroll = self._scroll = ScrollableFrame(self.controls, palette=self.app.palette)
         scroll.pack(fill=tk.BOTH, expand=True)
         body = scroll.content
         tip = self.app._tip
@@ -112,7 +113,7 @@ class ComparisonTab(ttk.Frame):
         self.entry_tree.column("entry", width=170, anchor=tk.W)
         self.entry_tree.column("status", width=80, anchor=tk.W)
         self.entry_tree.pack(fill=tk.X, padx=4, pady=4)
-        tip(self.entry_tree, "The packages compared in this tab, one colour each. Add them from the Production tab; "
+        tip(self.entry_tree, "The packages compared in this tab, one colour each. Add them from the Data tab (Production); "
                              "click Show to hide an entry from the views and the report (it keeps its colour and "
                              "place); drag an entry to reorder (legends follow the order; the first shown entry is "
                              "the T1 ratio reference).")
@@ -211,9 +212,29 @@ class ComparisonTab(ttk.Frame):
                   "views. Rates: Ω in the Δ1 panels (m_s 1 → 0), γ in the Δ2 panels (1 → −1). T1: the measured "
                   "T1 / 1/T1 data (an optically pumped polarization: drawn for the lowest |m_s|) and T1 of the "
                   "chosen initial state solved from a source's Ω and γ.")
-        self.experiment_box = ttk.Frame(box, style="Card.TFrame")
-        self.experiment_box.pack(fill=tk.X, padx=12, pady=(0, 2))
-        self.experiment_vars: dict[str, tk.BooleanVar] = {}
+        row = ttk.Frame(box, style="Card.TFrame")
+        row.pack(fill=tk.X, padx=6, pady=(2, 0))
+        folder = ttk.Button(row, text="Folder…", command=self.choose_experiment_dir)
+        folder.pack(side=tk.LEFT, expand=True, fill=tk.X)
+        tip(folder, "Choose the experimental-data folder: one subfolder per defect (NV/, V_Si/, …) with the CSV "
+                    "files. Applies to every comparison and is remembered.")
+        default = ttk.Button(row, text="Default", command=lambda: self.app.set_experiment_dir(None))
+        default.pack(side=tk.LEFT, expand=True, fill=tk.X, padx=(4, 0))
+        tip(default, "Find experimental_data/<defect> again in the working directory or next to the packages.")
+        self.experiment_dir_label = ttk.Label(box, style="CardMuted.TLabel", wraplength=260)
+        self.experiment_dir_label.pack(anchor=tk.W, padx=6, pady=(2, 2))
+        # one group row per defect (its checkbox: all of its series; "n/N on"), a checkbox row per series
+        self.experiment_tree = ttk.Treeview(box, show="tree", selectmode="none", height=2)
+        self.experiment_tree.column("#0", width=260, anchor=tk.W)
+        self.experiment_tree.tag_configure("group", font=(self.app.family, 9, "bold"))
+        self.experiment_tree.tag_configure("off", foreground="#9aa0a6")
+        self.experiment_tree.pack(fill=tk.X, padx=6, pady=(0, 4))
+        self.experiment_tree.bind("<ButtonRelease-1>", self._on_experiment_click)
+        self.experiment_tree.bind("<<TreeviewOpen>>", lambda _e: self.after_idle(self._experiment_opened))
+        self.experiment_tree.bind("<<TreeviewClose>>", lambda _e: self.after_idle(self._experiment_opened))
+        tip(self.experiment_tree, "One group per defect: click a series to draw it or not, a defect's checkbox for "
+                                  "all of its series, its name to open or close it.")
+        self._experiment_items: dict[str, list] = {}  # defect -> its series
 
         box = ttk.LabelFrame(body, text="Temperatures (K)")
         box.pack(fill=tk.X, padx=6, pady=4)
@@ -434,7 +455,8 @@ class ComparisonTab(ttk.Frame):
             defect = entry.package.defect
             if defect not in self._experiment_cache:
                 try:
-                    self._experiment_cache[defect] = experimental_series(defect, near=entry.package.path)
+                    self._experiment_cache[defect] = experimental_series(defect, near=entry.package.path,
+                                                                         root=self.app.state.experiment_dir)
                 except Exception as exc:  # noqa: BLE001 -- an unreadable CSV: reported in Details
                     self._experiment_cache[defect] = []
                     self._experiment_errors[defect] = f"{type(exc).__name__}: {exc}"
@@ -474,35 +496,99 @@ class ComparisonTab(ttk.Frame):
             out.append((legend, marker, color, x, y))
         return out
 
+    def choose_experiment_dir(self) -> None:
+        from tkinter import filedialog
+
+        path = filedialog.askdirectory(title="Experimental-data folder (one subfolder per defect)",
+                                       initialdir=self.app.state.experiment_dir or str(Path.cwd()), mustexist=True)
+        if path:
+            self.app.set_experiment_dir(path)
+
+    def reload_experiment(self) -> None:
+        """Read the experimental data again (another folder chosen) and redraw."""
+        self._experiment_cache.clear()
+        self._experiment_errors.clear()
+        self._rebuild_experiment_list()
+        self.invalidate()
+        self.render_current()
+
     def _rebuild_experiment_list(self) -> None:
-        for child in self.experiment_box.winfo_children():
-            child.destroy()
-        self.experiment_vars = {}
+        """The experiment tree: a group row per defect, a checkbox row per series (iid: the series key)."""
+        tree = self.experiment_tree
+        tree.delete(*tree.get_children())
+        chosen = self.app.state.experiment_dir
+        self.experiment_dir_label.configure(
+            text=f"Folder: {chosen}" if chosen else "Folder: experimental_data/ next to the packages (default)")
         series = self.experiment_series()
         markers = self._experiment_markers()
+        self._experiment_items = {}
         if not series:
             text = "No experimental data for these defects." if self.entries else "Add entries first."
-            ttk.Label(self.experiment_box, text=text, style="CardMuted.TLabel").pack(anchor=tk.W)
+            tree.insert("", tk.END, text=text, tags=("off",))
+            tree.configure(height=1)
             return
-        many = len({s.defect for s in series}) > 1
         for s in series:
-            var = tk.BooleanVar(value=s.key not in self.experiment_off)
-            kind = {"omega": "rate, Δ1", "gamma": "rate, Δ2"}.get(s.kind, "T1")
-            text = f"{markers[s.key]}  {s.defect + ': ' if many else ''}{s.legend} ({kind})"
-            ttk.Checkbutton(self.experiment_box, text=text, variable=var, command=self._on_experiment).pack(
-                anchor=tk.W, pady=0)
-            self.experiment_vars[s.key] = var
-        state = "normal" if self.show_experiment else "disabled"
-        for child in self.experiment_box.winfo_children():
-            child.configure(state=state)
+            self._experiment_items.setdefault(s.defect, []).append(s)
+        for defect, items in self._experiment_items.items():
+            tree.insert("", tk.END, iid=f"defect:{defect}", open=defect in self.experiment_open, tags=("group",))
+            for s in items:
+                kind = {"omega": "rate, Δ1", "gamma": "rate, Δ2"}.get(s.kind, "T1")
+                tree.insert(f"defect:{defect}", tk.END, iid=s.key, text=f"{markers[s.key]}  {s.legend} ({kind})")
+        self._refresh_experiment_controls()
+
+    def _refresh_experiment_controls(self) -> None:
+        """Checkboxes, counts and the greyed-out look (Show experimental data off) of the experiment tree."""
+        tree = self.experiment_tree
+        on_icon, off_icon = self._show_icons[1], self._show_icons[0]
+        dim = () if self.show_experiment else ("off",)
+        for defect, items in self._experiment_items.items():
+            on = sum(s.key not in self.experiment_off for s in items)
+            tree.item(f"defect:{defect}", text=f"{defect}  ({on}/{len(items)} on)",
+                      image=on_icon if on == len(items) else off_icon, tags=("group", *dim))
+            for s in items:
+                tree.item(s.key, image=off_icon if s.key in self.experiment_off else on_icon, tags=dim)
+        self._fit_experiment_tree()
+
+    def _fit_experiment_tree(self) -> None:
+        """As many rows as are shown (no inner scrollbar; the panel scrolls)."""
+        tree = self.experiment_tree
+        rows = sum(1 + (len(tree.get_children(g)) if tree.item(g, "open") else 0) for g in tree.get_children())
+        tree.configure(height=max(1, min(rows, 16)))
+        self._scroll.refresh()
+
+    def _experiment_opened(self) -> None:
+        self.experiment_open = {g.split(":", 1)[1] for g in self.experiment_tree.get_children()
+                                if g.startswith("defect:") and self.experiment_tree.item(g, "open")}
+        self._fit_experiment_tree()
+        self.app._save_state()
+
+    def _on_experiment_click(self, event) -> None:
+        tree = self.experiment_tree
+        row = tree.identify_row(event.y)
+        if not row or not self.show_experiment or not self._experiment_items:
+            return
+        element = tree.identify_element(event.x, event.y)
+        if row.startswith("defect:"):
+            if "indicator" in element:
+                return  # the tree itself opens or closes the group
+            if "image" in element:  # the defect's checkbox: all of its series on, or all off when they are
+                keys = {s.key for s in self._experiment_items[row.split(":", 1)[1]]}
+                if keys & self.experiment_off:
+                    self.experiment_off -= keys
+                else:
+                    self.experiment_off |= keys
+            else:
+                tree.item(row, open=not tree.item(row, "open"))
+                self._experiment_opened()
+                return
+        else:
+            self.experiment_off ^= {row}
+        self._refresh_experiment_controls()
+        self.render_current()
 
     def _on_experiment(self) -> None:
         self.show_experiment = bool(self.show_experiment_var.get())
-        self.experiment_off = {k for k, var in self.experiment_vars.items() if not var.get()} | {
-            k for k in self.experiment_off if k not in self.experiment_vars}
-        state = "normal" if self.show_experiment else "disabled"
-        for child in self.experiment_box.winfo_children():
-            child.configure(state=state)
+        self._refresh_experiment_controls()
         self.render_current()
 
     def apply_settings(self) -> None:
@@ -607,7 +693,7 @@ class ComparisonTab(ttk.Frame):
         host = self.hosts[view]
         figsize = None if canonical else host.target_figsize()
         if not self.entries:
-            return message_figure("No entries: add production packages from the Production tab", figsize=figsize or (8, 5))
+            return message_figure("No entries: add production packages from the Data tab", figsize=figsize or (8, 5))
         if not self.shown:
             return message_figure("Every entry is hidden: tick Show in the entry list", figsize=figsize or (8, 5))
         channels = [c for c in CHANNELS if c in self.channels]
@@ -809,7 +895,8 @@ class ComparisonTab(ttk.Frame):
             "settings": self.settings.to_dict(), "channels": sorted(self.channels),
             "log": self.log, "processes": sorted(self.processes), "t1_state": self.t1_state, "ratio": self.ratio,
             "map_entry": self.map_entry, "map_key": self.map_key, "show_experiment": self.show_experiment,
-            "experiment_off": sorted(self.experiment_off), "view": self.nested.index("current"),
+            "experiment_off": sorted(self.experiment_off), "experiment_open": sorted(self.experiment_open),
+            "view": self.nested.index("current"),
         }
 
     def apply_state(self, state: dict) -> None:
@@ -824,6 +911,7 @@ class ComparisonTab(ttk.Frame):
         self.show_experiment = bool(state.get("show_experiment", True))
         if "experiment_off" in state:
             self.experiment_off = {str(k) for k in state.get("experiment_off") or []}
+        self.experiment_open = {str(d) for d in state.get("experiment_open") or []}
         packages = []
         colors = list(state.get("colors") or [])
         for index, path in enumerate(state.get("entries") or []):

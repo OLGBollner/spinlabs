@@ -345,6 +345,25 @@ def test_experimental_data_for_the_rates_and_t1_views(tmp_path, monkeypatch):
     assert sum(1 for line in fig.axes[0].lines if line.get_label().startswith("exp.:")) == 2
 
 
+def test_a_chosen_experimental_data_folder_replaces_the_search(tmp_path, monkeypatch):
+    from spinlabs.gui.production import experiment_folder, experimental_series
+
+    found = tmp_path / "repo" / "experimental_data" / "NV"
+    found.mkdir(parents=True)
+    (found / "Near_2000.csv").write_text("K,Hz\nS1,\nX,Y\n100,2.0\n")
+    chosen = tmp_path / "elsewhere" / "NV"
+    chosen.mkdir(parents=True)
+    (chosen / "Chosen_2001.csv").write_text("K,Hz\nS1,\nX,Y\n100,4.0\n200,8.0\n")
+    package = tmp_path / "repo" / "data" / "NV_64" / "pack.npz"
+    monkeypatch.chdir(tmp_path)
+    assert [s.source for s in experimental_series("NV", near=package)] == ["Near_2000"]
+    assert [s.source for s in experimental_series("NV", near=package, root=tmp_path / "elsewhere")] == ["Chosen_2001"]
+    assert experiment_folder("ClV", near=package, root=tmp_path / "elsewhere") is None  # nothing else searched
+    path = save_state(GuiState(experiment_dir=str(tmp_path / "elsewhere")), tmp_path / "gui.json")
+    assert load_state(path).experiment_dir == str(tmp_path / "elsewhere")
+    assert load_state(save_state(GuiState(), tmp_path / "default.json")).experiment_dir is None
+
+
 def test_a_dead_worker_process_is_restarted(session):
     import os
     from concurrent.futures import BrokenExecutor

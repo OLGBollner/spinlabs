@@ -44,6 +44,8 @@ from spinlabs.gui.tabs import TabView
 from spinlabs.gui.tooltips import Tooltip
 from spinlabs.gui.widgets import FigureHost, ReportData, ScrollableFrame, _fmt, _safe_name
 from spinlabs.logging_utils import get_logger
+from spinlabs.methods import normalize_calc_method
+from spinlabs.utils import resolve_path
 
 LOGGER = get_logger(__name__)
 _REPORT_HEIGHT = 230
@@ -566,6 +568,10 @@ class PackTab(ttk.Frame):
         )
 
 
+DATA_KINDS = ("All", "Convergence", "Production")  # the Data tab's kind filter
+_MODE_GROUP = "symmetry:"  # iid prefix of the mode list's symmetry groups
+_CONV_ROOT, _PROD_ROOT = "__convergence__", "__production__"  # the two groups of the Data list
+
 class ConvergenceApp:
     """Main window and the registry/control/report wiring."""
 
@@ -605,9 +611,8 @@ class ConvergenceApp:
         self._build_toolbar()
         self._build_statusbar()
         self._build_layout()
-        self._build_registry_tab()
+        self._build_data_tab()
         self._build_view_tab()
-        self._build_production_tab()
         self._build_report()
         self.refresh_registry(initial=True)
         self._restore_or_open(paths)
@@ -661,6 +666,7 @@ class ConvergenceApp:
         self.filter_method = tk.StringVar(value="All")
         self.filter_displacement = tk.StringVar(value="All")
         self.latest_only = tk.BooleanVar(value=True)
+        self.filter_kind = tk.StringVar(value="All")  # Data tab: All, Convergence or Production (DATA_KINDS)
         self.forward_var = tk.BooleanVar(value=True)
         self.central_var = tk.BooleanVar(value=False)
         self.display_var = tk.StringVar(value="Norm")
@@ -784,21 +790,20 @@ class ConvergenceApp:
         self.main_paned.add(self.content, stretch="always")
         self.side_notebook = ttk.Notebook(self.sidebar)
         self.side_notebook.pack(fill=tk.BOTH, expand=True, padx=(8, 4), pady=(4, 4))
-        self.registry_tab = ttk.Frame(self.side_notebook, style="Card.TFrame", padding=(8, 8))
+        # Data: the registry's convergence packs and the production packages in one list, grouped by kind
+        self.data_tab = ttk.Frame(self.side_notebook, style="Card.TFrame", padding=(8, 8))
         self.view_tab = ttk.Frame(self.side_notebook, style="Card.TFrame", padding=0)
-        self.production_tab = ttk.Frame(self.side_notebook, style="Card.TFrame", padding=(8, 8))
-        self.side_notebook.add(self.registry_tab, text="Registry")
+        self.side_notebook.add(self.data_tab, text="Data")
         self.side_notebook.add(self.view_tab, text="View")
-        self.side_notebook.add(self.production_tab, text="Production")
         self.report_frame = ttk.Frame(self.paned, style="Card.TFrame")
         self.paned.add(self.report_frame, height=_REPORT_HEIGHT, stretch="never")
         self.welcome = ttk.Frame(self.content, style="Card.TFrame")
         self.welcome_label = ttk.Label(
             self.welcome,
-            text="No pack open.\nPick a defect group in the Registry tab, or use File → Open.\n"
+            text="No pack open.\nPick a convergence pack in the Data tab, or use File → Open.\n"
                  "Register data with `spinlabs package --conv` to fill the registry.\n\n"
                  "Compare production couplings, spectral functions, rates and T1 of several packages\n"
-                 "in the Production tab.",
+                 "from the Production group of the Data tab.",
             justify=tk.CENTER, style="CardMuted.TLabel", font=(self.family, 10),
         )
         self.welcome_label.pack(expand=True)
@@ -808,77 +813,71 @@ class ConvergenceApp:
         )
         self.welcome.pack(fill=tk.BOTH, expand=True)
 
-    def _build_registry_tab(self) -> None:
+    def _build_data_tab(self) -> None:
+        """The data available for plotting: the registry's convergence packs (opened as pack tabs) and the
+        production packages (compared in comparison tabs), one list grouped by kind; the actions below follow
+        the selected row's kind."""
+        tab = self.data_tab
         pad = {"padx": 4, "pady": 3}
-        box = ttk.LabelFrame(self.registry_tab, text="Filters")
+        box = ttk.LabelFrame(tab, text="Filters")
         box.pack(fill=tk.X, padx=6, pady=4)
-        self._filter_row(box, "Defect", self.filter_defect, 0)
-        self._filter_row(box, "Cell", self.filter_cell, 1)
-        self._filter_row(box, "Method", self.filter_method, 2)
-        self._filter_row(box, "Displacement", self.filter_displacement, 3)
-        latest = ttk.Checkbutton(box, text="Latest only", variable=self.latest_only,
-                                 command=self.refresh_registry)
-        latest.grid(row=4, column=0, columnspan=2, sticky="w", **pad)
+        ttk.Label(box, text="Data", style="Card.TLabel").grid(row=0, column=0, sticky="w", **pad)
+        kind = ttk.Combobox(box, textvariable=self.filter_kind, values=DATA_KINDS, state="readonly", width=16)
+        kind.grid(row=0, column=1, sticky="ew", **pad)
+        kind.bind("<<ComboboxSelected>>", lambda _e: self._populate_data())
+        self._tip(kind, "Convergence packs (spinlabs package --conv: the convergence of each mode's coupling), "
+                        "production packages (spinlabs package: couplings, spectral functions, rates and T1), "
+                        "or both.")
+        self._filter_row(box, "Defect", self.filter_defect, 1)
+        self._filter_row(box, "Cell", self.filter_cell, 2)
+        self._filter_row(box, "Method", self.filter_method, 3)
+        self._filter_row(box, "Displacement", self.filter_displacement, 4)
+        ttk.Label(box, text="Search", style="Card.TLabel").grid(row=5, column=0, sticky="w", **pad)
+        self.data_search = tk.StringVar(value="")
+        search = ttk.Entry(box, textvariable=self.data_search)
+        search.grid(row=5, column=1, sticky="ew", **pad)
+        self._tip(search, "Show only the rows whose defect, cell, method, displacement, step or dates contain "
+                          "this text.")
+        self.data_search.trace_add("write", lambda *_: self._populate_data())
+        latest = ttk.Checkbutton(box, text="Latest only (convergence)", variable=self.latest_only,
+                                 command=self._populate_data)
+        latest.grid(row=6, column=0, columnspan=2, sticky="w", **pad)
         self._tip(latest, "Show only the newest registered file of each convergence scheme.")
         refresh = ttk.Button(box, text="Refresh", command=self.refresh_registry)
-        refresh.grid(row=5, column=0, columnspan=2, sticky="ew", **pad)
-        self._tip(refresh, "Re-read the registry database and refresh the defect groups.")
-        self.group_tree = ttk.Treeview(
-            self.registry_tab, columns=("defect", "cell", "displacement", "schemes"), show="headings", height=6,
-            selectmode="browse",
-        )
-        for key, title, width in (("defect", "Defect", 80), ("cell", "Cell", 50),
-                                  ("displacement", "Displacement", 100), ("schemes", "Schemes", 70)):
-            self.group_tree.heading(key, text=title)
-            self.group_tree.column(key, width=width, anchor=tk.W)
-        self.group_tree.pack(fill=tk.BOTH, expand=True, padx=6, pady=4)
-        self._tip(self.group_tree, "Select a defect group; its available ZFS schemes appear below.")
-        self.group_tree.bind("<<TreeviewSelect>>", lambda _e: self._show_group_schemes())
-        self.group_tree.bind("<Double-1>", lambda _e: self.open_selected_group())
-        self.schemes_frame = ttk.LabelFrame(self.registry_tab, text="Schemes")
-        self.schemes_frame.pack(fill=tk.BOTH, expand=True, padx=6, pady=4)
-        open_update = ttk.Button(
-            self.registry_tab, text="Open / update tab", command=self.open_selected_group,
-            style="Accent.TButton",
-        )
-        open_update.pack(fill=tk.X, padx=0, pady=(6, 6))
-        self._tip(open_update, "Open the checked schemes as a new defect tab, or update its existing columns.")
-        buttons = ttk.Frame(self.registry_tab)
-        buttons.pack(fill=tk.X, padx=6, pady=(0, 6))
-        open_file = ttk.Button(buttons, text="Open file…", command=self.open_files)
-        open_file.pack(side=tk.LEFT, expand=True, fill=tk.X)
-        self._tip(open_file, "Open a convergence .npz that is not in the registry (session only).")
-        open_folder = ttk.Button(buttons, text="Open folder…", command=self.open_folder)
-        open_folder.pack(side=tk.LEFT, expand=True, fill=tk.X, padx=(4, 0))
-        self._tip(open_folder, "Open a full-decontamination convergence folder (session only).")
+        refresh.grid(row=7, column=0, columnspan=2, sticky="ew", **pad)
+        self._tip(refresh, "Re-read the registry database: the convergence packs and the production packages.")
 
-    def _build_production_tab(self) -> None:
-        ttk.Label(
-            self.production_tab, text="Production packages (spinlabs package): couplings, spectral functions, "
-            "rates and T1, several in one graph.", wraplength=320, style="CardMuted.TLabel",
-        ).pack(anchor=tk.W, padx=6, pady=(0, 4))
-        row = ttk.Frame(self.production_tab, style="Card.TFrame")
-        row.pack(fill=tk.X, padx=6, pady=2)
-        ttk.Label(row, text="Filter", style="CardMuted.TLabel").pack(side=tk.LEFT)
-        self.production_filter = tk.StringVar(value="")
-        entry = ttk.Entry(row, textvariable=self.production_filter)
-        entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=4)
-        self._tip(entry, "Filter the packages by defect, cell, method, step or date.")
-        self.production_filter.trace_add("write", lambda *_: self._refresh_production())
-        self.production_tree = ttk.Treeview(
-            self.production_tab, columns=("defect", "cell", "method", "step", "date"), show="headings",
-            height=14, selectmode="extended",
-        )
-        for key, title, width in (("defect", "Defect", 60), ("cell", "Cell", 40), ("method", "Method", 70),
-                                  ("step", "Step", 40), ("date", "Date", 125)):
-            self.production_tree.heading(key, text=title)
-            self.production_tree.column(key, width=width, anchor=tk.W)
-        self.production_tree.pack(fill=tk.BOTH, expand=True, padx=6, pady=4)
-        self._tip(self.production_tree, "One row per setup (defect, cell, method, step) with its latest data, as "
-                  "the registry picks it. Select one or more (Ctrl/Shift-click), then add them to a comparison.")
-        self.production_tree.bind("<Double-1>", lambda _e: self.add_to_comparison())
-        self.production_tree.bind("<<TreeviewSelect>>", lambda _e: self._sync_production_date())
-        row = ttk.Frame(self.production_tab, style="Card.TFrame")
+        self.data_tree = ttk.Treeview(tab, columns=("cell", "method", "detail", "date"), show=("tree", "headings"),
+                                      height=14, selectmode="extended")
+        self.data_tree.heading("#0", text="Defect")
+        self.data_tree.column("#0", width=112, stretch=False, anchor=tk.W)
+        for key, title, width in (("cell", "Cell", 40), ("method", "Method", 70), ("detail", "Disp. / step", 72),
+                                  ("date", "Date", 90)):
+            self.data_tree.heading(key, text=title)
+            self.data_tree.column(key, width=width, anchor=tk.W)
+        self.data_tree.insert("", tk.END, iid=_CONV_ROOT, text="Convergence", open=True, tags=("group",))
+        self.data_tree.insert("", tk.END, iid=_PROD_ROOT, text="Production", open=True, tags=("group",))
+        self.data_tree.tag_configure("group", font=(self.family, 9, "bold"))
+        self.data_tree.pack(fill=tk.BOTH, expand=True, padx=6, pady=4)
+        self._tip(self.data_tree, "Convergence: one row per defect group (its schemes below; open it as a pack "
+                                  "tab). Production: one row per setup (defect, cell, method, step) with its "
+                                  "latest data; select one or more (Ctrl/Shift-click) for a comparison. "
+                                  "Double-click opens or adds the row.")
+        self.data_tree.bind("<<TreeviewSelect>>", lambda _e: self._on_data_select())
+        self.data_tree.bind("<Double-1>", self._on_data_double_click)
+
+        # convergence actions: the selected group's schemes, open as a pack tab
+        self.conv_actions = ttk.Frame(tab, style="Card.TFrame")
+        self.schemes_frame = ttk.LabelFrame(self.conv_actions, text="Schemes")
+        self.schemes_frame.pack(fill=tk.BOTH, expand=True, padx=6, pady=4)
+        open_update = ttk.Button(self.conv_actions, text="Open / update tab", command=self.open_selected_group,
+                                 style="Accent.TButton")
+        open_update.pack(fill=tk.X, padx=6, pady=(6, 2))
+        self._tip(open_update, "Open the checked schemes as a new defect tab, or update its existing columns.")
+
+        # production actions: the version of the selected setup, new comparison / add to one
+        self.prod_actions = ttk.Frame(tab, style="Card.TFrame")
+        row = ttk.Frame(self.prod_actions, style="Card.TFrame")
         row.pack(fill=tk.X, padx=6, pady=2)
         ttk.Label(row, text="Date", style="CardMuted.TLabel").pack(side=tk.LEFT)
         self.production_date = tk.StringVar(value="")
@@ -887,23 +886,64 @@ class ConvergenceApp:
         self.production_date_box.bind("<<ComboboxSelected>>", lambda _e: self._choose_production_date())
         self._tip(self.production_date_box, "The data of the selected setup to use: the latest by default; "
                   "earlier packages of the same setup, newest first.")
-        self.production_hidden = ttk.Label(self.production_tab, text="", wraplength=320, style="CardMuted.TLabel")
+        self.production_hidden = ttk.Label(self.prod_actions, text="", wraplength=320, style="CardMuted.TLabel")
         self.production_hidden.pack(anchor=tk.W, padx=6)
-        new = ttk.Button(self.production_tab, text="New comparison", command=self.new_comparison_from_selection,
+        new = ttk.Button(self.prod_actions, text="New comparison", command=self.new_comparison_from_selection,
                          style="Accent.TButton")
         new.pack(fill=tk.X, padx=6, pady=(6, 2))
         self._tip(new, "Open a new comparison tab with the selected packages.")
-        add = ttk.Button(self.production_tab, text="Add to comparison", command=self.add_to_comparison)
+        add = ttk.Button(self.prod_actions, text="Add to comparison", command=self.add_to_comparison)
         add.pack(fill=tk.X, padx=6, pady=2)
         self._tip(add, "Add the selected packages to the open comparison tab (a new one if none is open).")
-        self._refresh_production()
+        self._data_actions: str | None = None
 
-    def _refresh_production(self) -> None:
-        if not hasattr(self, "production_tree"):
+        buttons = ttk.Frame(tab)
+        buttons.pack(side=tk.BOTTOM, fill=tk.X, padx=6, pady=(4, 6))
+        open_file = ttk.Button(buttons, text="Open file…", command=self.open_files)
+        open_file.pack(side=tk.LEFT, expand=True, fill=tk.X)
+        self._tip(open_file, "Open a convergence .npz that is not in the registry (session only).")
+        open_folder = ttk.Button(buttons, text="Open folder…", command=self.open_folder)
+        open_folder.pack(side=tk.LEFT, expand=True, fill=tk.X, padx=(4, 0))
+        self._tip(open_folder, "Open a full-decontamination convergence folder (session only).")
+        self._reload_production()
+
+    def _show_data_actions(self, kind: str) -> None:
+        """The actions under the list: the convergence group's schemes, or the production comparison buttons."""
+        if kind == self._data_actions:
             return
-        needle = self.production_filter.get().strip().lower()
-        selected = set(self.production_tree.selection())
-        self.production_tree.delete(*self.production_tree.get_children())
+        shown, hidden = (self.conv_actions, self.prod_actions) if kind == "conv" else (self.prod_actions, self.conv_actions)
+        hidden.pack_forget()
+        shown.pack(fill=tk.X, after=self.data_tree)
+        self._data_actions = kind
+
+    def _on_data_select(self) -> None:
+        tree = self.data_tree
+        selection = tree.selection()
+        focus = tree.focus()
+        conv = [i for i in selection if i in self._group_by_row]
+        prod = [i for i in selection if i in self._production_setups]
+        if focus in self._group_by_row or (conv and not prod):
+            kind = "conv"
+        elif focus in self._production_setups or prod:
+            kind = "prod"
+        else:
+            kind = self._data_actions or ("prod" if self.filter_kind.get() == "Production" else "conv")
+        self._show_data_actions(kind)
+        if kind == "conv":
+            self._show_group_schemes()
+        else:
+            self._sync_production_date()
+
+    def _on_data_double_click(self, event) -> None:
+        row = self.data_tree.identify_row(event.y)
+        if row in self._group_by_row:
+            self.data_tree.selection_set(row)
+            self.open_selected_group()
+        elif row in self._production_setups:
+            self.add_to_comparison()
+
+    def _reload_production(self) -> None:
+        """Read the registry's production packages (complete ones only: second-order data for rates and T1)."""
         try:
             every = production_packages(complete_only=False)
         except Exception:  # noqa: BLE001 -- an unreadable registry leaves the list empty
@@ -915,15 +955,82 @@ class ConvergenceApp:
             text=f"{hidden} package(s) without second-order data hidden (first-order-only *_1d files or empty "
                  "ones: no two-phonon spectra, rates or T1)." if hidden else "")
         self._production_setups = production_setups(packages)
-        for iid, versions in self._production_setups.items():
-            dates = " ".join(p.date for p in versions)
-            if needle and needle not in f"{self._production_values(iid)} {dates}".lower():
-                continue
-            self.production_tree.insert("", tk.END, iid=iid, values=self._production_values(iid))
-        keep = [iid for iid in selected if self.production_tree.exists(iid)]
+
+    def _refresh_production(self) -> None:
+        self._reload_production()
+        self._populate_data()
+
+    def _production_matches(self, iid: str) -> bool:
+        """The shared filters on a production setup: defect, cell, method (the same names as the registry's),
+        and the search text; the displacement and Latest only are convergence-only."""
+        def chosen(var: tk.StringVar) -> str | None:
+            return None if var.get() in ("", "All") else var.get()
+
+        defect, cell, method, _step = self._production_chosen(iid).setup
+        if chosen(self.filter_defect) and str(defect) != chosen(self.filter_defect):
+            return False
+        if chosen(self.filter_cell) and str(cell) != chosen(self.filter_cell):
+            return False
+        if chosen(self.filter_method) and normalize_calc_method(str(method)) != normalize_calc_method(
+                chosen(self.filter_method)):
+            return False
+        needle = self.data_search.get().strip().lower()
+        dates = " ".join(p.date for p in self._production_setups[iid])
+        return not needle or needle in f"{self._production_values(iid)} {dates}".lower()
+
+    def _group_matches(self, group: Group) -> bool:
+        needle = self.data_search.get().strip().lower()
+        if not needle:
+            return True
+        text = " ".join([group.defect, str(group.cell), group.displacement]
+                        + [f"{s.label} {' '.join(d.date for d in s.dates)}" for s in group.schemes])
+        return needle in text.lower()
+
+    def _populate_data(self) -> None:
+        """Fill both groups of the list from the filters (the registry is read by refresh_registry)."""
+        if not hasattr(self, "data_tree") or not hasattr(self, "catalog"):
+            return
+        tree = self.data_tree
+        selected = set(tree.selection())
+        kind = self.filter_kind.get()
+        for root, wanted, position in ((_CONV_ROOT, kind != "Production", 0), (_PROD_ROOT, kind != "Convergence", 1)):
+            tree.delete(*tree.get_children(root))
+            if wanted:
+                tree.move(root, "", position if kind == "All" else 0)
+            else:
+                tree.detach(root)
+        self._group_by_row = {}
+        if kind != "Production":
+            for group in self._filtered_groups():
+                if not self._group_matches(group):
+                    continue
+                self._group_by_row[group.key] = group
+                latest = max((s.latest.date for s in group.schemes), default="")
+                tree.insert(_CONV_ROOT, tk.END, iid=group.key, text=group.defect,
+                            values=(group.cell, ", ".join(s.label for s in group.schemes), group.displacement,
+                                    latest))
+            tree.item(_CONV_ROOT, text=f"Convergence ({len(self._group_by_row)})")
+        shown_production = 0
+        if kind != "Convergence":
+            for iid in self._production_setups:
+                if not self._production_matches(iid):
+                    continue
+                values = self._production_values(iid)
+                tree.insert(_PROD_ROOT, tk.END, iid=iid, text=values[0], values=values[1:])
+                shown_production += 1
+            tree.item(_PROD_ROOT, text=f"Production ({shown_production})")
+        keep = [iid for iid in selected if tree.exists(iid) and iid not in (_CONV_ROOT, _PROD_ROOT)]
         if keep:
-            self.production_tree.selection_set(keep)
-        self._sync_production_date()
+            tree.selection_set(keep)
+        elif self._group_by_row:
+            first = next(iter(self._group_by_row))
+            tree.selection_set(first)
+            tree.focus(first)
+            tree.see(first)
+        elif shown_production:
+            first = tree.get_children(_PROD_ROOT)[0]
+            tree.focus(first)
+        self._on_data_select()
 
     def _production_chosen(self, iid: str) -> ProductionPackage:
         """The version of a setup row in use: the one chosen in the date dropdown, else the latest."""
@@ -942,7 +1049,7 @@ class ConvergenceApp:
 
     def _sync_production_date(self) -> None:
         """The date dropdown follows the selection: one setup selected lists its versions, newest first."""
-        selection = [iid for iid in self.production_tree.selection() if iid in self._production_setups]
+        selection = [iid for iid in self.data_tree.selection() if iid in self._production_setups]
         if len(selection) != 1:
             self.production_date_box.configure(values=[], state="disabled")
             self.production_date.set("" if not selection else "(several setups selected)")
@@ -953,7 +1060,7 @@ class ConvergenceApp:
         self.production_date.set(labels[versions.index(self._production_chosen(selection[0]))])
 
     def _choose_production_date(self) -> None:
-        selection = [iid for iid in self.production_tree.selection() if iid in self._production_setups]
+        selection = [iid for iid in self.data_tree.selection() if iid in self._production_setups]
         if len(selection) != 1:
             return
         iid = selection[0]
@@ -961,7 +1068,9 @@ class ConvergenceApp:
         labels = version_labels(versions)
         if self.production_date.get() in labels:
             self._production_choice[iid] = versions[labels.index(self.production_date.get())].key
-            self.production_tree.item(iid, values=self._production_values(iid))
+            values = self._production_values(iid)
+            if self.data_tree.exists(iid):
+                self.data_tree.item(iid, text=values[0], values=values[1:])
 
     def production_versions(self, package: ProductionPackage) -> list[ProductionPackage]:
         """Every registered version of a package's setup, newest first (just the package if unregistered)."""
@@ -975,7 +1084,7 @@ class ConvergenceApp:
         return self._sessions[package.key]
 
     def _selected_production(self) -> list[ProductionPackage]:
-        return [self._production_chosen(iid) for iid in self.production_tree.selection()
+        return [self._production_chosen(iid) for iid in self.data_tree.selection()
                 if iid in self._production_setups]
 
     def new_comparison(self, packages: list[ProductionPackage] | None = None, state: dict | None = None,
@@ -1030,7 +1139,7 @@ class ConvergenceApp:
         ttk.Label(parent, text=label, style="Card.TLabel").grid(row=row, column=0, sticky="w", padx=4, pady=2)
         combo = ttk.Combobox(parent, textvariable=var, state="readonly", width=16)
         combo.grid(row=row, column=1, sticky="ew", padx=4, pady=2)
-        combo.bind("<<ComboboxSelected>>", lambda _e: self.refresh_registry())
+        combo.bind("<<ComboboxSelected>>", lambda _e: self._populate_data())
         filter_tips = {
             "Defect": "Filter registered defect groups by defect name.",
             "Cell": "Filter registered defect groups by supercell size.",
@@ -1074,7 +1183,7 @@ class ConvergenceApp:
         self._column_combo.pack(fill=tk.X, padx=6, pady=4)
         self._tip(self._column_combo, "Choose which scheme column Mode detail and the Details report use.")
         ttk.Label(
-            columns, text="Change columns in the Registry tab: select the group, then Open / update.",
+            columns, text="Change columns in the Data tab: select the group, then Open / update.",
             wraplength=320, style="CardMuted.TLabel",
         ).pack(anchor=tk.W, padx=6, pady=(0, 6))
 
@@ -1131,12 +1240,18 @@ class ConvergenceApp:
             selectmode="browse",
         )
         self.mode_tree.heading("#0", text="Show")
-        self.mode_tree.column("#0", width=58, anchor=tk.W)
+        self.mode_tree.column("#0", width=110, anchor=tk.W)
+        self.mode_tree.tag_configure("group", font=(self.family, 9, "bold"))
+        self._mode_groups_open: set[str] = set()  # symmetry groups of the mode list left open
+        self.mode_tree.bind("<<TreeviewOpen>>", lambda _e: self.root.after_idle(self._mode_groups_changed))
+        self.mode_tree.bind("<<TreeviewClose>>", lambda _e: self.root.after_idle(self._mode_groups_changed))
         for key, title, width in (("mode", "Mode", 55), ("sym", "Sym", 45), ("freq", "freq/meV", 75)):
             self.mode_tree.heading(key, text=title)
             self.mode_tree.column(key, width=width, anchor=tk.W)
         self.mode_tree.pack(fill=tk.X, padx=4, pady=4)
-        self._tip(self.mode_tree, "Click the checkbox to include a mode in Summary; click another cell to open that mode in Mode detail.")
+        self._tip(self.mode_tree, "Modes grouped by symmetry. Click a mode's checkbox to include it in Summary, a "
+                                  "group's checkbox for all of its (filtered) modes, a group's name to open or close "
+                                  "it; click another cell of a mode to open it in Mode detail.")
         self.mode_tree.bind("<ButtonRelease-1>", self._on_mode_click)
         buttons = ttk.Frame(section, style="Card.TFrame")
         buttons.pack(fill=tk.X, padx=4, pady=(0, 4))
@@ -1254,25 +1369,11 @@ class ConvergenceApp:
         self._set_choices(self._combo_cell, self.catalog.cells(), self.filter_cell)
         self._set_choices(self._combo_method, self.catalog.methods(), self.filter_method)
         self._set_choices(self._combo_displacement, self.catalog.displacements(), self.filter_displacement)
-        groups = self._filtered_groups()
-        self.group_tree.delete(*self.group_tree.get_children())
-        self._group_by_row = {}
-        for group in groups:
-            iid = group.key
-            self._group_by_row[iid] = group
-            self.group_tree.insert(
-                "", tk.END, iid=iid,
-                values=(group.defect, group.cell, group.displacement, len(group.schemes)),
-            )
+        self._reload_production()
+        self._populate_data()
         if selected and selected in self._group_by_row:
-            self.group_tree.selection_set(selected)
-            self.group_tree.see(selected)
-        elif groups:
-            first = self.group_tree.get_children()[0]
-            self.group_tree.selection_set(first)
-            self.group_tree.see(first)
-        self._show_group_schemes()
-        self._refresh_production()
+            self.data_tree.selection_set(selected)
+            self.data_tree.see(selected)
         if initial:
             self._sync_filters_from_state()
 
@@ -1296,11 +1397,14 @@ class ConvergenceApp:
                 var.set(value)
         if "latest_only" in filters:
             self.latest_only.set(bool(filters["latest_only"]))
+        if filters.get("kind") in DATA_KINDS:
+            self.filter_kind.set(filters["kind"])
         self.refresh_registry()
 
     def selected_group_key(self) -> str | None:
-        selection = self.group_tree.selection() if hasattr(self, "group_tree") else ()
-        return selection[0] if selection else None
+        selection = self.data_tree.selection() if hasattr(self, "data_tree") else ()
+        conv = [iid for iid in selection if iid in getattr(self, "_group_by_row", {})]
+        return conv[0] if conv else None
 
     def _selected_group(self) -> Group | None:
         key = self.selected_group_key()
@@ -1527,6 +1631,17 @@ class ConvergenceApp:
 
     # -- controls ----------------------------------------------------------
 
+    def set_experiment_dir(self, path: str | Path | None) -> None:
+        """The experimental-data folder of every comparison (None: found next to the packages); remembered."""
+        chosen = str(resolve_path(path)) if path else None
+        if chosen == self.state.experiment_dir:
+            return
+        self.state.experiment_dir = chosen
+        for tab in self.tabs.values():
+            if isinstance(tab, ComparisonTab):
+                tab.reload_experiment()
+        self._save_state()
+
     def _show_view_panel(self, tab: PackTab | ComparisonTab | None) -> None:
         """The View sidebar tab follows the open tab: a comparison's entries, view options and production
         settings (ComparisonTab.controls) while it is open, else the convergence view controls."""
@@ -1622,47 +1737,74 @@ class ConvergenceApp:
         tab = self._pack_tab
         if tab is None:
             return
-        row = self.mode_tree.identify_row(event.y)
+        tree = self.mode_tree
+        row = tree.identify_row(event.y)
         if not row:
             return
-        try:
-            mode = int(row)
-        except ValueError:
+        column = tree.identify_column(event.x)
+        if row.startswith(_MODE_GROUP):
+            element = tree.identify_element(event.x, event.y)
+            if "indicator" in element:
+                return  # the tree itself opens or closes the group
+            if column == "#0" and "image" in element:  # all of the group's (filtered) modes on, or all off
+                modes = {int(iid) for iid in tree.get_children(row)}
+                tab.set_visible(modes, not modes <= tab.visible_modes)
+                self._populate_mode_tree()
+            else:
+                tree.item(row, open=not tree.item(row, "open"))
+                self._mode_groups_changed()
             return
-        column = self.mode_tree.identify_column(event.x)
+        mode = int(row)
         if column == "#0":
             visible = mode in tab.visible_modes
             tab.set_visible({mode}, not visible)
             self._populate_mode_tree()
         else:
             tab.active_mode = mode
-            if self.mode_tree.selection():
-                self.mode_tree.selection_set(row)
+            if tree.selection():
+                tree.selection_set(row)
             tab.nested.select(1)  # selecting a mode opens its Mode-detail view
             tab.render_current()
 
+    def _mode_groups_changed(self) -> None:
+        self._mode_groups_open = {g[len(_MODE_GROUP):] for g in self.mode_tree.get_children()
+                                  if self.mode_tree.item(g, "open")}
+
     def _populate_mode_tree(self) -> None:
+        """The modes grouped by symmetry: a group row (its checkbox: all of its modes in Summary; "n/N on") and a
+        row per mode. Groups stay open or closed as left; the filter text and the active mode open theirs."""
         tab = self._pack_tab
-        self.mode_tree.delete(*self.mode_tree.get_children())
+        tree = self.mode_tree
+        tree.delete(*tree.get_children())
         if tab is None:
             return
         needle = self.mode_filter.get().strip().lower()
+        groups: dict[str, list[int]] = {}
         for mode in sorted(tab.mode_entries):
             entry = tab.mode_entries[mode]
             text = f"{mode} {entry.symmetry or ''} {entry.frequency if entry.frequency is not None else ''}"
             if needle and needle not in text.lower():
                 continue
-            self.mode_tree.insert(
-                "", tk.END, iid=str(mode), text="",
-                image=self._mode_icons[1 if mode in tab.visible_modes else 0],
-                values=(str(mode), entry.symmetry or "", _fmt(entry.frequency, 3)),
-            )
-        if tab.active_mode is not None and self.mode_tree.exists(str(tab.active_mode)):
-            self.mode_tree.selection_set(str(tab.active_mode))
-            self.mode_tree.see(str(tab.active_mode))
+            groups.setdefault(entry.symmetry or "unlabelled", []).append(mode)
+        active = tab.active_mode
+        for name in sorted(groups, key=lambda g: (g == "unlabelled", g)):
+            modes = groups[name]
+            on = sum(m in tab.visible_modes for m in modes)
+            opened = name in self._mode_groups_open or bool(needle) or active in modes
+            group = tree.insert("", tk.END, iid=_MODE_GROUP + name, text=f"{name}  ({on}/{len(modes)} on)",
+                                image=self._mode_icons[1 if on == len(modes) else 0], open=opened, tags=("group",))
+            for mode in modes:
+                entry = tab.mode_entries[mode]
+                tree.insert(group, tk.END, iid=str(mode), text="",
+                            image=self._mode_icons[1 if mode in tab.visible_modes else 0],
+                            values=(str(mode), entry.symmetry or "", _fmt(entry.frequency, 3)))
+        if active is not None and tree.exists(str(active)):
+            tree.selection_set(str(active))
+            tree.see(str(active))
 
     def _visible_in_tree(self) -> set[int]:
-        return {int(iid) for iid in self.mode_tree.get_children()}
+        """The modes the filter keeps, in open and closed groups alike."""
+        return {int(iid) for group in self.mode_tree.get_children() for iid in self.mode_tree.get_children(group)}
 
     def _mode_bulk(self, visible: bool) -> None:
         tab = self._pack_tab
@@ -1838,13 +1980,14 @@ class ConvergenceApp:
             filters={
                 "defect": self.filter_defect.get(), "cell": self.filter_cell.get(),
                 "method": self.filter_method.get(), "displacement": self.filter_displacement.get(),
-                "latest_only": self.latest_only.get(),
+                "latest_only": self.latest_only.get(), "kind": self.filter_kind.get(),
             },
             report_visible=self.report_visible.get(),
             active_tab=self.active_tab.key if self.active_tab is not None else None,
             tabs=tabs,
             last_directory=self.state.last_directory,
             comparisons=comparisons,
+            experiment_dir=self.state.experiment_dir,
         )
         try:
             save_state(self.state)
