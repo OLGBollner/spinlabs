@@ -6,6 +6,7 @@
 #     sh "$SPINLABS_CODE/scripts/cluster/perturbation_runner.sh" first_order|second_order|convergence
 # with the tree's config in the environment: DEFECT, binary, PHONON_PATH, PERT (first and second
 # order), PAIR_MODE (second order), MODES and PERTS (convergence: modes, step sizes run at -p and +p),
+# KEEP_WAVECAR (1: a finished run keeps its WAVECAR, e.g. HSE with vasp_gam; 0 or unset: removed),
 # DISPLACEMENT (normalized | mass_weighted | unweighted; older job scripts give MASS_WEIGHTED
 # 1/0 instead) and SPINLABS_CODE, the snapshot of the spinlabs repo taken when the job was
 # submitted. This file, the structure scripts and the spinlabs package all come from that
@@ -98,6 +99,9 @@ else
   if [ "$ORDER" = "second_order" ]; then
     case ${PAIR_MODE:-} in diag|all) ;; *) fail "PAIR_MODE must be diag or all, got: '${PAIR_MODE:-}'" ;; esac
   fi
+  # Job scripts from before KEEP_WAVECAR do not set it: the WAVECAR is removed, as it always was.
+  KEEP_WAVECAR=${KEEP_WAVECAR:-0}
+  case $KEEP_WAVECAR in 0|1) ;; *) fail "KEEP_WAVECAR must be 1 (keep each finished run's WAVECAR) or 0, got: '$KEEP_WAVECAR'" ;; esac
   # The displacement convention; job scripts from before DISPLACEMENT give MASS_WEIGHTED (1 or unset:
   # mass_weighted, 0: unweighted) and must keep displacing as their runs so far did.
   if [ -z "${DISPLACEMENT+set}" ]; then
@@ -149,6 +153,13 @@ case $DISPLACEMENT in
 esac
 fi
 echo "spinlabs code: $(basename "$SPINLABS_CODE") ($SPINLABS_CODE)"
+if [ "$ORDER" != "ground_state" ] && [ "$DECONT" = 0 ]; then
+  if [ "${KEEP_WAVECAR:-0}" = 1 ]; then
+    echo "finished runs keep their WAVECAR (KEEP_WAVECAR=1); CHGCAR and CHG are removed"
+  else
+    echo "finished runs: WAVECAR, CHGCAR and CHG removed (KEEP_WAVECAR=1 keeps the WAVECAR)"
+  fi
+fi
 if [ "$DECONT" = 1 ] && [ "$ORDER" != "ground_state" ]; then
   echo "full spin decontamination: SCF -> WAVECAR, then ALGO=None ZFS of sublevels $SUBLEVELS (ground state: <defect>/ZFS_full, its own job)"
 fi
@@ -590,8 +601,13 @@ run_one() {
   # is retried, from its own CHGCAR if complete. (A job that ends meanwhile returns above.)
   if [ -f OUTCAR ] && grep -qzP "$ZFS_REGEX_PATTERN" OUTCAR; then
     : > .done
-    echo "$ID: removing excess VASP results (WAVECAR, CHGCAR, CHG)"
-    rm -f WAVECAR CHGCAR CHG
+    if [ "${KEEP_WAVECAR:-0}" = 1 ]; then
+      echo "$ID: removing excess VASP results (CHGCAR, CHG; WAVECAR kept: KEEP_WAVECAR=1)"
+      rm -f CHGCAR CHG
+    else
+      echo "$ID: removing excess VASP results (WAVECAR, CHGCAR, CHG)"
+      rm -f WAVECAR CHGCAR CHG
+    fi
     # Completion, VASP's symmetry handling and the ZFS change's shape; a suspicious run
     # keeps its result but gets a CHECK file for later filtering.
     python "$SCRIPTS/check_run.py" "$HEAD_DIR/$TARGET_DIR" --phonons "$PHONON_PATH" --write-check \

@@ -28,6 +28,9 @@ PERT=${PERT:-<pert_scale>}
 # with Q = PERT (Angstrom*sqrt(amu)); unweighted: Q*e (the first NV_64 trees)
 DISPLACEMENT=${DISPLACEMENT:-<displacement>}
 PAIR_MODE=${PAIR_MODE:-<pair_mode>}
+# 1: keep each finished run's WAVECAR (e.g. HSE with vasp_gam, to restart later runs from it); 0: remove it with
+# CHGCAR and CHG once the run has its ZFS block (the default; full-decont trees always keep theirs)
+KEEP_WAVECAR=${KEEP_WAVECAR:-0}
 SPINLABS_REPO=${SPINLABS_REPO:-<path_to_spinlabs_repo>}
 # ------------------------------------------------------------------------------------------
 
@@ -66,5 +69,5 @@ source activate /cfs/klemming/projects/supr/adaq/obollner/conda-dirs/envs/sim-en
   exit 1
 }
 PYTHONPATH="$SPINLABS_CODE/src${PYTHONPATH:+:$PYTHONPATH}"
-export PYTHONPATH DEFECT binary PHONON_PATH PERT DISPLACEMENT PAIR_MODE SPINLABS_CODE
+export PYTHONPATH DEFECT binary PHONON_PATH PERT DISPLACEMENT PAIR_MODE KEEP_WAVECAR SPINLABS_CODE
 exec sh "$SPINLABS_CODE/$RUNNER" "$ORDER"

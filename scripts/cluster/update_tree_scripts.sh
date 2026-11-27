@@ -46,7 +46,7 @@ find "$@" -path '*/.spinlabs-code' -prune -o -type f \( -name 'run_perturbation_
   awk -v repo="$REPO" -v disp="$DISP" '
     function key(line) {
       if (line ~ /^#SBATCH /) { split(line, f, /[ =]+/); return "S" f[2] }
-      if (match(line, /^(DEFECT|binary|PHONON_PATH|PERT|PERTS|MODES|PAIR_MODE|DISPLACEMENT|MASS_WEIGHTED|SPINLABS_REPO)=/))
+      if (match(line, /^(DEFECT|binary|PHONON_PATH|PERT|PERTS|MODES|PAIR_MODE|DISPLACEMENT|MASS_WEIGHTED|KEEP_WAVECAR|SPINLABS_REPO)=/))
         return substr(line, 1, RLENGTH)
       return ""
     }

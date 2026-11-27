@@ -123,14 +123,16 @@ def test_tree_creation_requires_a_step_and_convergence_modes(tmp_path):
     assert (defect / "convergence_test_AO" / "run_convergence.sh").is_file()
 
 
-def _fake_slurm(tmp_path: Path) -> Path:
-    """srun that writes a complete ZFS block, squeue that reports no jobs."""
+def _fake_slurm(tmp_path: Path, restart_files: bool = False) -> Path:
+    """srun that writes a complete ZFS block (and with ``restart_files`` a WAVECAR and CHGCAR, as VASP does),
+    squeue that reports no jobs."""
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir(exist_ok=True)
     zfs = (" Spin-spin contribution to zero-field splitting tensor (MHz)\n ---\n"
            "      D_xx      D_yy      D_zz      D_xy      D_xz      D_yz\n ---\n"
            "  -1.0  -1.0  2.0  0.0  0.0  0.0\n ---\n")
-    (bin_dir / "srun").write_text(f"#!/bin/sh\nprintf '%s' '{zfs}' > OUTCAR\n")
+    extra = "echo wave > WAVECAR; echo chg > CHGCAR\n" if restart_files else ""
+    (bin_dir / "srun").write_text(f"#!/bin/sh\nprintf '%s' '{zfs}' > OUTCAR\n{extra}")
     (bin_dir / "squeue").write_text("#!/bin/sh\nexit 0\n")
     for f in bin_dir.iterdir():
         f.chmod(0o755)
@@ -149,9 +151,10 @@ def _convergence_folder(tmp_path: Path) -> Path:
     return defect / "convergence_test_AO"
 
 
-def _run_convergence(tmp_path: Path, folder: Path, perts: str, task: int = 0, tasks: int = 1, **extra_env):
+def _run_convergence(tmp_path: Path, folder: Path, perts: str, task: int = 0, tasks: int = 1,
+                     restart_files: bool = False, **extra_env):
     """Run the convergence loop as array task `task` of `tasks` (array job 99), with fake srun/squeue."""
-    env = {**ENV, "PATH": f"{_fake_slurm(tmp_path)}:{ENV['PATH']}", "SPINLABS_CODE": str(REPO), "DEFECT": "SiV_3",
+    env = {**ENV, "PATH": f"{_fake_slurm(tmp_path, restart_files)}:{ENV['PATH']}", "SPINLABS_CODE": str(REPO), "DEFECT": "SiV_3",
            "binary": "/bin/true", "PHONON_PATH": str(folder.parent / "data" / "phonon_data.npz"), "MODES": "2 7",
            "PERTS": perts, "DISPLACEMENT": "normalized", "SLURM_ARRAY_TASK_ID": str(task),
            "SLURM_ARRAY_TASK_COUNT": str(tasks), "SLURM_ARRAY_JOB_ID": "99", **extra_env}
@@ -171,6 +174,42 @@ def test_convergence_runner_runs_each_step_size_at_both_signs(tmp_path, perts):
     assert r.returncode == 0, r.stdout + r.stderr
     assert "steps -0.025 0.025 -0.05 0.05" in r.stdout
     assert _finished(folder) == CONV_RUNS
+
+
+@pytest.mark.parametrize("keep", [None, "0", "1"])
+def test_finished_runs_keep_their_wavecar_only_with_keep_wavecar(tmp_path, keep):
+    """KEEP_WAVECAR=1 (e.g. HSE with vasp_gam) keeps a finished run's WAVECAR; unset or 0 removes it, as before.
+    CHGCAR and CHG go either way."""
+    folder = _convergence_folder(tmp_path)
+    extra = {} if keep is None else {"KEEP_WAVECAR": keep}
+    r = _run_convergence(tmp_path, folder, "0.025 0.05", restart_files=True, **extra)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert _finished(folder) == CONV_RUNS
+    runs = [folder / "runs" / name for name in CONV_RUNS]
+    assert not any((run / "CHGCAR").exists() for run in runs)
+    kept = [(run / "WAVECAR").exists() for run in runs]
+    assert all(kept) if keep == "1" else not any(kept)
+    assert ("finished runs keep their WAVECAR (KEEP_WAVECAR=1)" in r.stdout) == (keep == "1")
+
+
+def test_a_keep_wavecar_typo_stops_the_job_before_any_run(tmp_path):
+    folder = _convergence_folder(tmp_path)
+    r = _run_convergence(tmp_path, folder, "0.025", KEEP_WAVECAR="yes")
+    assert r.returncode != 0 and "KEEP_WAVECAR must be 1" in r.stdout + r.stderr
+    assert not (folder / "runs").exists() or _finished(folder) == []
+
+
+def test_updated_tree_scripts_keep_keep_wavecar(tmp_path):
+    tree = tmp_path / "SiV" / "first_order" / "pert_0.1" / "all_bands"
+    tree.mkdir(parents=True)
+    script = tree / "run_perturbation_first_order.sh"
+    script.write_text("#!/bin/sh\nDEFECT=SiV\nPERT=0.1\nDISPLACEMENT=normalized\nKEEP_WAVECAR=1\n")
+    r = _run("sh", SCRIPTS / "update_tree_scripts.sh", tmp_path / "SiV")
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert _config(script, "KEEP_WAVECAR") == "1" and "export" in script.read_text()
+    fresh = tmp_path / "fresh.sh"  # a script without the line gets the template's default, off
+    fresh.write_text((REPO / "src/spinlabs/vasp/templates/run_perturbation_first_order.sh").read_text())
+    assert _config(fresh, "KEEP_WAVECAR") == "${KEEP_WAVECAR:-0}"
 
 
 def _has_locale(name: str) -> bool:
