@@ -2,45 +2,48 @@
 
 High-level functions build ready-to-run simulation folders; thin scripts in
 scripts/cluster/ wrap them with argparse CLIs.
+
+The names below are loaded on first use (PEP 562), not when the package is imported: the cluster
+runner starts many small ``python -m spinlabs.vasp.<module>`` processes (restart, sublevels, wavecar,
+settings), and each used to load pymatgen's VASP I/O, scipy and the tree builder (~1.5 s) for nothing.
 """
 
-from spinlabs.vasp.init import init_tree, init_zfs
-from spinlabs.vasp.occupations import prepare_relax_to_zfs
-from spinlabs.vasp.structures import (
-    apply_combined_perturbation,
-    apply_perturbation,
-    compare_displacement,
-    compare_displacement_cli,
-    load_phonon_data,
-    load_poscar,
-    write_perturbed_poscar,
-)
-from spinlabs.vasp.trees import (
-    build_perturbation_tree,
-    default_phonon,
-    n_modes_from_phonon,
-    n_tasks_for,
-    read_outcar_time,
-    resolve_sym_phonon,
-    sbatch_time,
-)
+from __future__ import annotations
 
-__all__ = [
-    "apply_combined_perturbation",
-    "apply_perturbation",
-    "compare_displacement",
-    "compare_displacement_cli",
-    "build_perturbation_tree",
-    "default_phonon",
-    "init_tree",
-    "init_zfs",
-    "load_phonon_data",
-    "load_poscar",
-    "n_modes_from_phonon",
-    "n_tasks_for",
-    "prepare_relax_to_zfs",
-    "read_outcar_time",
-    "resolve_sym_phonon",
-    "sbatch_time",
-    "write_perturbed_poscar",
-]
+import importlib
+
+# public name -> the submodule that defines it
+_LAZY = {
+    "init_tree": "init",
+    "init_zfs": "init",
+    "prepare_relax_to_zfs": "occupations",
+    "apply_combined_perturbation": "structures",
+    "apply_perturbation": "structures",
+    "compare_displacement": "structures",
+    "compare_displacement_cli": "structures",
+    "load_phonon_data": "structures",
+    "load_poscar": "structures",
+    "write_perturbed_poscar": "structures",
+    "build_perturbation_tree": "trees",
+    "default_phonon": "trees",
+    "n_modes_from_phonon": "trees",
+    "n_tasks_for": "trees",
+    "read_outcar_time": "trees",
+    "resolve_sym_phonon": "trees",
+    "sbatch_time": "trees",
+}
+
+__all__ = sorted(_LAZY)
+
+
+def __getattr__(name: str):
+    module = _LAZY.get(name)
+    if module is None:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    value = getattr(importlib.import_module(f"{__name__}.{module}"), name)
+    globals()[name] = value  # loaded once
+    return value
+
+
+def __dir__():
+    return sorted(set(globals()) | set(_LAZY))

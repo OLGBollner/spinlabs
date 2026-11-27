@@ -4,13 +4,17 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import itertools
 import re
 
 import numpy as np
-from pymatgen.core.structure import Structure
-from pymatgen.io.vasp.inputs import Poscar
+
+# pymatgen (~1 s to import) only where a structure is read, built or written: the runner's checks
+# import this module for its helpers and must not pay for it
+if TYPE_CHECKING:
+    from pymatgen.core.structure import Structure
 
 from spinlabs.models import PhononSpectrum, displacement_convention
 from spinlabs.parsers import parse_phonon_data
@@ -21,6 +25,8 @@ LOGGER = get_logger(__name__)
 
 def load_poscar(poscar_file: str | Path) -> Structure:
     """Load a VASP POSCAR file into a pymatgen Structure."""
+    from pymatgen.io.vasp.inputs import Poscar
+
     return Poscar.from_file(poscar_file).structure
 
 
@@ -69,6 +75,8 @@ def _outcar_structure(outcar: Path) -> Structure:
     if missing:
         raise ValueError(f"{outcar}: no complete '{missing[0]}' block (unfinished run?)")
     lattice, positions = blocks["direct lattice vectors"], blocks["position of ions in cartesian coordinates"]
+    from pymatgen.core.structure import Structure
+
     return Structure(lattice, species, positions, coords_are_cartesian=True)
 
 
@@ -605,6 +613,8 @@ def write_perturbed_poscar(
     which holds for structures loaded from it with load_poscar.
     """
     if template_poscar is None:
+        from pymatgen.io.vasp.inputs import Poscar
+
         poscar = Poscar(structure)
         poscar.comment = comment
         poscar.write_file(output_file)
@@ -633,6 +643,8 @@ def write_perturbed_poscar(
 
 def spectrum_structure(spectrum: PhononSpectrum) -> Structure:
     """Build a pymatgen Structure from a PhononSpectrum's atom list."""
+    from pymatgen.core.structure import Structure
+
     frac = np.mod(np.asarray(spectrum.atom_frac_coords, dtype=float), 1.0)
     return Structure(
         spectrum.lattice,

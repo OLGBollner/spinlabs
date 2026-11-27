@@ -17,14 +17,16 @@ this seam.
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
-from typing import Any, Optional
+from typing import TYPE_CHECKING, Any, Optional
 
 import numpy as np
 
 
 from spinlabs.models import DefectCentreError, PhononSpectrum, check_original_indices
-from pymatgen.core import Structure
-from pymatgen.symmetry.analyzer import SpacegroupAnalyzer
+# pymatgen (~0.6 s to import) only where a symmetry is detected: the cluster runner's checks import
+# this module through zfs_response, most of them without detecting one
+if TYPE_CHECKING:
+    from pymatgen.core import Structure
 
 from spinlabs.logging_utils import get_logger
 
@@ -107,6 +109,8 @@ class PointGroup:
 
 def detect_point_group(structure: Structure, symprec: float = SYMPREC) -> PointGroup:
     """Detect the point group of a (defect) supercell structure."""
+    from pymatgen.symmetry.analyzer import SpacegroupAnalyzer
+
     try:
         sga = SpacegroupAnalyzer(structure, symprec=symprec)
         symm_ops = sga.get_symmetry_operations()
@@ -126,6 +130,8 @@ def detect_point_group(structure: Structure, symprec: float = SYMPREC) -> PointG
 
 def detect_point_group_from_spectrum(spectrum, symprec: float = SYMPREC) -> PointGroup:
     """Build a pymatgen Structure from a PhononSpectrum and detect its group."""
+    from pymatgen.core import Structure
+
     structure = Structure(
         lattice=spectrum.lattice,
         species=spectrum.atom_symbols,
@@ -366,6 +372,9 @@ def frame_from_structure(spectrum) -> np.ndarray:
     the first of a1, a2, a3 it has a component on. Raises NotImplementedError for a structure
     without a C3 axis and three mirrors.
     """
+    from pymatgen.core import Structure
+    from pymatgen.symmetry.analyzer import SpacegroupAnalyzer
+
     structure = Structure(
         lattice=spectrum.lattice,
         species=spectrum.atom_symbols,

@@ -13,7 +13,6 @@ try:
 except ImportError:
     from yaml import Loader
 
-from pymatgen.core import Structure
 
 from spinlabs.constants import CONSTANTS
 from spinlabs.models import PerturbationEntry, PhononSpectrum, RawZFSData, ZFSTensor, normalize_calc_method
@@ -163,6 +162,8 @@ def parse_phonopy_yaml(yaml_path: str | Path, poscar_path: str | Path | None = N
 
     # Structure data
     struct = None
+    from pymatgen.core import Structure  # here, not at import: pymatgen costs ~0.6 s per process
+
     if poscar_path and Path(poscar_path).is_file():
         struct = Structure.from_file(str(poscar_path))
     else:

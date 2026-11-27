@@ -283,7 +283,10 @@ def test_three_halves_doublet_t1_is_one_over_two_a_plus_b(tmp_path):
 
 # ------------------------------------------------------------------ spin-1 regression against the frozen code
 
-REG_TEMPS = np.arange(1.0, 601.0, 1.0)
+# 1-600 K every 7 K, and the low-temperature end where the direct rate dominates every 1 K: the regression
+# compares the general code with the frozen one value by value, so a 1 K grid over the whole range (600
+# temperatures, rates and three T1 fits each, twice) only made it ~7x slower
+REG_TEMPS = np.unique(np.concatenate([np.arange(1.0, 21.0, 1.0), np.arange(1.0, 601.0, 7.0), [600.0]]))
 REG_REL = 1e-10
 
 
