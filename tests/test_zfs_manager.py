@@ -163,10 +163,23 @@ class TestZFSManager:
             manager._check_symmetry(e_change, ["A1", "Ex"], (5, 6), kind="derivative")
             manager._check_symmetry(a1_change, ["A1", "Ex"], (5, 6), kind="derivative")  # O(q D''') terms
             assert "symmetry mismatch" not in caplog.text
+        with caplog.at_level("DEBUG", logger="spinlabs"):
             manager._check_symmetry(a1_change + e_change, ["A1"], 7, kind="displacement")
             manager._check_symmetry(e_change, ["A1", "A1"], (8, 9), kind="derivative")
-        assert "symmetry mismatch in run folder 8" in caplog.text
-        assert "symmetry mismatch in run folder 9_10: modes A1/A1 allow only A1 in this derivative" in caplog.text
+        # per run folder at DEBUG, naming the data
+        debug = [r.getMessage() for r in caplog.records if r.levelname == "DEBUG"]
+        assert any(m.startswith(f"{manager.data_label}: symmetry mismatch in run folder 8: ") for m in debug)
+        assert any("run folder 9_10: modes A1/A1 allow only A1 in this derivative" in m for m in debug)
+        assert not [r for r in caplog.records if r.levelname == "WARNING"]
+        caplog.clear()
+        manager.source = "pack.npz"
+        with caplog.at_level("WARNING", logger="spinlabs"):
+            manager._report_symmetry("second-order")  # one warning for the pass, naming the data and its package
+            manager._report_symmetry("second-order")  # and then nothing: the pass starts over
+        (warning,) = [r.getMessage() for r in caplog.records]
+        assert warning.startswith(f"{manager.data_label}: symmetry mismatch in 2 of 5 second-order run folders")
+        assert manager.data_label.endswith("(pack.npz)") and "run folders (forbidden share) 8 (" in warning
+        assert ", 9_10 (" in warning
 
     def test_second_order_content_outside_the_exact_product_is_summarised(self, setup_system, caplog):
         manager, _, _ = setup_system

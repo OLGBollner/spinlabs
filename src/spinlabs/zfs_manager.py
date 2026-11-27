@@ -27,6 +27,7 @@ LOGGER = get_logger(__name__)
 # Over-displaced runs give alpha ~ 1 or more; runs whose change cancels the
 # linear response (wrong state or geometry) give alpha ~ -1. Both are excluded.
 INCONSISTENT_ALPHA = 0.5
+SYMMETRY_LIST_MAX = 20  # run folders listed in a symmetry-mismatch warning (all of them at DEBUG, -v)
 # alpha is the remainder relative to the expected change; below this size (Frobenius
 # norm, MHz) the expected change is too small for that ratio to mean anything, so
 # the entry is not judged.
@@ -123,6 +124,11 @@ class ZFSManager:
         self.point_group = response_point_group(spectrum) if spectrum is not None else None
 
         self.raw_data = raw_data
+        # The package or folder the data came from (set by pipeline.coupling_manager): named in the warnings
+        self.source: Optional[str] = None
+        # Symmetry checks of the current pass: (run folder, check) of each mismatch, and how many were judged
+        self._symmetry_mismatches: list[tuple[str, ZFSResponseCheck]] = []
+        self._symmetry_judged = 0
 
         # Defect metadata
         self.defect: Optional[str] = raw_data.defect if raw_data else None
@@ -385,7 +391,7 @@ class ZFSManager:
 
         if dropped:
             LOGGER.warning(
-                f"{len(dropped)} raw mode indices have no partner in the phonon spectrum ({n_phon} modes kept) "
+                f"{self.data_label}: {len(dropped)} raw mode indices have no partner in the phonon spectrum ({n_phon} modes kept) "
                 f"and are skipped: {sorted(set(dropped))[:10]}{'...' if len(set(dropped)) > 10 else ''}; "
                 "their couplings are inherited through degeneracy groups where available"
             )
@@ -429,14 +435,14 @@ class ZFSManager:
         missing = sorted(set(self.first_order) - set(self.first_order_minus))
         if missing:
             LOGGER.warning(
-                f"central differences: {len(missing)} modes have no -Q run, so no diagonal second-order coupling "
+                f"{self.data_label}: central differences: {len(missing)} modes have no -Q run, so no diagonal second-order coupling "
                 "and a forward first-order derivative: "
                 + ", ".join(str(self.first_order[i].get("original_index", i) + 1) for i in missing[:20])
                 + (", ..." if len(missing) > 20 else "")
             )
         extra = sorted(set(self.first_order_minus) - set(self.first_order))
         if extra:
-            LOGGER.warning(f"central differences: {len(extra)} -Q runs without their +Q run are not used")
+            LOGGER.warning(f"{self.data_label}: central differences: {len(extra)} -Q runs without their +Q run are not used")
         return entries
 
     def calculate_first_order_derivatives(self, ipr_thresh: Optional[float] = None):
@@ -523,6 +529,7 @@ class ZFSManager:
                     V_p_m[i] / CONSTANTS["MHz2J"],
                 )
 
+        self._report_symmetry("first-order")
         LOGGER.info(
             f"first-order couplings (nonzero): V_00 {np.sum(V_0_0 > 0)}, V_pm {np.sum(V_p_m > 0)}, "
             f"V_0pm {np.sum(V_0_pm > 0)}"
@@ -711,9 +718,10 @@ class ZFSManager:
                 "expected O(q D''') finite-difference terms, warned about only beyond those"
             )
 
+        self._report_symmetry("second-order")
         if no_first_order:
             LOGGER.warning(
-                f"{len(no_first_order)} second-order entries skipped: a mode has no first-order derivative, so "
+                f"{self.data_label}: {len(no_first_order)} second-order entries skipped: a mode has no first-order derivative, so "
                 "its linear response cannot be removed; run folders "
                 + ", ".join(f"{i + 1}_{j + 1}" for i, j in no_first_order[:20])
                 + (", ..." if len(no_first_order) > 20 else "")
@@ -726,7 +734,8 @@ class ZFSManager:
                 action = "kept"
                 hint = "; check the geometry with compare_displacement.py, --exclude-inconsistent-pairs drops them"
             LOGGER.warning(
-                f"{len(self.inconsistent_pairs)} of {len(self.zfs_tensors_2d)} second-order entries {action}: "
+                f"{self.data_label}: {len(self.inconsistent_pairs)} of {len(self.zfs_tensors_2d)} second-order "
+                f"entries {action}: "
                 f"their ZFS change departs from the one expected from the first-order runs by a multiple of it "
                 f"(|alpha| > {INCONSISTENT_ALPHA}: strongly nonlinear at this Q, or an over-displaced or stale "
                 f"run{hint}); run folders "
@@ -761,14 +770,14 @@ class ZFSManager:
                 reason = f"point group {symbol}"
             if symbol != "3m":
                 LOGGER.warning(
-                    f"mirror projection needs a C3v structure in the phonon spectrum ({reason}); "
+                    f"{self.data_label}: mirror projection needs a C3v structure in the phonon spectrum ({reason}); "
                     "the diagonal second differences (forward and central) are left as they are"
                 )
                 return self._mirror_parity
             try:
                 self._mirror_parity = mirror_parities(self.spectrum)
             except (SymmetryDetectionError, NotImplementedError, ValueError) as exc:
-                LOGGER.warning(f"mirror projection skipped: no mirrors from the structure ({exc})")
+                LOGGER.warning(f"{self.data_label}: mirror projection skipped: no mirrors from the structure ({exc})")
         return self._mirror_parity
 
     def _mirror_project(self, i: int, d2D: np.ndarray) -> np.ndarray:
@@ -838,7 +847,7 @@ class ZFSManager:
         )
         if self.mirror_uncorrected:
             LOGGER.warning(
-                f"mirror projection: {len(self.mirror_uncorrected)} forward E diagonals keep their odd-in-Q error "
+                f"{self.data_label}: mirror projection: {len(self.mirror_uncorrected)} forward E diagonals keep their odd-in-Q error "
                 "(mirror-even, and their odd twin has no forward diagonal run); modes "
                 + ", ".join(str(i + 1) for i in self.mirror_uncorrected[:20])
                 + (", ..." if len(self.mirror_uncorrected) > 20 else "")
@@ -861,7 +870,7 @@ class ZFSManager:
         """
         spectrum = self.spectrum
         if spectrum is None or spectrum.deg_groups is None or spectrum.symmetries is None:
-            LOGGER.warning("degenerate Ex-Ey pairs from symmetry need the phonon spectrum; option ignored")
+            LOGGER.warning(f"{self.data_label}: degenerate Ex-Ey pairs from symmetry need the phonon spectrum; option ignored")
             return
 
         syms = list(spectrum.symmetries)
@@ -919,7 +928,7 @@ class ZFSManager:
         n = V_0_0_2nd.shape[0]
         labels = list(self.spectrum.symmetries) if self.spectrum is not None and self.spectrum.symmetries else []
         if len(labels) != n:
-            LOGGER.warning("off-diagonal couplings from the diagonal need the modes' symmetry labels; option ignored")
+            LOGGER.warning(f"{self.data_label}: off-diagonal couplings from the diagonal need the modes' symmetry labels; option ignored")
             return
         self.n_offdiag_filled, self.n_offdiag_filled_a_x_e, n_kept = fill_offdiag_from_diagonal(
             labels, computed, V_0_0_2nd, V_p_m_2nd, V_0_pm_2nd
@@ -1152,10 +1161,41 @@ class ZFSManager:
         check = verify_zfs_response(
             change / CONSTANTS["MHz2J"], labels, kind=kind, point_group=self.point_group, reference=self.zfs_relaxed
         )
-        if check.problem:
+        self._symmetry_judged += 1
+        if check.problem:  # per folder at DEBUG; one warning per pass (_report_symmetry)
             folder = "_".join(str(k + 1) for k in idx) if isinstance(idx, tuple) else str(idx + 1)
-            LOGGER.warning(f"symmetry mismatch in run folder {folder}: {check.problem}; {check.line}")
+            LOGGER.debug(f"{self.data_label}: symmetry mismatch in run folder {folder}: {check.problem}; {check.line}")
+            self._symmetry_mismatches.append((folder, check))
         return check
+
+    @property
+    def data_label(self) -> str:
+        """What the warnings name: defect, cell, method, step, spin sublevel and the package, e.g.
+        ``NV_512 AO step 0.05 (NV_512_raw_zfs_data_all_bands_12d.npz)``."""
+        parts = [f"{self.defect or '?'}_{self.cell_size}" if self.cell_size else str(self.defect or "?")]
+        if self.calc_method:
+            parts.append(str(self.calc_method))
+        if self.pert_scale is not None:
+            parts.append(f"step {self.pert_scale:g}")
+        sublevel = getattr(self.raw_data, "spin_sublevel", None)
+        if sublevel:
+            parts.append(str(sublevel))
+        label = " ".join(parts)
+        return f"{label} ({self.source})" if self.source else label
+
+    def _report_symmetry(self, order: str) -> None:
+        """One warning for the symmetry mismatches of a pass (first or second order), then start over."""
+        found, judged = self._symmetry_mismatches, self._symmetry_judged
+        self._symmetry_mismatches, self._symmetry_judged = [], 0
+        if not found:
+            return
+        shown = ", ".join(f"{folder} ({check.forbidden:.2f})" for folder, check in found[:SYMMETRY_LIST_MAX])
+        more = f", ... ({len(found) - SYMMETRY_LIST_MAX} more)" if len(found) > SYMMETRY_LIST_MAX else ""
+        LOGGER.warning(
+            f"{self.data_label}: symmetry mismatch in {len(found)} of {judged} {order} run folders: their ZFS change "
+            "has a share its modes' symmetry forbids (wrong state or geometry, or a mislabelled mode if this "
+            f"repeats across runs; -v for each folder's dD); run folders (forbidden share) {shown}{more}"
+        )
 
     def _debug_derivs(self, dD, q, symmetry, idx, V_0_0, V_0_pm, V_p_m):
         max_val = np.max(np.abs(dD))

@@ -466,6 +466,9 @@ def coupling_manager(
     )
     manager = build_manager(raw_data, spectrum, pairs=pairs, displacement=displacement,
                             calc_method=calc_method, **options)
+    sources = raw_zfs_file or sim_folder or raw_zfs_file_2d or raw_zfs_file_1d
+    if isinstance(sources, (str, Path)):
+        manager.source = Path(sources).name  # its warnings name the package (ZFSManager.data_label)
     return manager, ph_path
 
 

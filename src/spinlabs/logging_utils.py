@@ -206,10 +206,10 @@ class ConsoleFormatter(logging.Formatter):
             self.indent = "  "
             rule = "========" if kind == "major" else "=="
             return f"\n{rule} {message} {rule}"
-        if record.levelno >= logging.ERROR:
-            message = f"error: {message}"
-        elif record.levelno >= logging.WARNING:
-            message = f"warning: {message}"
+        if record.levelno >= logging.WARNING:
+            # where it was logged first, as a compiler does (a traceback below stays as it is)
+            prefix = "error" if record.levelno >= logging.ERROR else "warning"
+            message = f"{record.filename}:{record.lineno}: {prefix}: {message}"
         return "\n".join(self.indent + line for line in message.splitlines())
 
 

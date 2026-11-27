@@ -2,6 +2,7 @@
 
 import logging
 import sqlite3
+import sys
 
 import numpy as np
 import pytest
@@ -87,15 +88,15 @@ def test_console_layout_sections_indent_and_prefixes(capsys):
     log.info("before any chapter")
     section(log, "Plot convergence: NV_512 test_all")
     log.info("saved figure: a.png\nsecond line")
-    log.warning("mode 7: fewer than 2 finished runs, skipping")
-    log.error("plot failed")
+    log.warning("mode 7: fewer than 2 finished runs, skipping"); warned = sys._getframe().f_lineno  # noqa: E702
+    log.error("plot failed\ndetail"); failed = sys._getframe().f_lineno  # noqa: E702
     log.debug("hidden at the default level")
     assert capsys.readouterr().out == (
         "before any chapter\n"
         "\n== Plot convergence: NV_512 test_all ==\n"
         "  saved figure: a.png\n  second line\n"
-        "  warning: mode 7: fewer than 2 finished runs, skipping\n"
-        "  error: plot failed\n"
+        f"  test_logging.py:{warned}: warning: mode 7: fewer than 2 finished runs, skipping\n"
+        f"  test_logging.py:{failed}: error: plot failed\n  detail\n"  # where it was logged, first
     )
 
 
