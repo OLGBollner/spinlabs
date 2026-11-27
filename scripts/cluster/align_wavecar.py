@@ -1,55 +1,66 @@
 #!/usr/bin/env python3
-"""align_wavecar.py -- rotate degenerate down-spin orbitals of a VASP WAVECAR onto the up-spin ones.
+"""align_wavecar.py -- rotate the unpaired down-spin orbitals of a VASP WAVECAR onto the up-spin ones.
 
-Standalone: needs only numpy. Works on spin-polarised (ISPIN = 2) WAVECARs of vasp_std, single or
-double precision, any number of k-points (the rotation is done per k-point).
+Standalone: needs only numpy. The same alignment as spinlabs.vasp.wavecar.align_unpaired (what the
+perturbation runner does after every SCF), with --check, --out, --bands and any number of k-points
+(the rotation is done per k-point). Needs a spin-polarised (ISPIN = 2) WAVECAR of vasp_std, single
+or double precision.
+
+vasp_std only
+-------------
+A vasp_gam WAVECAR stores only half of the plane waves (G and -G are tied by psi(-G) = psi(G)^*) and
+carries the same precision tag, so its header looks like a vasp_std one. The overlaps would then
+miss the factor 2 on the G != 0 terms, and a complex rotation of the stored half breaks the
+real-wavefunction condition. The script therefore counts the plane waves of the full ENCUT sphere
+at each k-point from the header's ENCUT and lattice and refuses (exit 1, nothing written) when the
+stored count is not that: about half of it is a vasp_gam file. Rerun the SCF with vasp_std (a
+Gamma-centred 1x1x1 KPOINTS is fine) to align it.
 
 Why
 ---
 For a spin-flip (broken-symmetry) determinant built from a high-spin WAVECAR with ALGO = None, the
 flipped electron moves from up band k to down band k. That is only the same spatial orbital when the
-two spin channels chose the same basis for a degenerate level (for the NV centre the e pair, bands
+two spin channels chose the same basis for the unpaired levels (for the NV centre the e pair, bands
 127/128 in a 64-atom cell). The SCF picks that basis at random in each channel, so e.g. "down 127"
-can be mostly "up 128". This script rotates the down-channel bands of each degenerate level onto the
-up-channel ones. The rotation is unitary within the level, so the SCF state, its density and energy
-are unchanged; only which down orbital carries which band index changes.
+can be mostly "up 128". This holds also when a displacement splits a degenerate level: an E mode
+splits the NV e pair, and the two channels can order the split pair oppositely. The down unpaired
+orbitals are empty in the SCF, so the rotation leaves its state, density and energy unchanged; only
+which down orbital carries which band index changes.
 
 How
 ---
-For the bands B of a level, M_ij = <up_i|down_j> (plane-wave part, each orbital normalised).
+For the bands B of a set, M_ij = <up_i|down_j> (plane-wave part, each orbital normalised).
 With the SVD M = W S V^H, the unitary U = V W^H maximises Re tr(M U); the new down bands are
 down'_j = sum_i U_ij down_i, after which <up_i|down'_j> = W S W^H is Hermitian with the largest
 possible diagonal. Eigenvalues and occupations in the WAVECAR are left as they are.
 
 Which bands
 -----------
-By default, the unpaired bands (occupied up, empty down) are read from the INCAR occupations
-(DOCCUP/DOCCDO, else FERWE/FERDO, run-length form "n*x"), and grouped into degenerate levels by the
-up-channel eigenvalues in the WAVECAR (tolerance --tol). Each level of two or more bands is
-aligned; a single band needs nothing. Or give the bands yourself with --bands (1-based, aligned as
-one set whether degenerate or not).
+By default, the unpaired bands (occupied up, empty down, occupation threshold 0.5) are read from
+the EIGENVAL of the run that wrote the WAVECAR (the one next to it, first k-point), and each run of consecutive unpaired bands
+with two or more members is aligned as one set, degenerate or not; a single band needs nothing. Or
+give the bands yourself with --bands (1-based, aligned as one set).
 
-The script refuses (exit 1, nothing written) when a level is degenerate in the up channel but split
-in the down channel, or when the up and down bands do not span the same space (smallest singular
-value of M below --min-span): then no rotation makes a flip land in the orbital it left.
+The script refuses (exit 1, nothing written) when the up and down bands of a set do not span the
+same space (smallest singular value of M below --min-span): then no rotation makes a flip land in
+the orbital it left.
 
 Usage
 -----
-    python align_wavecar.py RUN_DIR                    # RUN_DIR/WAVECAR in place, bands from RUN_DIR/INCAR
-    python align_wavecar.py WAVECAR --incar INCAR      # explicit files
+    python align_wavecar.py RUN_DIR                    # RUN_DIR/WAVECAR in place, bands from RUN_DIR/EIGENVAL
+    python align_wavecar.py WAVECAR --eigenval EIGENVAL  # explicit files
     python align_wavecar.py RUN_DIR --check            # only report the overlaps, write nothing
     python align_wavecar.py RUN_DIR --out WAVECAR.aligned
-    python align_wavecar.py WAVECAR --bands 127 128    # these bands, no INCAR needed
+    python align_wavecar.py WAVECAR --bands 127 128    # these bands, no EIGENVAL needed
 
 A second run on an aligned WAVECAR changes nothing (rotation 0).
-Overlaps use only the plane-wave part (no PAW augmentation), so aligned levels show |<up|down>|
+Overlaps use only the plane-wave part (no PAW augmentation), so aligned sets show |<up|down>|
 somewhat below 1 (e.g. 0.98); that is not a remaining rotation.
 """
 
 from __future__ import annotations
 
 import argparse
-import re
 import shutil
 import sys
 from pathlib import Path
@@ -57,6 +68,26 @@ from pathlib import Path
 import numpy as np
 
 DTYPES = {45200: np.complex64, 45210: np.complex128}  # rtag -> plane-wave coefficient precision
+HSQDTM = 13.605826 * 0.529177249**2  # hbar^2 / 2 m_e in eV A^2 (VASP's RYTOEV * AUTOA^2)
+SPHERE_TOL = 0.01  # relative slack of the stored plane-wave count against the ENCUT sphere
+
+
+def sphere_count(lattice: np.ndarray, encut: float, kpoint: np.ndarray) -> int:
+    """Plane waves G with hbar^2 |k + G|^2 / 2m < ``encut`` (eV): the full sphere vasp_std stores.
+
+    ``lattice`` rows are the direct lattice vectors (A), ``kpoint`` is in reciprocal-lattice units.
+    """
+    recip = 2 * np.pi * np.linalg.inv(lattice).T  # rows b_i, a_i . b_j = 2 pi delta_ij
+    gmax = np.sqrt(encut / HSQDTM)
+    # |n_i + k_i| = |(k + G) . a_i| / 2 pi <= gmax |a_i| / 2 pi
+    nmax = (gmax * np.linalg.norm(lattice, axis=1) / (2 * np.pi) + np.abs(kpoint)).astype(int) + 1
+    n1, n2 = np.meshgrid(np.arange(-nmax[0], nmax[0] + 1), np.arange(-nmax[1], nmax[1] + 1), indexing="ij")
+    plane = (n1[..., None] + kpoint[0]) * recip[0] + (n2[..., None] + kpoint[1]) * recip[1]
+    count = 0
+    for n3 in range(-nmax[2], nmax[2] + 1):  # one plane at a time keeps large cells cheap
+        q = plane + (n3 + kpoint[2]) * recip[2]
+        count += int(np.count_nonzero(HSQDTM * np.einsum("...i,...i", q, q) < encut))
+    return count
 
 
 # --------------------------------------------------------------------------- #
@@ -77,11 +108,40 @@ class Wavecar:
             if rtag not in DTYPES:
                 raise ValueError(f"{path}: unknown precision tag {rtag} (known: {sorted(DTYPES)})")
             f.seek(recl)
-            nk, nb = np.fromfile(f, dtype=np.float64, count=2).astype(int)
+            rec = np.fromfile(f, dtype=np.float64, count=12)
         if nspin != 2:
             raise ValueError(f"{path}: ISPIN = {nspin}; a spin-polarised (ISPIN = 2) WAVECAR is needed")
-        self.recl, self.nspin, self.rtag, self.nk, self.nb = int(recl), int(nspin), int(rtag), int(nk), int(nb)
+        self.recl, self.nspin, self.rtag = int(recl), int(nspin), int(rtag)
+        self.nk, self.nb = int(rec[0]), int(rec[1])
+        self.encut, self.lattice = float(rec[2]), rec[3:12].reshape(3, 3)
         self.dtype = DTYPES[self.rtag]
+        self.check_full_sphere()
+
+    def check_full_sphere(self) -> None:
+        """ValueError unless every k-point stores the full ENCUT sphere of plane waves (vasp_std).
+
+        vasp_gam stores about half of it under the same precision tag; the overlaps would then miss
+        the factor 2 on G != 0 and a complex rotation would break psi(-G) = psi(G)^*.
+        """
+        for spin in range(self.nspin):
+            for k in range(self.nk):
+                with open(self.path, "rb") as f:
+                    f.seek(self._k_record(spin, k) * self.recl)
+                    rec = np.fromfile(f, dtype=np.float64, count=4)
+                nplw, kpoint = int(rec[0]), rec[1:4]
+                full = sphere_count(self.lattice, self.encut, kpoint)
+                if abs(nplw - full) <= SPHERE_TOL * full:
+                    continue
+                where = f"{self.path}, spin {spin + 1}, k-point {k + 1}: {nplw} plane waves stored"
+                if abs(nplw - (full + 1) / 2) <= SPHERE_TOL * full:
+                    raise ValueError(
+                        f"{where}, half of the {full} in the ENCUT = {self.encut:g} eV sphere: a Gamma-only "
+                        "(vasp_gam) WAVECAR. Only vasp_std WAVECARs can be aligned; rerun the SCF with vasp_std"
+                    )
+                raise ValueError(
+                    f"{where}, but the ENCUT = {self.encut:g} eV sphere holds {full} (vasp_gam would store "
+                    f"{(full + 1) // 2}); not a vasp_std WAVECAR this script can read"
+                )
 
     def _k_record(self, spin: int, k: int) -> int:
         return 2 + spin * self.nk * (self.nb + 1) + k * (self.nb + 1)
@@ -121,53 +181,50 @@ class Wavecar:
 # --------------------------------------------------------------------------- #
 # bands to align
 # --------------------------------------------------------------------------- #
-def _tag(incar: str, tag: str) -> str | None:
-    """Last value of ``tag`` in the INCAR text (VASP semantics), comments stripped."""
-    values = re.findall(rf"^\s*{tag}\s*=\s*(.+?)\s*(?:[!#].*)?$", incar, re.M | re.I)
-    return values[-1] if values else None
+def unpaired_bands(eigenval_path: Path) -> list[int]:
+    """1-based bands occupied (> 0.5) in the up channel and empty in the down channel, at the first k-point.
 
-
-def _expand(value: str) -> list[float]:
-    """'252*1.0 1*0.0 0.5' -> one occupation per band."""
-    occ: list[float] = []
-    for item in value.split():
-        count, star, x = item.partition("*")
-        occ.extend([float(x)] * int(count) if star else [float(item)])
-    return occ
-
-
-def unpaired_bands(incar_path: Path) -> list[int]:
-    """1-based bands occupied in the up channel and empty in the down channel."""
-    text = incar_path.read_text()
-    for up_tag, dn_tag in (("DOCCUP", "DOCCDO"), ("FERWE", "FERDO")):
-        up, dn = _tag(text, up_tag), _tag(text, dn_tag)
-        if up is not None and dn is not None:
-            break
-    else:
-        raise ValueError(f"{incar_path}: no DOCCUP/DOCCDO or FERWE/FERDO occupations")
-    up_occ, dn_occ = _expand(up), _expand(dn)
-    bands = [i + 1 for i, (u, d) in enumerate(zip(up_occ, dn_occ)) if u > 0.5 and d < 0.5]
-    if not bands:
-        raise ValueError(f"{incar_path}: no unpaired band (occupied up, empty down) in {up_tag}/{dn_tag}")
+    EIGENVAL of an ISPIN = 2 run: line 6 holds (NELECT, nk, NBANDS); each k-point block is a blank
+    line, the k-point line, then one line per band (index, eig up, eig down, occ up, occ down).
+    """
+    lines = eigenval_path.read_text().splitlines()
+    try:
+        nk, nbands = (int(x) for x in lines[5].split()[1:3])
+    except (IndexError, ValueError):
+        raise ValueError(f"{eigenval_path}: not an EIGENVAL (no NELECT/nk/NBANDS on line 6)") from None
+    rows = [line.split() for line in lines[7:] if line.strip()][1 : nbands + 1]  # skip the k-point line
+    if len(rows) != nbands or any(len(r) != 5 for r in rows):
+        raise ValueError(f"{eigenval_path}: expected {nbands} band lines of an ISPIN = 2 run at the first k-point")
+    up = [float(r[3]) > 0.5 for r in rows]
+    dn = [float(r[4]) > 0.5 for r in rows]
+    if sum(up) <= sum(dn):
+        raise ValueError(
+            f"{eigenval_path}: {sum(up)} occupied up bands, {sum(dn)} down; the up channel must be the majority"
+        )
+    if any(d and not u for u, d in zip(up, dn)):
+        raise ValueError(f"{eigenval_path}: bands occupied down but empty up; cannot tell which bands are unpaired")
+    bands = [int(r[0]) for r, u, d in zip(rows, up, dn) if u and not d]
+    if nk > 1:
+        print(f"{eigenval_path}: {nk} k-points; unpaired bands taken from the first")
     return bands
 
 
-def degenerate_levels(bands, eig_up: np.ndarray, tol: float) -> list[tuple[int, ...]]:
-    """Consecutive ``bands`` whose up-channel eigenvalues differ by at most ``tol`` eV, as levels."""
-    levels: list[list[int]] = []
+def consecutive_groups(bands) -> list[tuple[int, ...]]:
+    """1-based ``bands`` split into runs of consecutive band indices."""
+    groups: list[list[int]] = []
     for b in sorted(bands):
-        if levels and b == levels[-1][-1] + 1 and abs(eig_up[b - 1] - eig_up[b - 2]) <= tol:
-            levels[-1].append(b)
+        if groups and b == groups[-1][-1] + 1:
+            groups[-1].append(b)
         else:
-            levels.append([b])
-    return [tuple(level) for level in levels]
+            groups.append([b])
+    return [tuple(g) for g in groups]
 
 
 # --------------------------------------------------------------------------- #
 # alignment
 # --------------------------------------------------------------------------- #
 def rotation_angle(m: np.ndarray) -> float | None:
-    """Rotation of a 2-band down level against the up one (deg; 0 aligned, 90 swapped), else None."""
+    """Rotation of a 2-band down set against the up one (deg; 0 aligned, 90 swapped), else None."""
     a = np.abs(m)
     return float(np.degrees(np.arctan2(a[0, 1], a[0, 0]))) if m.shape == (2, 2) else None
 
@@ -181,87 +238,80 @@ def describe(label: str, m: np.ndarray) -> str:
     return text
 
 
-def plan(wc: Wavecar, levels_by_k, min_span: float, tol: float, explicit: bool) -> None:
-    """Check every level before anything is written; ValueError on the first problem."""
+def plan(wc: Wavecar, groups, min_span: float) -> None:
+    """Check every set at every k-point before anything is written; ValueError on the first problem."""
     for k in range(wc.nk):
-        _, eig_dn = wc.k_header(1, k)
-        for level in levels_by_k[k]:
-            if not explicit:
-                spread = float(np.ptp(eig_dn[[b - 1 for b in level]]))
-                if spread > tol:
-                    raise ValueError(
-                        f"k-point {k + 1}, bands {list(level)}: degenerate in the up channel but spread "
-                        f"{spread * 1e3:.2f} meV in the down channel"
-                    )
-            span = np.linalg.svd(wc.overlap(k, level), compute_uv=False)
+        for group in groups:
+            span = np.linalg.svd(wc.overlap(k, group), compute_uv=False)
             if span.min() < min_span:
                 raise ValueError(
-                    f"k-point {k + 1}, bands {list(level)}: the up and down channels do not span the same "
+                    f"k-point {k + 1}, bands {list(group)}: the up and down channels do not span the same "
                     f"level (overlap singular values {np.round(span, 3).tolist()} < {min_span})"
                 )
 
 
-def align(wc: Wavecar, k: int, level) -> tuple[np.ndarray, np.ndarray]:
-    """Rotate the down bands of ``level`` at ``k`` onto the up ones, in place; (overlap before, after)."""
-    m = wc.overlap(k, level)
+def align(wc: Wavecar, k: int, group) -> tuple[np.ndarray, np.ndarray]:
+    """Rotate the down bands of ``group`` at ``k`` onto the up ones, in place; (overlap before, after)."""
+    m = wc.overlap(k, group)
     w, _, vh = np.linalg.svd(m)
     u = vh.conj().T @ w.conj().T
-    down = wc.read(1, k, level)
-    wc.write(1, k, level, u.T @ down)  # row j: sum_i U_ij down_i
-    return m, wc.overlap(k, level)
+    down = wc.read(1, k, group)
+    wc.write(1, k, group, u.T @ down)  # row j: sum_i U_ij down_i
+    return m, wc.overlap(k, group)
 
 
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(
-        description="Rotate degenerate down-spin orbitals of a WAVECAR onto the up-spin ones (see the docstring)."
+        description="Rotate the unpaired down-spin orbitals of a vasp_std WAVECAR onto the up-spin ones "
+        "(see the docstring)."
     )
-    ap.add_argument("path", type=Path, help="run directory (with WAVECAR and INCAR) or a WAVECAR file")
-    ap.add_argument("--incar", type=Path, help="INCAR with the occupations (default: next to the WAVECAR)")
-    ap.add_argument("--bands", type=int, nargs="+", help="1-based bands to align as one set (skips the INCAR)")
+    ap.add_argument("path", type=Path, help="run directory (with WAVECAR and EIGENVAL) or a WAVECAR file")
+    ap.add_argument("--eigenval", type=Path,
+                    help="EIGENVAL with the occupations (default: the one next to the WAVECAR)")
+    ap.add_argument("--bands", type=int, nargs="+", help="1-based bands to align as one set (skips the EIGENVAL)")
     ap.add_argument("--out", type=Path, help="write the aligned WAVECAR here instead of in place")
     ap.add_argument("--check", action="store_true", help="only report the overlaps; write nothing")
-    ap.add_argument("--tol", type=float, default=1e-3, help="degeneracy tolerance in eV (default: 1e-3)")
     ap.add_argument("--min-span", type=float, default=0.9,
-                    help="smallest allowed singular value of <up|down> for a level (default: 0.9)")
+                    help="smallest allowed singular value of <up|down> for a set (default: 0.9)")
     args = ap.parse_args(argv)
 
     wavecar = args.path / "WAVECAR" if args.path.is_dir() else args.path
     try:
         wc = Wavecar(wavecar)
         if args.bands:
-            bands, explicit = sorted(set(args.bands)), True
+            bands = sorted(set(args.bands))
             if bands[0] < 1 or bands[-1] > wc.nb:
                 raise ValueError(f"--bands must lie in 1..{wc.nb}")
-            levels_by_k = [[tuple(bands)] for _ in range(wc.nk)]
+            groups = [tuple(bands)]
             print(f"bands {bands} (given)")
         else:
-            incar = args.incar or wavecar.parent / "INCAR"
-            bands, explicit = unpaired_bands(incar), False
-            levels_by_k = [
-                [lv for lv in degenerate_levels(bands, wc.k_header(0, k)[1], args.tol) if len(lv) > 1]
-                for k in range(wc.nk)
-            ]
-            print(f"unpaired bands {bands} (from {incar}); degenerate levels: "
-                  f"{sorted({lv for levels in levels_by_k for lv in levels}) or 'none'}")
-        plan(wc, levels_by_k, args.min_span, args.tol, explicit)
+            eigenval = args.eigenval or wavecar.parent / "EIGENVAL"
+            bands = unpaired_bands(eigenval)
+            if not bands:
+                raise ValueError(f"{eigenval}: no unpaired band (occupied up, empty down)")
+            if bands[-1] > wc.nb:
+                raise ValueError(f"{eigenval}: unpaired band {bands[-1]} beyond the WAVECAR's {wc.nb} bands")
+            groups = [g for g in consecutive_groups(bands) if len(g) > 1]
+            print(f"unpaired bands {bands} (from {eigenval}); sets to align: {groups or 'none'}")
+        plan(wc, groups, args.min_span)
     except (ValueError, OSError) as error:
         print(f"WAVECAR alignment failed: {error}")
         return 1
 
     if args.check:
         for k in range(wc.nk):
-            for level in levels_by_k[k]:
-                print(describe(f"k-point {k + 1}, bands {list(level)}", wc.overlap(k, level)))
+            for group in groups:
+                print(describe(f"k-point {k + 1}, bands {list(group)}", wc.overlap(k, group)))
         return 0
 
     if args.out is not None:
         shutil.copyfile(wavecar, args.out)
         wc = Wavecar(args.out)
     for k in range(wc.nk):
-        for level in levels_by_k[k]:
-            before, after = align(wc, k, level)
-            print(describe(f"k-point {k + 1}, bands {list(level)}: before", before))
-            print(describe(f"k-point {k + 1}, bands {list(level)}: after ", after))
+        for group in groups:
+            before, after = align(wc, k, group)
+            print(describe(f"k-point {k + 1}, bands {list(group)}: before", before))
+            print(describe(f"k-point {k + 1}, bands {list(group)}: after ", after))
     print(f"written: {wc.path}")
     return 0
 

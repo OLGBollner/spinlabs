@@ -23,18 +23,35 @@ ZFS = (" Spin-spin contribution to zero-field splitting tensor (MHz)\n ---\n"
        "  -1.0  -1.0  2.0  0.0  0.0  0.0\n ---\n")
 
 
-def _scf_wavecar(path: Path, nb: int = 8, nplw: int = 40) -> None:
-    """The WAVECAR the fake SCF writes: one k-point, complex64; the unpaired pair (bands 3, 4 of the
-    INCAR above) degenerate in both channels, the down pair rotated 70 deg against the up pair."""
+SCF_EIG = [0.0, 1.0, 5.0, 5.0, 8.0, 9.0, 10.0, 11.0]
+
+
+def _scf_eigenval(path: Path) -> None:
+    """The EIGENVAL the fake SCF writes: the occupations of the INCAR above (bands 3, 4 unpaired)."""
+    occ_up, occ_dn = [1.0] * 4 + [0.0] * 4, [1.0] * 2 + [0.0] * 6
+    lines = ["    1    1    1    2", "  0.1E+02  0.1E-09  0.1E-09  0.1E-09  0.5E-15", "  1.0E-004", "  CAR ",
+             " unknown system", f"  6  1  {len(SCF_EIG)}", "", "  0.0  0.0  0.0  0.1000000E+01"]
+    lines += [f"  {b + 1}  {e:.6f}  {e:.6f}  {occ_up[b]:.6f}  {occ_dn[b]:.6f}" for b, e in enumerate(SCF_EIG)]
+    path.write_text("\n".join(lines) + "\n")
+
+
+def _scf_wavecar(path: Path, nb: int = 8) -> None:
+    """The WAVECAR the fake SCF writes: one k-point (Gamma), complex64, the full ENCUT sphere of a
+    vasp_std run; the unpaired pair (bands 3, 4 of the INCAR above) degenerate in both channels,
+    the down pair rotated 70 deg against the up pair."""
+    from spinlabs.vasp.wavecar import sphere_count
+
+    encut, lattice = 520.0, 1.5 * np.eye(3)
+    nplw = sphere_count(lattice, encut, np.zeros(3))
     rng = np.random.default_rng(1)
     q, _ = np.linalg.qr(rng.normal(size=(nplw, nb)) + 1j * rng.normal(size=(nplw, nb)))
     up = q.T
     down = up.copy()
     t = np.radians(70.0)
     down[2:4] = np.array([[np.cos(t), np.sin(t)], [-np.sin(t), np.cos(t)]]) @ up[2:4]
-    eig = [0.0, 1.0, 5.0, 5.0, 8.0, 9.0, 10.0, 11.0]
+    eig = SCF_EIG
     recl = nplw * 8 + 8 * (4 + 3 * nb)
-    records = [np.array([recl, 2, 45200], dtype=np.float64), np.array([1, nb, 520.0, *np.eye(3).ravel(), 0.0])]
+    records = [np.array([recl, 2, 45200], dtype=np.float64), np.array([1, nb, encut, *lattice.ravel(), 0.0])]
     for coeffs in (up, down):
         records.append(np.array([nplw, 0, 0, 0, *[x for b in range(nb) for x in (eig[b], 0.0, 1.0)]]))
         records.extend(np.asarray(c, dtype=np.complex64) for c in coeffs)
@@ -52,6 +69,7 @@ def _fake_slurm(tmp_path: Path) -> Path:
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir(exist_ok=True)
     _scf_wavecar(bin_dir / "WAVECAR.scf")
+    _scf_eigenval(bin_dir / "EIGENVAL.scf")
     (bin_dir / "srun").write_text(f"""#!/bin/sh
 here=$(basename "$(pwd)")
 if [ -n "${{END_AT:-}}" ] && [ "$here" = "$END_AT" ]; then
@@ -66,7 +84,7 @@ if grep -q '^ALGO = None' INCAR; then
   echo ' Elapsed time (sec):  10.0' >> OUTCAR
 else
   echo "scf $here" >> "$SRUN_LOG"
-  cp "{bin_dir}/WAVECAR.scf" WAVECAR; echo chg > CHGCAR
+  cp "{bin_dir}/WAVECAR.scf" WAVECAR; cp "{bin_dir}/EIGENVAL.scf" EIGENVAL; echo chg > CHGCAR
   printf 'DAV:   1    -0.1E+02   -0.1E-05\\n   1 F= -10.0\\n' > OSZICAR
   echo ' Elapsed time (sec):  100.0' > OUTCAR
 fi
