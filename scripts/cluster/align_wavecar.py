@@ -318,8 +318,6 @@ def main(argv: list[str] | None = None) -> int:
                 print(describe(f"k-point {k + 1}, bands {list(group)}", wc.overlap(k, group)))
         return 0
 
-    if wc.storage == "gam":
-        print("vasp_gam WAVECAR: real overlaps, real rotation")
     if args.out is not None:
         shutil.copyfile(wavecar, args.out)
         wc = Wavecar(args.out)

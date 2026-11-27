@@ -312,8 +312,6 @@ def main(argv: list[str] | None = None) -> int:
         if len(r.bands) == 2:
             line += f"rotation {r.angle():.1f} -> {r.angle('after'):.2f} deg, "
         line += f"|<up_i|down_i>| {np.round(np.diag(r.before), 3).tolist()} -> {np.round(np.diag(r.after), 3).tolist()}"
-        if r.storage == GAM:
-            line += " (vasp_gam WAVECAR: real overlaps, real rotation)"
         print(line)
     return 0
 

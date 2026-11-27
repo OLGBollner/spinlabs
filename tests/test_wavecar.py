@@ -207,7 +207,6 @@ def test_a_vasp_gam_down_pair_is_aligned_by_a_real_rotation(tmp_path, capsys):
     new = read_bands(run / "WAVECAR", 1, (3, 4))[:, : _half_sphere()]
     assert np.allclose(new, up[2:4], atol=1e-5)  # real orbitals again: the up pair, stored as vasp_gam stores it
     assert main(["align", str(run)]) == 0
-    assert "(vasp_gam WAVECAR: real overlaps, real rotation)" in capsys.readouterr().out
 
 
 def test_a_wavecar_with_another_plane_wave_count_is_refused(tmp_path):
