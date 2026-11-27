@@ -23,6 +23,7 @@ gui = [
 ]
 dev = [
     "pytest",
+    "pytest-xdist",  # pytest -n auto: the suites in parallel (the tests use their own temporary folders)
     "ruff",
 ]
 

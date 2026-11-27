@@ -31,9 +31,9 @@ jobs:
         run: ruff check src tests scripts
 
       - name: Run tests
-        run: pytest -q
+        run: pytest -q -n auto
 
       # The cluster scripts have their own suite, outside testpaths, so plain pytest skips it.
       - name: Run cluster-script tests
         if: success() || failure()  # also when the package tests failed
-        run: pytest -q scripts/tests
+        run: pytest -q -n auto scripts/tests

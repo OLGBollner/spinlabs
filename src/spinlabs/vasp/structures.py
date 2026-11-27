@@ -24,10 +24,55 @@ LOGGER = get_logger(__name__)
 
 
 def load_poscar(poscar_file: str | Path) -> Structure:
-    """Load a VASP POSCAR file into a pymatgen Structure."""
+    """Load a VASP POSCAR file into a pymatgen Structure.
+
+    A plain VASP 5 POSCAR (species line, positive scale, no selective dynamics) is read here and built
+    with pymatgen.core; anything else by pymatgen's Poscar. The two give the same structure; pymatgen.io.vasp
+    costs ~1 s to import (it loads its POTCAR hash tables), paid by every run's structure scripts for nothing.
+    """
+    structure = _read_plain_poscar(Path(poscar_file))
+    if structure is not None:
+        return structure
     from pymatgen.io.vasp.inputs import Poscar
 
     return Poscar.from_file(poscar_file).structure
+
+
+def _read_plain_poscar(path: Path) -> Structure | None:
+    """A plain VASP 5 POSCAR as a Structure, None for any other form (pymatgen's Poscar reads those)."""
+    try:
+        lines = path.read_text().splitlines()
+        scale = float(lines[1].split()[0])
+        if scale <= 0:  # a negative scale is a target volume
+            return None
+        lattice = np.array([[float(x) for x in lines[k].split()[:3]] for k in (2, 3, 4)]) * scale
+        names = lines[5].split()
+        counts = [int(x) for x in lines[6].split()]
+    except (IndexError, ValueError):  # VASP 4 (no species line) or malformed: pymatgen's reader decides
+        return None
+    if not names or len(names) != len(counts) or any(n.lstrip("-").isdigit() for n in names):
+        return None
+    mode_line = 7
+    if lines[mode_line].strip()[:1].lower() == "s":  # selective dynamics: kept by pymatgen as site properties
+        return None
+    mode = lines[mode_line].strip()[:1].lower()
+    if mode not in ("d", "c", "k"):
+        return None
+    from pymatgen.core import Element, Structure
+
+    symbols = []
+    for name, count in zip(names, counts):
+        symbol = re.split(r"[_/.]", name)[0]  # VASP 6 writes e.g. Si_GW/1a2b3c
+        if not Element.is_valid_symbol(symbol):
+            return None
+        symbols.extend([symbol] * count)
+    n = len(symbols)
+    try:
+        coords = np.array([[float(x) for x in lines[mode_line + 1 + i].split()[:3]] for i in range(n)])
+    except (IndexError, ValueError):
+        return None
+    cartesian = mode != "d"
+    return Structure(lattice, symbols, coords * scale if cartesian else coords, coords_are_cartesian=cartesian)
 
 
 def load_structure(path: str | Path) -> tuple[Structure, Path]:
