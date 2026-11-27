@@ -143,8 +143,13 @@ EXPERIMENT_STYLES = {
 EXP_EDGE = "#52514e"
 CHANNEL_MARKERS = {"V00": "o", "Vpm": "s", "V0pm": "^"}
 
-SINGLE, DOUBLE = 3.4, 7.0  # inch
-FONT = 8
+# The paper style (fonts, line widths, column widths, panel letters) lives in spinlabs.figure_style, shared with
+# the figures the GUI exports in paper style
+from spinlabs.figure_style import DOUBLE, FONT, SINGLE, apply_paper_style, panel_letter  # noqa: E402,F401
+from spinlabs.logging_utils import configure_logging  # noqa: E402
+
+# spinlabs' warnings and errors with their prefix and where they were logged (the scripts print their own output)
+configure_logging(quiet=True)
 
 
 def style():
@@ -153,20 +158,8 @@ def style():
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
-    plt.rcParams.update({
-        "font.size": FONT, "axes.labelsize": FONT, "axes.titlesize": FONT, "legend.fontsize": FONT - 1,
-        "xtick.labelsize": FONT - 1, "ytick.labelsize": FONT - 1, "lines.linewidth": 1.3,
-        "axes.linewidth": 0.6, "xtick.major.width": 0.6, "ytick.major.width": 0.6,
-        "legend.frameon": False, "savefig.dpi": 300, "pdf.fonttype": 42,
-        "mathtext.fontset": "dejavusans",
-    })
+    apply_paper_style()
     return plt
-
-
-def panel_letter(ax, k, x=-0.02, y=1.02, **kw):
-    """(a), (b), ... above the top-left corner of the axes."""
-    ax.text(x, y, f"({'abcdefghijklmnop'[k]})", transform=ax.transAxes, ha="right", va="bottom",
-            fontweight="bold", **kw)
 
 
 BAND_ALPHA = 0.18
