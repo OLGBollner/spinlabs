@@ -39,7 +39,9 @@ class ZFSResult:
             "D_MHz": self.tensor.D, "E_MHz": self.tensor.E,
             "principal_values_MHz": [d_xx, d_yy, d_zz], "principal_z_axis": axes[:, 2].tolist(),
             "tensor_MHz": self.tensor.matrix.tolist(),
-            "parts": {name: {"D_MHz": t.D, "E_MHz": t.E, "tensor_MHz": t.matrix.tolist()}
+            "trace_MHz": float(self.tensor.matrix.trace()),
+            "parts": {name: {"D_MHz": t.D, "E_MHz": t.E, "trace_MHz": float(t.matrix.trace()),
+                             "tensor_MHz": t.matrix.tolist()}
                       for name, t in self.parts.items()},
             "notes": list(self.notes),
         }

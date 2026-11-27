@@ -5,9 +5,13 @@ from __future__ import annotations
 import argparse
 import json
 
+import numpy as np
+
 from spinlabs.cli import add_verbosity_args
 from spinlabs.methods import CLI_CHOICES
 from spinlabs.utils import resolve_path
+
+TRACE_TOL_MHZ = 0.05  # VASP prints the tensor to 3 decimals; a traceless one sums to within rounding
 
 
 def build_calc_parser(subparsers) -> None:
@@ -38,11 +42,16 @@ def _run_zfs(args: argparse.Namespace) -> None:
     spin = f", S = {result.spin:g}" if result.spin is not None else ""
     print(f"{result.folder}: {result.method}{spin}")
     for name, part in result.parts.items():
-        print(f"  {name:12s} D = {part.D:10.3f} MHz   E = {part.E:8.3f} MHz")
+        print(f"  {name:12s} D = {part.D:10.3f} MHz   E = {part.E:8.3f} MHz   trace = {np.trace(part.matrix):8.3f} MHz")
     for note in result.notes:
         print(f"  {note}")
     d_xx, d_yy, d_zz = summary["principal_values_MHz"]
-    print(f"ZFS ({result.method}): D = {result.tensor.D:.3f} MHz, E = {result.tensor.E:.3f} MHz")
+    print(f"ZFS ({result.method}): D = {result.tensor.D:.3f} MHz, E = {result.tensor.E:.3f} MHz, "
+          f"trace = {np.trace(result.tensor.matrix):.3f} MHz")
+    worst = max((abs(np.trace(t.matrix)) for t in result.parts.values()), default=0.0)
+    if worst > TRACE_TOL_MHZ:
+        print(f"  warning: an OUTCAR tensor has a trace of {worst:.3f} MHz; VASP's dipolar D is traceless for any "
+              "wavefunction, so its D evaluation itself is off (e.g. a gamma-only build's LDMATRIX)")
     print(f"  principal values (MHz): {d_xx:.3f} {d_yy:.3f} {d_zz:.3f}; z axis "
           + " ".join(f"{c:.4f}" for c in summary["principal_z_axis"]))
     print("  tensor (MHz):")
