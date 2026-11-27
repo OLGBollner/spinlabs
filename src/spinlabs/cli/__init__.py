@@ -21,6 +21,7 @@ def add_verbosity_args(parser: argparse.ArgumentParser) -> None:
 
 
 def build_parser() -> argparse.ArgumentParser:
+    from spinlabs.cli.calc import build_calc_parser
     from spinlabs.cli.init import build_init_parser
     from spinlabs.cli.listing import build_list_parser
     from spinlabs.cli.package import build_package_parser
@@ -53,6 +54,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     init_parser = subparsers.add_parser("init", help="Set up a new defect: its folder tree and ground-state ZFS runs")
     build_init_parser(init_parser.add_subparsers(dest="command", required=True))
+
+    calc_parser = subparsers.add_parser("calc", help="Compute results from VASP output: the ZFS of a run folder")
+    build_calc_parser(calc_parser.add_subparsers(dest="command", required=True))
 
     build_update_parser(subparsers.add_parser("update", help="Set INCAR tags consistently across every run under a folder"))
 
